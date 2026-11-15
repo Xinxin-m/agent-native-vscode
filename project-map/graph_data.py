@@ -158,7 +158,9 @@ class Catalog:
      match=match or (pj.get('assignments',{}).get(k)==view['library_project'] and (not view.get('project_title_pattern') or re.search(view['project_title_pattern'],text,re.I)))
     title=en.get(k,{}).get('title') or m.get('title_seed','')
     if view.get('title_pattern') and re.search(view['title_pattern'],title,re.I) and not re.search(view.get('exclude_titles','(?!)'),title,re.I):match=True
-   else:match=pj.get('assignments',{}).get(k)==project
+   else:
+    from project_review import descendants
+    match=pj.get('assignments',{}).get(k) in descendants(pj.get('projects',[]),project)
    if match:selected.add(k)
   for k in list(selected):
    ancestor=ix[k].get('root_key') or ix[k].get('parent_key')

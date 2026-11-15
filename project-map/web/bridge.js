@@ -15,12 +15,13 @@
  host.copy=async text=>{if(native){send({type:'project-map:copy',text});return}await navigator.clipboard.writeText(text)};
  host.openSession=key=>send({type:'project-map:open-session',key});
  host.external=url=>{if(native)send({type:'project-map:external',url});else window.open(url,'_blank','noopener')};
+ host.setTheme=value=>{document.body.classList.toggle('dark',value==='dark');document.body.dataset.theme=value};
  host.ready=()=>send({type:'project-map:ready'});
  addEventListener('message',e=>{
   if(!native&&(e.source!==parent||e.origin!==parentOrigin||!parentOrigin))return;
   const m=e.data;if(!m||typeof m!=='object')return;
   if(m.type==='project-map:response'&&native){const p=pending.get(String(m.id));if(!p)return;pending.delete(String(m.id));clearTimeout(p.timer);m.error?p.reject(Error(String(m.error))):p.resolve(m.data)}
-  if(m.type==='project-map:theme'&&['dark','light'].includes(m.theme))document.body.classList.toggle('dark',m.theme==='dark');
+  if(m.type==='project-map:theme'&&['dark','light','beige','sage'].includes(m.theme))host.setTheme(m.theme);
   if(m.type==='project-map:visibility')host.visible=m.visible===true;
  });
  if(embedded)document.body.classList.add('embedded');

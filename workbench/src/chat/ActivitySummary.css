@@ -1,0 +1,7 @@
+.activity-summary{display:flex;align-items:center;gap:10px;min-height:24px;margin:0 0 7px;color:var(--muted);font-size:12px;line-height:1.5}
+.activity-summary-status{display:flex;align-items:center;gap:8px;min-width:0;color:var(--ink)}
+.activity-summary-dot{width:7px;height:7px;flex:none;border-radius:50%;background:var(--muted)}
+.activity-summary-dot.is-active{background:var(--accent);animation:activity-breathe 1.6s ease-in-out infinite}
+.activity-summary-meta{color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+@keyframes activity-breathe{50%{opacity:.3}}
+@media(prefers-reduced-motion:reduce){.activity-summary-dot.is-active{animation:none}}

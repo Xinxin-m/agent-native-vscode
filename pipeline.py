@@ -148,8 +148,10 @@ def _run_pass(cfg, reason, full, uncapped, parse_only, keep_missing):
             if not run_stage(log, "enrich.py", ["--children-only"],
                              int(setting(cfg, "index_timeout", 900))):
                 return False
-            return run_stage(log, "workspace_groups.py", [],
-                             int(setting(cfg, "index_timeout", 900)))
+            if not run_stage(log, "workspace_groups.py", [],
+                             int(setting(cfg, "index_timeout", 900))):
+                return False
+            return run_stage(log, "project_review.py", [], 120)
 
         limit = "0" if uncapped else str(setting(cfg, "enrich_limit", 120))
         workers = str(setting(cfg, "enrich_workers", 4))
@@ -158,8 +160,10 @@ def _run_pass(cfg, reason, full, uncapped, parse_only, keep_missing):
                          ["--workers", workers, "--limit", limit], timeout):
             log.write("labelling incomplete; grouping still runs on what exists\n")
 
-        return run_stage(log, "classify.py", [],
+        grouped = run_stage(log, "classify.py", [],
                          int(setting(cfg, "classify_stage_timeout", 1800)))
+        reviewed = run_stage(log, "project_review.py", [], 120)
+        return grouped and reviewed
 
 
 def main():
