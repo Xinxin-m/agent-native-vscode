@@ -52,7 +52,7 @@ function create({vscode,context,openSession,theme=()=> 'dark',api=request}){
  }
  if(vscode.window.registerWebviewPanelSerializer)context.subscriptions.push(vscode.window.registerWebviewPanelSerializer('library.projectMap',{async deserializeWebviewPanel(panel,state){const resource=state?.resource;if(!validId(resource?.project_id)){panel.dispose();return;}await setup(panel,resource.project_id,resource.title)}}));
  context.subscriptions.push({dispose(){for(const p of panels.values())p.dispose();panels.clear()}});
- const setTheme=value=>{if(!['dark','light'].includes(value))return;for(const panel of panels.values())void panel.webview.postMessage({type:'project-map:theme',theme:value})};
+ const setTheme=value=>{if(!['dark','light','beige','sage'].includes(value))return;for(const panel of panels.values())void panel.webview.postMessage({type:'project-map:theme',theme:value})};
  if(vscode.window.onDidChangeActiveColorTheme)context.subscriptions.push(vscode.window.onDidChangeActiveColorTheme(()=>setTheme(theme())));
  return {open,setTheme};
 }

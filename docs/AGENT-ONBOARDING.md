@@ -90,3 +90,21 @@ Connect Claude Code and Codex accounts through Profile > Accounts. Other account
 Offer the VS Code extension only after browser setup works. Build it with `python3 package.py` inside `vscode-library/`, install the printed VSIX, and open Library Chat. Both clients should observe the same existing conversation and broker state without starting a second provider session. Keep unsent drafts client-local.
 
 End with a concise handover: local URL, launch method, discovered history roots, imported counts, grouping mode, verified accounts, selected file roots, map availability, and any skipped setup. Leave real paid messages to the user.
+
+### Keep the project taxonomy current
+
+Every refresh writes a local `data/classification-review.json` without model calls. It reviews already assigned chats as well as unassigned ones: recent or changed conversations, conflicts with private purpose rules, workspace-only seeds and duplicate project names. A zero unassigned count does not establish correct classification.
+
+Have your agent read this report periodically and after starting a new workstream. Inspect each conversation's actual purpose before moving it. Propose dedicated projects, parent groups, merges and archives as the work evolves. Preserve manual placements, including explicit Ungrouped choices. Applications discussed from a research folder can belong to an application project. Folder paths are evidence, not the final taxonomy.
+
+Private `classification_rules` entries in `data/config.json` accept `project_id`, regex lists `any`, `all`, and `exclude`, and a plain-language `reason`. Rule order expresses priority; overlapping destinations are flagged for review. The report never changes assignments. Keep personal rules out of the shared repository. To regenerate the report alone, run `python3 project_review.py`.
+
+If semantic review is useful, ask the user's agent to review a bounded batch of report items, using titles/descriptions first and selected user prompts only when needed. Agree on the provider/model and maximum batch before model calls; no background paid reclassification is scheduled. Apply accepted changes through the project/assignment APIs, then run the report again. Project records may use `parent_id`; parent views include descendant chats without duplicating the underlying assignment. Archiving a completed project remains an explicit decision, never an age-based inference.
+
+## Keep classification useful over time
+
+The pipeline writes a deterministic `data/classification-review.json` after refresh. Inspect recent or changed assigned conversations as well as unclassified chats; being assigned once does not prove the purpose still fits. Check configured `classification_rules`, unresolved workspace seeds, conflicting rules, and possible duplicate project names. The report contains private titles and project decisions and must stay local.
+
+Discuss actual task purpose with the user when needed. Propose a dedicated project, a child project with `parent_id`, a parent group, or a merge when it improves navigation. Keep explicit manual decisions unless the user asks to change them. Parent views aggregate descendant conversations without duplicating chat assignments. A rule match is review evidence, not authorization for a paid classification job or silent reassignment.
+
+Use `python3 project_review.py` to regenerate the report without model calls. Normal pipeline refreshes also regenerate it; this is refresh-triggered review, not a guaranteed wall-clock schedule. An agent can inspect the report during maintenance. Do not install a recurring paid job without the user's instruction.

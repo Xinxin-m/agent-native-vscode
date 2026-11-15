@@ -78,6 +78,10 @@ Fresh installs use deterministic workspace grouping without model calls. Optiona
 
 To refine untouched workspace groups after opting in, run `python3 classify.py --refine-workspaces`. Review your grouping rules and model budget before running it.
 
+Projects can have a parent project. Parent views include their descendant conversations while each chat keeps one assignment. Use child projects for distinct workstreams and parent projects for broader navigation.
+
+After each pipeline refresh, a local classification review checks recent or changed conversations, configured purpose rules, workspace seeds, and possible duplicate project names. It writes `data/classification-review.json` for your agent to inspect. This review makes no model calls and changes no assignments. Ask your agent to review the report periodically and propose new projects, parent groups, merges, or moves. Any optional model classification still follows your explicit labeling setting and budget.
+
 Manual assignments take precedence. Keep your own project names and grouping rules in private configuration; they should never become defaults for another user. The [onboarding guide](docs/AGENT-ONBOARDING.md) explains the fields and migration checks.
 
 ## Workspaces and project graphs

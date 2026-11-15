@@ -20,7 +20,10 @@ def search(data, query):
         raise fs.FileError('invalid_cursor','Invalid search cursor')
     index = fs.read_json(data/'index.json',{})
     config = fs.read_json(data/'config.json',{})
-    assignments = fs.read_json(data/'projects.json',{}).get('assignments',{})
+    project_state = fs.read_json(data/'projects.json',{})
+    assignments = project_state.get('assignments',{})
+    from project_review import descendants
+    project_ids = descendants(project_state.get('projects',[]), query.get('project_id'))
     revision = str((data/'index.json').stat().st_mtime_ns) if (data/'index.json').exists() else '0'
     if not needle:
         return {'ok':True,'results':[],'next_cursor':None,'truncated':False,'revision':revision}
@@ -47,7 +50,7 @@ def search(data, query):
             continue
         if query.get('provider') and query['provider'] != meta.get('source'):
             continue
-        if query.get('project_id') and query['project_id'] != assignments.get(meta.get('root_key') or key):
+        if query.get('project_id') and assignments.get(meta.get('root_key') or key) not in project_ids:
             continue
         if time.monotonic() > deadline or scanned >= 64*1024*1024 or len(rows) >= offset+limit+1:
             truncated = True

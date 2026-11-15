@@ -16,3 +16,6 @@
 .embedded #projects{display:none}
 
 #overflow-hint{position:absolute;bottom:24px;left:50%;transform:translateX(-50%);font-size:10px;color:var(--muted);pointer-events:none}#overflow-hint[hidden]{display:none}@media(max-width:600px){#overflow-hint{bottom:94px;white-space:nowrap}}
+
+body[data-theme=beige]{--bg:#f6f3ec;--panel:#fcfaf5;--ink:#36332d;--muted:#837d71;--line:#e9e3d8;--soft:#efebe3;--accent:#3c6d9e;--tint:#e7edf2;--dot:#b6afa3;color-scheme:light}
+body[data-theme=sage]{--bg:#f4f6f0;--panel:#fbfcf9;--ink:#2e352f;--muted:#748074;--line:#e0e5da;--soft:#ecf0e7;--accent:#3f7254;--tint:#e1ece3;--dot:#a6b29f;color-scheme:light}

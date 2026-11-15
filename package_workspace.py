@@ -11,7 +11,7 @@ import tarfile
 import tempfile
 
 ROOT=Path(__file__).resolve().parent
-MODULES='accounts automation broker classify clis commands conversation_settings doctor enrich file_service host_connector hosts indexer live open_destinations pipeline preview_server projects remote_files remote_sync search_api search_chats server session_lineage session_start_refresh stream usage_history settings_insights workspace_groups'.split()
+MODULES='accounts automation broker classify clis commands conversation_settings doctor enrich file_service host_connector hosts indexer live open_destinations pipeline preview_server projects remote_files remote_sync search_api search_chats server session_lineage session_start_refresh stream usage_history settings_insights workspace_groups project_review'.split()
 EXACT=['README.md','LICENSE','docs/RELEASE.md','.gitignore','web/settings-insights.js','web/settings-insights.css',*(name+'.py' for name in MODULES),'install.sh','run.sh','package_workspace.py','start_project_map.py','data/config.example.json','workbench/package.json','workbench/package-lock.json','workbench/tsconfig.json','workbench/vite.config.ts','workbench/index.html']
 SOURCE_SUFFIXES={'.ts','.tsx','.css','.svg','.d.ts','.json'}
 

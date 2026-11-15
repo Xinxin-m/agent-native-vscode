@@ -6,7 +6,7 @@ import './project-map.css';
 
 export function ProjectMap({resource,panelApi}:{resource:Resource;panelApi:any}){
  const {data,open,preferences}=useWorkbench();const frame=useRef<HTMLIFrameElement>(null);const [ready,setReady]=useState(false),[slow,setSlow]=useState(false),[attempt,setAttempt]=useState(0);
- const theme=preferences.theme==='dark'||(preferences.theme==='system'&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light';
+ const theme=preferences.theme==='system'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):preferences.theme;
  // Theme changes travel over the bridge, retaining the map's camera and panels.
  const [visible,setVisible]=useState(panelApi.isVisible);
  const [initialTheme]=useState(theme);const src=projectMapUrl(resource.projectId!,initialTheme);
