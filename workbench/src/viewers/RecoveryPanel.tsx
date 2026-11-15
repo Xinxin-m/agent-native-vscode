@@ -1,0 +1,8 @@
+import type {Resource} from '../state/types';
+import {restoreDraft,discardDraft,type DocumentState} from './documents';
+import type {FileDraft} from './drafts';
+function download(draft:FileDraft,name:string){const url=URL.createObjectURL(new Blob([draft.text],{type:'text/plain;charset=utf-8'})),a=document.createElement('a');a.href=url;a.download=name+'.recovered';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+export function RecoveryPanel({resource,document:doc}:{resource:Resource;document:DocumentState}){
+ const drafts=doc.recoveries||[];if(!drafts.length&&!doc.recoveryError)return null;
+ return <div className="fv-recovery">{doc.recoveryError&&<p role="alert">{doc.recoveryError}</p>}{drafts.length>0&&<details open><summary>{drafts.length} saved {drafts.length===1?'draft':'drafts'} from other windows or recovery</summary><p>Your current edits remain safe when you restore another draft.</p>{drafts.map(draft=><div className="fv-recovery-row" key={draft.storageKey}><div><strong>{draft.legacy?draft.writer:'Window '+draft.writer.slice(0,8)}</strong><small>{draft.updatedAt?new Date(draft.updatedAt).toLocaleString():'Recovered earlier draft'} · {draft.text.length.toLocaleString()} characters</small><p>{draft.text.slice(0,120)||'(Empty draft)'}</p></div><button onClick={()=>restoreDraft(resource,draft.storageKey)}>Restore draft</button><button onClick={()=>download(draft,doc.file?.name||'file')}>Download</button><button onClick={()=>{if(window.confirm('Discard this saved recovery draft? Other drafts and the original file will stay available.'))discardDraft(resource,draft.storageKey);}}>Discard</button></div>)}</details>}</div>;
+}

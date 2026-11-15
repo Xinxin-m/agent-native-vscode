@@ -1,0 +1,663 @@
+#!/usr/bin/env python3
+"""Authenticated stdio connector and host-aware launch construction.
+
+Install this standalone file on an enrolled execution host. Its private local
+configuration lives at ~/.local/share/chat-library/connector.json, for example:
+  {"host_id":"second-mac","kind":"mac","accounts":[
+    {"id":"codex-default","tool":"codex","config_dir":"~/.codex"}]}
+No credentials, account switching, scheduler calls or TCP listeners are used.
+Launched CLIs inherit CHAT_LIBRARY_MANAGED=1; the cluster SessionStart auto-reap
+hook is separately gated for this marker. Native CLI housekeeping is preserved.
+The remote process execs the selected CLI, preserving transparent stdio.
+"""
+import base64
+import calendar
+import glob
+import hashlib
+import json
+import math
+import os
+import platform
+import re
+import shlex
+import signal
+import shutil
+import subprocess
+import sys
+import time
+
+PROTOCOL = 1
+SSH_OPTIONS = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-o', 'ConnectionAttempts=1',
+               '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=2',
+               '-o', 'StrictHostKeyChecking=yes', '-o', 'SendEnv=-*', '-T']
+SID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$')
+MODEL = re.compile(r'^[A-Za-z0-9._\-\[\]:]{1,160}$')
+PROFILE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$')
+
+
+def _read(path, default):
+    try:
+        with open(os.path.expanduser(path)) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return default
+
+
+def connector_config():
+    return _read('~/.local/share/chat-library/connector.json', {})
+
+
+def validate_remote(host):
+    alias = host.get('execution_alias') or ''
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,160}', alias):
+        raise ValueError('Configure a named SSH execution alias first')
+    if alias in ('cluster', 'example-cluster', 'cluster-via-cluster-dtn', 'cluster-dtn', 'cluster-tmux', 'cluster-dtn-tmux') or alias.startswith('login.'):
+        raise ValueError('The selected SSH alias is not an execution host')
+    path = host.get('connector_path') or ''
+    if not (path.startswith('~/') or path.startswith('/')) or not re.fullmatch(r'[A-Za-z0-9_./~-]+', path) or '..' in path.split('/'):
+        raise ValueError('Configure an absolute connector path on the execution host')
+    return alias, path
+
+
+def ssh_command(host, operation, request=None):
+    alias, path = validate_remote(host)
+    remote_path = '$HOME/' + shlex.quote(path[2:]) if path.startswith('~/') else shlex.quote(path)
+    command = 'python3 ' + remote_path + ' ' + shlex.quote(operation)
+    if request is not None:
+        encoded = base64.urlsafe_b64encode(json.dumps(request, separators=(',', ':')).encode()).decode()
+        command += ' ' + shlex.quote(encoded)
+    return ['ssh', *SSH_OPTIONS, alias, command]
+
+
+def _base_env():
+    try:
+        import clis
+        env = clis.env()
+    except ImportError:
+        env = dict(os.environ)
+        env['PATH'] = os.pathsep.join([os.path.expanduser('~/.local/bin'), '/opt/homebrew/bin', '/usr/local/bin', env.get('PATH', '/usr/bin:/bin')])
+    return env
+
+
+def _local_accounts():
+    try:
+        import accounts
+        return accounts.load()  # read-only; never pick(), which can switch credentials
+    except ImportError:
+        cfg = connector_config()
+        return {'accounts': cfg.get('accounts') or [
+            {'id': 'claude-default', 'tool': 'claude', 'config_dir': '~/.claude'},
+            {'id': 'codex-default', 'tool': 'codex', 'config_dir': '~/.codex'}],
+            'state': {'active': cfg.get('active') or {}, 'global_active': {}}}
+
+
+USAGE_FRESH_S = 600
+
+
+def _model_family(model):
+    value = (model or '').lower()
+    for family in ('opus', 'sonnet', 'haiku', 'fable'):
+        if family in value:
+            return family
+    return value
+
+
+def _quota_status(record, model, now, max_age):
+    """Unknown evidence stays unknown, including stale fallback observations."""
+    if record.get('logged_in') is not True or record.get('error'):
+        return None, 'usage_unavailable'
+    timestamps = [record.get(k) for k in ('fetched_at', 'cached_at', 'rollout_at') if record.get(k) is not None]
+    if not timestamps or any(isinstance(t, bool) or not isinstance(t, (int, float)) or
+                             not math.isfinite(t) or t > now + 60 or now - t > max_age for t in timestamps):
+        return None, 'usage_stale'
+    values = []
+    family = _model_family(model)
+    for window in record.get('windows') or []:
+        kind = str(window.get('kind') or '')
+        scope = window.get('model') or (kind[3:] if kind.startswith('7d_') else '')
+        if scope and family and _model_family(scope) != family:
+            continue
+        if scope and not family:
+            return None, 'model_unknown'
+        value = window.get('percent')
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0 or value > 100:
+            return None, 'usage_unknown'
+        reset = window.get('resets_at')
+        if reset:
+            try:
+                reset_ts = float(reset) if isinstance(reset, (float, int)) else calendar.timegm(time.strptime(reset, '%Y-%m-%dT%H:%M:%SZ'))
+            except (ValueError, TypeError):
+                return None, 'usage_unknown'
+            if reset_ts <= now:
+                return None, 'usage_stale'
+        values.append(value)
+    return (max(values), 'known') if values else (None, 'usage_unknown')
+
+
+def resolve_account(data, tool, model=None, account_id=None, session_account_id=None,
+                    host_id='mac', auto=None, now=None, max_age=USAGE_FRESH_S):
+    """Pure shared launch resolver. Never switches, writes credentials or retries work.
+
+    Explicit and native session ownership is authoritative. Automatic selection
+    requires fresh measured headroom and known eligibility; unknown snapshots
+    retain the configured account instead of claiming spare quota.
+    """
+    if tool not in ('claude', 'codex'):
+        raise ValueError('Unsupported chat tool')
+    if account_id and session_account_id and account_id != session_account_id:
+        raise ValueError('Native resume requires the original account')
+    now = time.time() if now is None else now
+    auto = auto if auto is not None else data.get('auto_switch', {})
+    profiles = [a for a in data.get('accounts', []) if a.get('tool') == tool]
+    active = data.get('state', {}).get('active', {}).get(tool) or tool + '-default'
+    wanted = session_account_id or account_id or active
+    if not isinstance(wanted, str) or not PROFILE.fullmatch(wanted):
+        raise ValueError('Invalid account identifier')
+    rows = []
+    for profile in profiles:
+        rec = data.get('cache', {}).get(profile['id']) or profile.get('usage') or {}
+        models = profile.get('models')
+        eligible = profile.get('eligible') is not False and not profile.get('disabled')
+        if models is not None:
+            eligible = eligible and bool(model) and any(_model_family(m) == _model_family(model) for m in models)
+        percent, status = _quota_status(rec, model, now, max_age)
+        rows.append({'account_id': profile['id'], 'eligible': bool(eligible),
+                     'percent': percent if eligible else None,
+                     'status': status if eligible else 'ineligible'})
+    current = next((row for row in rows if row['account_id'] == wanted), None)
+    if current is None:
+        raise ValueError('Selected account is not configured on this host')
+    if not current['eligible']:
+        raise ValueError('Selected account is not eligible for the requested model')
+    reason = 'session_binding' if session_account_id else 'explicit_account' if account_id else 'configured_account'
+    selected = wanted
+    if not account_id and not session_account_id and auto.get('enabled', True) and auto.get('mode') != 'off':
+        try:
+            threshold = float(auto.get('threshold', 90))
+        except (TypeError, ValueError):
+            threshold = 90
+        if not math.isfinite(threshold) or not 0 < threshold <= 100:
+            threshold = 90
+        if current['percent'] is None:
+            reason = current['status']
+        elif current['percent'] >= threshold:
+            alternatives = [r for r in rows if r['eligible'] and r['percent'] is not None and r['percent'] < threshold]
+            if alternatives:
+                selected = min(alternatives, key=lambda r: (r['percent'], r['account_id']))['account_id']
+                reason = 'more_model_headroom'
+            else:
+                reason = 'no_known_headroom'
+    return {'account_id': selected, 'previous_account_id': active, 'host_id': host_id,
+            'provider': tool, 'model': model or None, 'reason': reason,
+            'changed': selected != active, 'at': now, 'candidates': rows}
+
+
+def _profile_directory(data, profile):
+    wanted, tool = profile['id'], profile['tool']
+    global_active = data.get('state', {}).get('global_active', {}).get(tool)
+    if wanted.endswith('-default') and global_active and wanted != global_active:
+        raise ValueError('Default account is stashed; restore it explicitly before launching')
+    directory = ('~/.claude' if tool == 'claude' else '~/.codex') if global_active == wanted else profile.get('config_dir')
+    if not directory:
+        raise ValueError('Selected account has no local configuration directory')
+    directory = os.path.realpath(os.path.expanduser(directory))
+    if not os.path.isdir(directory):
+        raise ValueError('Selected account configuration directory is missing on this host')
+    return directory
+
+
+def resolve_local_account(tool, account_id=None, model=None, session_id=None, cwd=None):
+    data = _local_accounts()
+    bound = None
+    if session_id:
+        matches = []
+        for profile in data.get('accounts', []):
+            if profile.get('tool') != tool:
+                continue
+            try:
+                directory = _profile_directory(data, profile)
+            except ValueError:
+                continue
+            if _session_exists(tool, directory, session_id, cwd):
+                matches.append(profile['id'])
+        if tool == 'codex' and matches:
+            # Shared session-directory symlinks establish presence, not ownership.
+            # The native transcript creator must match this profile's auth identity.
+            creators=set()
+            profile_identities={}
+            for profile in data.get('accounts', []):
+                if profile.get('id') not in matches:continue
+                directory=_profile_directory(data,profile)
+                for path in glob.glob(os.path.join(directory,'sessions','*','*','*','rollout-*-'+session_id+'.jsonl')):
+                    try:
+                        with open(path) as handle:meta=json.loads(handle.readline()).get('payload',{})
+                        if (meta.get('id') or meta.get('session_id'))==session_id and os.path.realpath(meta.get('cwd') or '')==cwd and meta.get('creator_account_id'):
+                            creators.add(meta['creator_account_id'])
+                    except (OSError,ValueError,TypeError):continue
+                auth=_read(os.path.join(directory,'auth.json'),{})
+                tokens=auth.get('tokens') or {}
+                profile_identities[profile['id']]=tokens.get('account_id')
+            if len(creators)>1:raise ValueError('Native session ownership conflicts across profile transcripts')
+            if creators:
+                creator=next(iter(creators))
+                matches=[profile_id for profile_id in matches if profile_identities.get(profile_id)==creator]
+        if account_id:
+            if account_id not in matches:
+                raise ValueError('Session does not exist in the selected host, account and workspace')
+            bound = account_id
+        elif len(matches) == 1:
+            bound = matches[0]
+        else:
+            raise ValueError('Session account is missing or ambiguous; choose its original account')
+    try:
+        import accounts
+        auto = accounts._auto_cfg()
+    except ImportError:
+        auto = connector_config().get('auto_switch', {})
+    # Profiles without a usable home cannot be automatic alternatives.
+    data = dict(data, accounts=[dict(p) for p in data.get('accounts', [])])
+    for profile in data['accounts']:
+        try:
+            _profile_directory(data, profile)
+        except ValueError:
+            profile['eligible'] = False
+    return resolve_account(data, tool, model, account_id, bound, auto=auto)
+
+
+def local_profile(tool, account_id=None):
+    data = _local_accounts()
+    wanted = account_id or data.get('state', {}).get('active', {}).get(tool) or tool + '-default'
+    if not isinstance(wanted, str) or not PROFILE.fullmatch(wanted):
+        raise ValueError('Invalid account identifier')
+    profile = next((a for a in data.get('accounts', []) if a.get('id') == wanted and a.get('tool') == tool), None)
+    if not profile:
+        raise ValueError('Selected account is not configured on this host')
+    config_dir = _profile_directory(data, profile)
+    env = _base_env()
+    env.pop('CLAUDE_CONFIG_DIR', None)
+    env.pop('CODEX_HOME', None)
+    env['CHAT_LIBRARY_MANAGED'] = '1'
+    # Claude's native Keychain service depends on whether this variable is set,
+    # even when its explicit value is the default directory. Preserve the
+    # default invocation for the host-wide account. Custom homes stay explicit.
+    if tool != 'claude' or config_dir != os.path.realpath(os.path.expanduser('~/.claude')):
+        env['CLAUDE_CONFIG_DIR' if tool == 'claude' else 'CODEX_HOME'] = config_dir
+    return wanted, config_dir, env
+
+
+def validate_request(tool, cwd, session_id, model, effort, protocol):
+    if tool not in ('claude', 'codex'):
+        raise ValueError('Unsupported chat tool')
+    if not isinstance(cwd, str) or not cwd.startswith('/') or '\x00' in cwd:
+        raise ValueError('Choose an absolute workspace path on the execution host')
+    if session_id and (not isinstance(session_id, str) or not SID.fullmatch(session_id)):
+        raise ValueError('Invalid session identity')
+    if model and (not isinstance(model, str) or not MODEL.fullmatch(model)):
+        raise ValueError('Invalid model identifier')
+    efforts = {'low', 'medium', 'high', 'xhigh', 'max'} if tool == 'claude' else {'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'}
+    if effort and effort not in efforts:
+        raise ValueError('Unsupported effort for the selected tool')
+    if protocol not in ('exec', 'app-server', 'claude-stream') or (protocol == 'app-server' and tool != 'codex') or (protocol == 'claude-stream' and tool != 'claude'):
+        raise ValueError('Protocol does not match the selected chat tool')
+
+
+def _session_exists(tool, config_dir, session_id, cwd):
+    if not session_id:
+        return True
+    if tool == 'claude':
+        slug = re.sub(r'[^A-Za-z0-9]', '-', cwd)
+        return os.path.isfile(os.path.join(config_dir, 'projects', slug, session_id + '.jsonl'))
+    for path in glob.glob(os.path.join(config_dir, 'sessions', '*', '*', '*', 'rollout-*-' + session_id + '.jsonl')):
+        try:
+            with open(path) as fh:
+                meta = json.loads(fh.readline()).get('payload', {})
+            if (meta.get('id') or meta.get('session_id')) == session_id and os.path.realpath(meta.get('cwd') or '') == cwd:
+                return True
+        except (OSError, ValueError, TypeError):
+            continue
+    return False
+
+
+def _running_processes():
+    """Bounded own-UID process roster on this host; never scans a shared registry."""
+    try:
+        result = subprocess.run(['ps', '-axo', 'pid=,uid=,lstart=,comm='], capture_output=True,
+                                text=True, timeout=5, env=dict(os.environ, LC_ALL='C'))
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ValueError('Cannot verify native session activity on this host') from exc
+    if result.returncode:
+        raise ValueError('Cannot verify native session activity on this host')
+    pids = {}
+    for line in result.stdout.splitlines():
+        parts = line.split(None, 7)
+        if len(parts) != 8 or not parts[0].isdigit() or not parts[1].isdigit() or int(parts[1]) != os.getuid():
+            continue
+        try:
+            started = time.mktime(time.strptime(' '.join(parts[2:7]), '%a %b %d %H:%M:%S %Y'))
+        except ValueError:
+            continue
+        pids[int(parts[0])] = (os.path.basename(parts[7]), started)
+    return pids
+
+
+def _record_start(record):
+    try:
+        return calendar.timegm(time.strptime(' '.join(record['procStart'].split()), '%a %b %d %H:%M:%S %Y'))
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+
+
+def _record_on_this_host(record):
+    domain = record.get('pidDomain') or ''
+    if sys.platform.startswith('linux') and ':' in domain:
+        try:
+            with open('/etc/machine-id') as fh:
+                machine = fh.read().strip()
+            if machine and machine not in domain:
+                return False
+        except OSError:
+            pass
+    return True
+
+
+def assert_session_not_running(config_dir, session_id):
+    """Refuse an exact busy/ambiguous Claude registration; permit explicit idle.
+
+    This is a resume guard, never a process-control operation. It only opens
+    registry files corresponding to this host's currently running Claude PIDs.
+    Missing process-start evidence cannot establish a safe concurrent resume.
+    """
+    for pid, (command, started) in _running_processes().items():
+        if command != 'claude':
+            continue
+        record = _read(os.path.join(config_dir, 'sessions', str(pid) + '.json'), {})
+        if record.get('pid') != pid or record.get('sessionId') != session_id or not _record_on_this_host(record):
+            continue
+        record_start = _record_start(record)
+        if record_start is None:
+            raise ValueError('Native session activity is ambiguous; return to its original client first')
+        if record_start != started:
+            continue  # stale PID registration, not a match to the current process
+        if record.get('status') != 'idle':
+            raise ValueError('This conversation is busy in its original client; finish or interrupt it there first')
+
+
+def local_launch(tool, cwd, account_id=None, session_id=None, model=None, effort=None, protocol='exec', images=None):
+    validate_request(tool, cwd, session_id, model, effort, protocol)
+    cwd = os.path.realpath(cwd)
+    if not os.path.isdir(cwd):
+        raise ValueError('Workspace does not exist on the selected host')
+    selection = resolve_local_account(tool, account_id, model, session_id, cwd)
+    account_id, config_dir, env = local_profile(tool, selection['account_id'])
+    if not _session_exists(tool, config_dir, session_id, cwd):
+        raise ValueError('Session does not exist in the selected host, account and workspace')
+    if tool == 'claude' and session_id:
+        assert_session_not_running(config_dir, session_id)
+    try:
+        import clis
+        executable = clis.cli(tool)
+    except ImportError:
+        executable = shutil.which(tool, path=env['PATH']) or ''
+    if not executable or not os.path.isfile(executable) or not os.access(executable, os.X_OK):
+        raise ValueError('Selected CLI is not installed on this host')
+    if protocol == 'app-server':
+        argv = [executable, 'app-server', '--listen', 'stdio://']
+    elif tool == 'claude':
+        argv = [executable, '-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages']
+        if protocol == 'claude-stream':
+            argv += ['--input-format', 'stream-json', '--permission-prompt-tool', 'stdio', '--permission-prompts', 'host']
+        if session_id:
+            argv += ['--resume', session_id]
+        if model:
+            argv += ['--model', model]
+        if effort:
+            argv += ['--effort', effort]
+    else:
+        argv = [executable, 'exec'] + (['resume', session_id] if session_id else []) + ['--json', '--skip-git-repo-check']
+        if model:
+            argv += ['-m', model]
+        if effort:
+            argv += ['-c', 'model_reasoning_effort=' + json.dumps(effort)]
+        for path in images or []:
+            if not os.path.isfile(path):
+                raise ValueError('Attachment is missing on the selected host')
+            argv += ['--image', path]
+        argv += ['-']
+    return {'argv': argv, 'cwd': cwd, 'env': env, 'host_id': 'mac', 'execution_cwd': cwd,
+            'transport': 'local', 'account_id': account_id, 'account_selection': selection}
+
+
+def build_cli_launch(host_id, tool, cwd, account_id=None, session_id=None, model=None, effort=None, protocol='exec', images=None):
+    """Build a Popen-compatible launch; never execute, SSH, or export credentials.
+
+    Remote availability is granted only by a fresh explicit hosts.probe_host().
+    Remote cwd/session/profile validation repeats inside the authenticated helper
+    before exec; failures arrive on stderr with exit status 2, without launching.
+    """
+    import hosts
+    host = hosts.get_host(host_id)
+    validate_request(tool, cwd, session_id, model, effort, protocol)
+    if host.get('transport') == 'local':
+        return local_launch(tool, cwd, account_id, session_id, model, effort, protocol, images)
+    if not host.get('can_execute') or not host.get('machine_id'):
+        raise ValueError('Execution host is offline, unconfigured or needs an explicit probe')
+    if images:
+        raise ValueError('Remote attachments require staging; choose a local chat or remove the attachment')
+    if session_id and not account_id:
+        raise ValueError('Remote resume requires its original account binding')
+    routing = {'accounts': host.get('accounts', []),
+               'state': {'active': host.get('active_accounts') or {}}, 'cache': {}}
+    selection = resolve_account(routing, tool, model, account_id,
+                                account_id if session_id else None, host_id=host_id,
+                                auto=host.get('auto_switch'))
+    wanted = selection['account_id']
+    request = dict(host_id=host_id, machine_id=host['machine_id'], job_id=host.get('job_id'),
+                   tool=tool, cwd=cwd, account_id=wanted, session_id=session_id, model=model,
+                   effort=effort, protocol=protocol)
+    return {'argv': ssh_command(host, 'run', request), 'cwd': None, 'env': None,
+            'host_id': host_id, 'execution_cwd': cwd, 'transport': 'ssh', 'account_id': wanted, 'account_selection': selection}
+
+
+def machine_identity():
+    machine = ''
+    if sys.platform.startswith('linux'):
+        try:
+            with open('/etc/machine-id') as fh:
+                machine = fh.read().strip()
+        except OSError:
+            pass
+    if not machine:
+        machine = platform.node()
+    return hashlib.sha256((machine + ':' + str(os.getuid())).encode()).hexdigest()
+
+
+def execution_identity(cfg):
+    hostname = platform.node()
+    job_id = None
+    if cfg.get('kind') == 'slurm':
+        if not re.fullmatch(r'node-\d+', hostname):
+            raise ValueError('Cluster connector must execute on an allocated compute node')
+        try:
+            with open('/proc/self/cgroup') as fh:
+                match = re.search(r'(?:^|/)job_(\d+)(?:/|\s|$)', fh.read())
+            job_id = match.group(1) if match else None
+        except OSError:
+            pass
+        if not job_id:
+            raise ValueError('Cluster connector is outside a Slurm job cgroup')
+    return {'host_id': cfg.get('host_id'), 'machine_id': machine_identity(), 'hostname': hostname, 'job_id': job_id}
+
+
+def stop_process_identity(pid):
+    """Kernel identity for Linux pidfd controls; unsupported hosts fail closed."""
+    if not sys.platform.startswith('linux') or not hasattr(os, 'pidfd_open') or not hasattr(signal, 'pidfd_send_signal'):
+        raise ValueError('This host needs Linux pidfd support for remote stopping')
+    if type(pid) is not int or pid <= 1:
+        raise ValueError('Invalid agent PID')
+    root = '/proc/' + str(pid)
+    try:
+        owner = os.stat(root).st_uid
+        with open(root + '/stat') as fh:
+            stat = fh.read().rsplit(')', 1)[1].split()
+        with open('/proc/sys/kernel/random/boot_id') as fh:
+            boot = fh.read().strip()
+        executable = os.readlink(root + '/exe')
+        with open(root + '/cgroup') as fh:
+            cgroup = fh.read()
+    except FileNotFoundError as exc:
+        raise ProcessLookupError('Agent process is gone') from exc
+    if owner != os.getuid() or not boot:
+        raise ValueError('Agent process owner or boot identity does not match')
+    return {'pid': pid, 'uid': owner, 'start_ticks': stat[19], 'boot_id': boot,
+            'executable': executable, 'cgroup': cgroup}
+
+
+def validate_stop_request(request):
+    cfg = connector_config()
+    current_host = execution_identity(cfg)
+    if any(request.get(k) != current_host.get(k) for k in ('host_id', 'machine_id', 'job_id')):
+        raise ValueError('Execution host or allocation changed; refresh sessions')
+    row = request.get('session') or {}
+    pid = row.get('pid')
+    current = stop_process_identity(pid)
+    if current != row.get('identity'):
+        raise ValueError('Agent process identity changed')
+    if cfg.get('kind') == 'slurm' and not re.search(r'(?:^|/)job_' + re.escape(str(current_host['job_id'])) + r'(?:/|\s|$)', current['cgroup']):
+        raise ValueError('Agent is outside the verified allocation')
+    roster = _running_processes()
+    command, started = roster.get(pid, ('', None))
+    record = _read(os.path.expanduser('~/.claude/sessions/' + str(pid) + '.json'), {})
+    if command != 'claude' or record.get('pid') != pid or not _record_on_this_host(record) or _record_start(record) != started:
+        raise ValueError('Claude process registration cannot be verified')
+    if not row.get('session_id') or record.get('sessionId') != row['session_id'] or not row.get('cwd') or os.path.realpath(record.get('cwd') or '') != os.path.realpath(row['cwd']):
+        raise ValueError('Claude session or workspace changed')
+    policy = request.get('policy')
+    if policy is not None:
+        if policy.get('basis') == 'idle':
+            since = (record.get('updatedAt') or 0) / 1000
+            if record.get('status') != 'idle' or not since:
+                raise ValueError('Agent is no longer idle')
+        elif policy.get('basis') == 'age':
+            since = started
+        else:
+            raise ValueError('Invalid automatic stop basis')
+        hours = policy.get('hours')
+        if isinstance(hours, bool) or not isinstance(hours, (int, float)) or not 1 <= hours <= 8760 or time.time() - since <= hours * 3600:
+            raise ValueError('Agent no longer meets the automatic stop threshold')
+    return row, current
+
+
+def stop_remote_session(request):
+    row, identity = validate_stop_request(request)
+    fd = os.pidfd_open(row['pid'])
+    try:
+        # pidfd pins the actual process, so PID reuse cannot redirect SIGTERM.
+        validate_stop_request(request)
+        signal.pidfd_send_signal(fd, signal.SIGTERM)
+    finally:
+        os.close(fd)
+    return {'ok': True, 'id': row['id'], 'state': 'stop_requested'}
+
+
+def remote_stop_status(request):
+    current_host = execution_identity(connector_config())
+    if any(request.get(k) != current_host.get(k) for k in ('host_id', 'machine_id', 'job_id')):
+        raise ValueError('Execution host or allocation changed; cannot verify exit')
+    row = request.get('session') or {}
+    try:
+        identity = stop_process_identity(row.get('pid'))
+    except ProcessLookupError:
+        identity = None
+    return {'state': 'stopped' if identity != row.get('identity') else 'stop_requested'}
+
+
+def inventory():
+    cfg = connector_config()
+    if not cfg.get('host_id'):
+        raise ValueError('Enroll this connector with a host_id first')
+    identity = execution_identity(cfg)
+    accounts = []
+    for profile in _local_accounts().get('accounts', []):
+        if profile.get('tool') in ('claude', 'codex'):
+            try:
+                local_profile(profile['tool'], profile.get('id'))
+                row = {'id': profile['id'], 'tool': profile['tool'], 'label': profile.get('label') or profile['id']}
+                for key in ('eligible', 'disabled', 'models'):
+                    if key in profile:
+                        row[key] = profile[key]
+                cache = _local_accounts().get('cache', {}).get(profile['id']) or profile.get('usage') or {}
+                row.update({key:cache[key] for key in ('email','plan','logged_in') if key in cache})
+                row['usage'] = {k: cache[k] for k in ('logged_in', 'windows', 'fetched_at', 'cached_at', 'rollout_at', 'error') if k in cache}
+                accounts.append(row)
+            except ValueError:
+                continue
+    sessions = []
+    # Bounded, local-only roster. Never invokes squeue/srun or scans other nodes.
+    pids = _running_processes()
+    for pid, (command, started) in pids.items():
+        if command != 'claude':
+            continue
+        record = _read(os.path.expanduser('~/.claude/sessions/' + str(pid) + '.json'), {})
+        if record.get('pid') != pid or not record.get('sessionId') or not _record_on_this_host(record):
+            continue
+        if _record_start(record) != started:
+            continue
+        process = None
+        reason = ''
+        try:
+            process = stop_process_identity(pid)
+            validate_stop_request(dict(identity, session={'pid': pid, 'identity': process, 'session_id': record['sessionId'], 'cwd': record.get('cwd')}))
+        except (ValueError, OSError) as exc:
+            process, reason = None, str(exc)
+        sessions.append({'id': cfg['host_id'] + ':' + str(pid), 'pid': pid, 'tool': 'claude',
+                         'session_id': record['sessionId'], 'cwd': record.get('cwd') or '',
+                         'status': record.get('status') or '?', 'name': record.get('name') or 'claude',
+                         'host': identity['hostname'], 'node': cfg['host_id'], 'alive': True,
+                         'observed_at': time.time(), 'last_act_ts': (record.get('updatedAt') or 0) / 1000 or None,
+                         'identity': process, 'execution_identity': identity, 'started_at': started,
+                         'stop_allowed': process is not None, 'stop_reason': reason})
+    for pid, (command, started) in pids.items():
+        if command == 'codex':
+            sessions.append({'id': cfg['host_id'] + ':' + str(pid), 'pid': pid, 'tool': 'codex',
+                             'session_id': '', 'cwd': '', 'status': '?', 'name': 'codex',
+                             'host': identity['hostname'], 'node': cfg['host_id'], 'alive': True,
+                             'observed_at': time.time(), 'last_act_ts': None, 'stop_allowed': False,
+                             'stop_reason': 'Remote Codex session association is ambiguous'})
+    try:
+        from commands import command_catalog
+        catalogs = {provider: command_catalog(provider)['commands'] for provider in ('claude', 'codex')}
+    except ImportError:
+        catalogs = {}
+    return dict(identity, protocol=PROTOCOL, capabilities=['run', 'inventory', 'stop'], accounts=accounts, sessions=sessions, commands=catalogs,
+                active_accounts=_local_accounts().get('state', {}).get('active', {}))
+
+
+def main():
+    try:
+        operation = sys.argv[1] if len(sys.argv) > 1 else ''
+        if operation == 'inventory':
+            signal.alarm(15)  # remote-side bound, including a dropped SSH client
+            print(json.dumps(inventory()))
+            signal.alarm(0)
+            return
+        if operation not in ('run', 'stop', 'stop-status') or len(sys.argv) != 3 or len(sys.argv[2]) > 32768:
+            raise ValueError('Expected inventory or run request')
+        request = json.loads(base64.urlsafe_b64decode(sys.argv[2]))
+        if operation in ('stop', 'stop-status'):
+            signal.alarm(15)
+            print(json.dumps(stop_remote_session(request) if operation == 'stop' else remote_stop_status(request)))
+            signal.alarm(0)
+            return
+        current = execution_identity(connector_config())
+        if not current.get('host_id') or any(request.get(k) != current.get(k) for k in ('host_id', 'machine_id', 'job_id')):
+            raise ValueError('Execution host or allocation changed; probe it again')
+        launch = local_launch(**{k: request.get(k) for k in ('tool', 'cwd', 'account_id', 'session_id', 'model', 'effort', 'protocol')})
+        os.chdir(launch['cwd'])
+        os.execve(launch['argv'][0], launch['argv'], launch['env'])
+    except (ValueError, OSError, TypeError, KeyError) as exc:
+        print('Connector: ' + str(exc), file=sys.stderr)
+        raise SystemExit(2)
+
+
+if __name__ == '__main__':
+    main()

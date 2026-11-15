@@ -1,0 +1,13 @@
+/* Leave a usable native whole-pane drag surface between tabs and controls. */
+.dockview-theme-workbench .dv-void-container{min-width:28px;cursor:grab}
+.dockview-theme-workbench .dv-void-container:active{cursor:grabbing}
+.workspace-web-page{display:flex;flex-direction:column;height:100%;min-height:0}
+.workspace-web-page iframe{flex:1;width:100%;border:0;background:white}
+.workspace-web-address{display:flex;align-items:center;gap:12px;padding:8px 14px;border-bottom:1px solid var(--line);font-size:12px;color:var(--muted)}
+.workspace-web-address span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.workspace-web-address button{white-space:nowrap;padding:4px 8px}
+.workbench-tab{position:relative}
+.workbench-tab.is-running:after{content:"";position:absolute;bottom:0;left:0;width:35%;height:2px;pointer-events:none;background:linear-gradient(90deg,transparent,#729cc8,transparent);animation:workspace-tab-running 2.2s ease-in-out infinite}
+.chat-activity-dot{width:5px;height:5px;flex-shrink:0;border-radius:50%;background:#6094c7;box-shadow:0 0 0 2px color-mix(in srgb,#6094c7 10%,transparent)}
+@keyframes workspace-tab-running{0%{transform:translateX(-100%);opacity:0}25%{opacity:.7}75%{opacity:.7}100%{transform:translateX(300%);opacity:0}}
+@media(prefers-reduced-motion:reduce){.workbench-tab.is-running:after{animation:none;left:25%;opacity:.6}}
