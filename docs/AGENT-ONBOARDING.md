@@ -2,9 +2,9 @@
 
 Give your agent this instruction:
 
-> Read README.md and this guide, then set up Workspace on my computer. Find my Claude and Codex installations, index my existing chats without paid model calls, help me sign into each account, choose my working folders, and open the finished workspace. Preserve my existing settings and data. Tell me what still needs my input.
+> Read the repository README.md and this guide, then set up Workspace on my computer. Find my Claude and Codex installations, index my existing chats without paid model calls, help me sign into each account, choose my working folders, and open the finished workspace. Preserve my existing settings and data. Tell me what still needs my input.
 
-Use this guide when an agent installs this project on another person's computer. Each installation keeps that person's transcripts, accounts, projects, and drafts locally. Start with a clean source checkout or the prepared share archive. Preserve any existing `data/` directory and provider configuration.
+Use this guide when an agent installs this project on another person's computer. Each installation keeps that person's transcripts, accounts, projects, and drafts locally. Start with a clean source checkout or the prepared share archive. Preserve any existing `app/data/` directory and provider configuration.
 
 ## Requirements
 
@@ -13,7 +13,7 @@ Use this guide when an agent installs this project on another person's computer.
 - Claude Code, Codex, or both, installed and signed in as that user. Viewing existing transcripts and launching agents are separate capabilities.
 - Node.js and npm only when rebuilding the frontend. The share archive includes the built client in `web/workbench/`. For source builds, use a Node version supported by the checked-in frontend dependencies and preserve `workbench/package-lock.json`.
 
-Work from the directory containing `server.py`, `pipeline.py`, and `run.sh`. Check the interpreter and available provider CLIs without sending a prompt:
+For backend commands below, work from `app/`, the directory containing `server.py`, `pipeline.py`, and the runtime `run.sh`. The repository root launchers also work from any current directory. Check the interpreter and available provider CLIs without sending a prompt:
 
 ```sh
 python3 --version
@@ -65,7 +65,7 @@ npm ci
 npm run build
 ```
 
-Return to the project root before running server commands. `python3 doctor.py` reports configuration and indexing problems. Read its proposed fixes before using `--fix`, which can install hooks or rebuild an index.
+Return to `app/` before running server commands. `python3 doctor.py` reports configuration and indexing problems. Read its proposed fixes before using `--fix`, which can install hooks or rebuild an index.
 
 ## Verify and hand over
 
@@ -93,7 +93,9 @@ End with a concise handover: local URL, launch method, discovered history roots,
 
 ### Keep the project taxonomy current
 
-Every refresh writes a local `data/classification-review.json` without model calls. It reviews already assigned chats as well as unassigned ones: recent or changed conversations, conflicts with private purpose rules, workspace-only seeds and duplicate project names. A zero unassigned count does not establish correct classification.
+Every refresh writes a local `data/classification-review.json` without model calls. It reviews already assigned chats as well as unassigned ones: recent or changed conversations, conflicts with private purpose rules, workspace-only seeds and duplicate project names. Structural suggestions flag empty project shells, single-child parents, and projects whose direct conversations are all archived. A zero unassigned count does not establish correct classification.
+
+Keep the project list flat unless independent workstreams justify nesting. Archive completed conversations individually when the larger project remains active. This review runs after refreshes, without a wall-clock schedule.
 
 Have your agent read this report periodically and after starting a new workstream. Inspect each conversation's actual purpose before moving it. Propose dedicated projects, parent groups, merges and archives as the work evolves. Preserve manual placements, including explicit Ungrouped choices. Applications discussed from a research folder can belong to an application project. Folder paths are evidence, not the final taxonomy.
 
@@ -101,10 +103,16 @@ Private `classification_rules` entries in `data/config.json` accept `project_id`
 
 If semantic review is useful, ask the user's agent to review a bounded batch of report items, using titles/descriptions first and selected user prompts only when needed. Agree on the provider/model and maximum batch before model calls; no background paid reclassification is scheduled. Apply accepted changes through the project/assignment APIs, then run the report again. Project records may use `parent_id`; parent views include descendant chats without duplicating the underlying assignment. Archiving a completed project remains an explicit decision, never an age-based inference.
 
-## Keep classification useful over time
+## Upgrading from the flat layout
 
-The pipeline writes a deterministic `data/classification-review.json` after refresh. Inspect recent or changed assigned conversations as well as unclassified chats; being assigned once does not prove the purpose still fits. Check configured `classification_rules`, unresolved workspace seeds, conflicting rules, and possible duplicate project names. The report contains private titles and project decisions and must stay local.
+Older releases kept Python modules and private `data/` at the repository root. Current releases keep runtime files and private state in `app/`. Root launchers refuse to proceed while legacy private data remains, so an upgrade cannot silently start an empty library.
 
-Discuss actual task purpose with the user when needed. Propose a dedicated project, a child project with `parent_id`, a parent group, or a merge when it improves navigation. Keep explicit manual decisions unless the user asks to change them. Parent views aggregate descendant conversations without duplicating chat assignments. A rule match is review evidence, not authorization for a paid classification job or silent reassignment.
+Have your agent perform this migration during an idle maintenance window:
 
-Use `python3 project_review.py` to regenerate the report without model calls. Normal pipeline refreshes also regenerate it; this is refresh-triggered review, not a guaranteed wall-clock schedule. An agent can inspect the report during maintenance. Do not install a recurring paid job without the user's instruction.
+1. Before updating, save the previous commit and back up private `data/` and installed hook/service configuration outside the checkout. Inspect the old service's `/api/runs` and execution journals. Wait for active provider runs to finish. Preserve unsent drafts and unsaved documents.
+2. Stop the old Library service and graph companion only after confirming no active work. Update the checkout. Do not run the old and new services simultaneously against shared data.
+3. Move legacy root `data/` into `app/data/`, preserving every private file. The packaged `app/data/config.example.json` is only a template. If `app/data/` already contains user state, stop and reconcile backups rather than replacing either tree. Keep the old backup until verification passes.
+4. Inspect Claude/Codex hooks, launchd/systemd units, agent skills, and VS Code extension settings for absolute paths to the old root Python entry points. Remove only this installation's obsolete hook entries and update them to `app/session_start_refresh.py`. Re-run root `./install.sh --no-refresh` (add `--service` if previously enabled) to register the current paths. Remove the old service registration before installing its replacement; preserve unrelated hooks and services.
+5. Start the new service with `./run.sh`. Confirm curated projects, accounts, history, drafts, graph access, and the extension endpoint before re-enabling automatic refresh. Retain the backup for rollback. Do not overwrite current state with an older snapshot if new work has begun.
+
+A fresh installation needs no migration. Direct commands in this guide run from `app/`; root launchers are the supported entry points.
