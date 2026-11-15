@@ -76,7 +76,7 @@ A workspace directory is a useful first grouping signal. It is also common to di
 
 Fresh installs use deterministic workspace grouping without model calls. Optional AI labeling can improve titles, keywords, and topic grouping across folders. Set `enable_model_labeling` to `true` in your private configuration only after choosing the model and budget with your agent. The pipeline uses a lower-cost model for labels and bounded batches for topic classification. Calls go through the configured provider CLI and use that provider's allowance.
 
-To refine untouched workspace groups after opting in, run `python3 classify.py --refine-workspaces`. Review the suggested grouping and model budget first.
+To refine untouched workspace groups after opting in, run `python3 classify.py --refine-workspaces`. Review your grouping rules and model budget before running it.
 
 Manual assignments take precedence. Keep your own project names and grouping rules in private configuration; they should never become defaults for another user. The [onboarding guide](docs/AGENT-ONBOARDING.md) explains the fields and migration checks.
 

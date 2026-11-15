@@ -1,3 +1,4 @@
+import {composerModels} from './modelCatalog';
 import nativeCommands from './nativeCommands.json';
 import {commandCatalog,commandName,matchingCommands,slashQuery,type SlashCommand} from './slashCommands';
 import {SlashPicker} from './SlashPicker';
@@ -83,7 +84,7 @@ export function Conversation({resource}:{resource:Resource}){
  const submitted=submittedMessages(turns,state.sent,run.run,run.events,state.steering);
  const title=resource.title||known.title||chat?.title_seed||'New conversation';
  const visibleTurns=search.trim()?turns.filter((t:any)=>String(t.text||'').toLowerCase().includes(search.toLowerCase())):turns;
- const modelOptions=(wb.data?.compose_options?.[state.provider]?.models||[]).map((model:any)=>state.provider==='claude'&&/^(?:opus|sonnet|haiku|fable)(?:\[1m\])?$/.test(model.id)?{...model,label:model.id.replace(/\[1m\]$/,'').replace(/^./,(c:string)=>c.toUpperCase())+(model.id.endsWith('[1m]')?' (1M context)':'')+' (CLI alias)'}:model);
+ const modelOptions=composerModels(state.provider,wb.data?.compose_options?.[state.provider]?.models||[]);
  const modelDef=modelOptions.find((m:any)=>m.id===state.model),efforts=modelDef?.efforts||wb.data?.compose_options?.[state.provider]?.efforts||['low','medium','high'];
  const selectedHost=wb.hosts.find((h:any)=>(h.id||h.host_id)===state.host_id);
  const accounts=(selectedHost?.transport==='ssh'?selectedHost.accounts||[]:wb.accounts).filter((a:any)=>(a.tool||a.provider)===state.provider);
