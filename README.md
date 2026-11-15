@@ -1,8 +1,17 @@
 # Library Workspace
 
-Your Claude Code and Codex conversations, projects, files, and running agents in one local workspace. Search old conversations, continue them in your browser or VS Code, and keep your history on your computer.
+**The flexibility of VS Code, your Claude Code and Codex accounts, and a workspace you can make your own.**
 
-Library uses your installed provider CLIs and their accounts. A single local backend coordinates its clients, so accepted messages and run state are shared between the browser and the Library Chat extension.
+Library brings your agents, conversations, projects, and files into one local workspace. Keep several projects open in a single window, work across chat and file tabs, and arrange the interface around the way you build.
+
+- **All your Claude Code and Codex accounts together.** Connect profiles, choose an account, and check its available quota and reset times.
+- **Active work and history, organized by project.** Follow running sessions, search earlier decisions, and continue conversations without losing their context.
+- **Multiple workspaces in one window.** Keep chats, editors, documents, and project maps side by side in tabs and split panes.
+- **A UI you can shape.** Rearrange panes and tune colors, text size, spacing, and reading width to suit your work.
+
+One shared local backend connects the browser workspace and Library Chat inside VS Code. Your installed Claude Code and Codex CLIs execute the work; your history stays on your computer.
+
+The full desktop direction combines a customized Code-OSS editor with these Library capabilities. This repository ships the browser workspace and a VS Code extension today. Automatic project tab groups are part of that direction; the current release provides project classification and manually arranged tabs and panes.
 
 ## Start with your agent
 
@@ -30,7 +39,7 @@ The browser workspace has the broadest feature set. The optional VS Code extensi
 | Runtime | Python 3.11+, macOS or Linux, and a browser |
 | History | Local Claude Code or Codex transcript files; authentication is unnecessary just to read them |
 | Execution | The corresponding provider CLI, signed in, with access to the conversation's working folder |
-| Frontend development | Node.js compatible with `workbench/package.json` dependencies and npm |
+| Frontend development | Node.js compatible with `app/workbench/package.json` dependencies and npm |
 | VS Code client | Desktop VS Code 1.85+ and the optional local extension |
 
 Python serves the bundled browser client using its standard library. Node is only needed for frontend development. Windows is not currently supported by the POSIX execution and file services.
@@ -45,7 +54,7 @@ Clone the shared repository, then install:
 git clone https://github.com/Xinxin-m/library-workspace.git
 cd library-workspace
 ./install.sh --no-refresh
-python3 pipeline.py --parse-only
+python3 app/pipeline.py --parse-only
 ./run.sh
 ```
 
@@ -54,9 +63,9 @@ Visit **http://127.0.0.1:8744/workbench**. The installer creates private configu
 For a first launch without changing provider hooks or installing a skill:
 
 ```sh
-mkdir -p data
-cp -n data/config.example.json data/config.json
-python3 pipeline.py --parse-only
+mkdir -p app/data
+cp -n app/data/config.example.json app/data/config.json
+python3 app/pipeline.py --parse-only
 ./run.sh
 ```
 
@@ -76,17 +85,17 @@ A workspace directory is a useful first grouping signal. It is also common to di
 
 Fresh installs use deterministic workspace grouping without model calls. Optional AI labeling can improve titles, keywords, and topic grouping across folders. Set `enable_model_labeling` to `true` in your private configuration only after choosing the model and budget with your agent. The pipeline uses a lower-cost model for labels and bounded batches for topic classification. Calls go through the configured provider CLI and use that provider's allowance.
 
-To refine untouched workspace groups after opting in, run `python3 classify.py --refine-workspaces`. Review your grouping rules and model budget before running it.
+To refine untouched workspace groups after opting in, run `python3 app/classify.py --refine-workspaces`. Review your grouping rules and model budget before running it.
 
-Projects can have a parent project. Parent views include their descendant conversations while each chat keeps one assignment. Use child projects for distinct workstreams and parent projects for broader navigation.
+Start with a flat project list. Keep related work in one project when separate folders add navigation without helping you act. Archive completed conversations individually while ongoing work stays visible. Parent projects remain available when distinct workstreams justify them.
 
-After each pipeline refresh, a local classification review checks recent or changed conversations, configured purpose rules, workspace seeds, and possible duplicate project names. It writes `data/classification-review.json` for your agent to inspect. This review makes no model calls and changes no assignments. Ask your agent to review the report periodically and propose new projects, parent groups, merges, or moves. Any optional model classification still follows your explicit labeling setting and budget.
+After each pipeline refresh, a local classification review checks recent or changed conversations, configured purpose rules, workspace seeds, and possible duplicate project names. It writes `app/data/classification-review.json` for your agent to inspect. This review makes no model calls and changes no assignments. The report also checks structural issues: empty project shells, one-child parents, and groups containing only archived work. Ask your agent to review it during normal maintenance and propose the smallest useful change: merge overlapping folders, split genuinely independent work, or archive completed work. Reuse accepted decisions as durable purpose rules so later refreshes preserve them. Any optional model classification still follows your explicit labeling setting and budget.
 
 Manual assignments take precedence. Keep your own project names and grouping rules in private configuration; they should never become defaults for another user. The [onboarding guide](docs/AGENT-ONBOARDING.md) explains the fields and migration checks.
 
 ## Workspaces and project graphs
 
-The browser workspace supports mixed chat/file tabs and split panes. Project maps use the included read-only companion in `project-map/` on loopback port 53962. `./run.sh` starts or reuses it. For a service installation that starts the backend directly, run `python3 start_project_map.py` if the map is unavailable. Graphs show conversations, explicit agent relationships, and recorded inputs and outputs.
+The browser workspace supports mixed chat/file tabs and split panes. Project maps use the included read-only companion in `app/project-map/` on loopback port 53962. `./run.sh` starts or reuses it. For a service installation that starts the backend directly, run `python3 app/start_project_map.py` if the map is unavailable. Graphs show conversations, explicit agent relationships, and recorded inputs and outputs.
 
 A general editable task dependency graph and arbitrary third-party account integrations remain future work. Conversation lineage is shown only when explicit evidence links a parent and child; a shared directory or similar title does not prove a dependency.
 
@@ -95,31 +104,31 @@ A general editable task dependency graph and arbitrary third-party account integ
 Keep the Library server running, then build the local extension:
 
 ```sh
-cd vscode-library
+cd app/vscode-library
 python3 package.py
 ```
 
-Install the printed VSIX through **Extensions: Install from VSIX**, then run **Library: Open Chat** from the Command Palette. Both clients connect to the same loopback service. Configure `library.endpoint` if you use another port. See the [extension guide](vscode-library/README.md) for client limits and shared-session behavior.
+Install the printed VSIX through **Extensions: Install from VSIX**, then run **Library: Open Chat** from the Command Palette. Both clients connect to the same loopback service. Configure `library.endpoint` if you use another port. See the [extension guide](app/vscode-library/README.md) for client limits and shared-session behavior.
 
 The extension is a local VSIX, not a Marketplace publication or a full Code-OSS fork.
 
 ## Configuration and private data
 
-`data/config.example.json` is the portable template. Your `data/config.json` controls transcript roots, exclusions, port, model labeling, and project rules. Default histories are:
+`app/data/config.example.json` is the portable template. Your `app/data/config.json` controls transcript roots, exclusions, port, model labeling, and project rules. Default histories are:
 
 - Claude Code: `~/.claude/projects/`
 - Codex: `~/.codex/sessions/`, with optional names from `~/.codex/session_index.jsonl`
 
 Paths support `~` and environment variables. Viewing an imported conversation and resuming it have different requirements: resume also needs the original provider, account, host, and working directory.
 
-Everything generated under `data/` is private and ignored by Git. This includes conversation text, titles, projects, account profiles, configuration, broker journals, logs, and file-access grants. Browser storage holds drafts and layouts; back it up separately when migrating machines.
+Everything generated under `app/data/` is private and ignored by Git. This includes conversation text, titles, projects, account profiles, configuration, broker journals, logs, and file-access grants. Browser storage holds drafts and layouts; back it up separately when migrating machines.
 
 ## Maintain and troubleshoot
 
 ```sh
-python3 doctor.py                 # diagnose configuration and indexing
-python3 pipeline.py --parse-only  # import changed transcripts without models
-python3 pipeline.py               # refresh under your configured labeling policy
+python3 app/doctor.py                 # diagnose configuration and indexing
+python3 app/pipeline.py --parse-only  # import changed transcripts without models
+python3 app/pipeline.py               # refresh under your configured labeling policy
 ```
 
 If history is missing, check the transcript roots and exclusions before changing anything. A chat normally needs a user message and a real assistant answer; `min_answer_msgs: 0` includes unanswered chats. If a service cannot find a CLI, set `claude_bin` or `codex_bin` in private configuration. If sign-in remains incomplete, finish provider login and check again.
@@ -129,14 +138,16 @@ Before restarting a running backend, inspect `/api/runs` and the broker journals
 ## Develop and share
 
 ```sh
-cd workbench
+cd app/workbench
 npm ci
 npm run build
 ```
 
 The repository includes the browser build, so a fresh user can run Python directly. Rebuild after frontend edits. Development tests and release QA use fixtures rather than real paid messages.
 
-`python3 package_workspace.py` creates an allowlisted source-and-assets archive with a file inventory, hashes, privacy scan, and dependency notices. It excludes private data, installed dependencies, old build hashes, browser captures, and local reports. Read the inventory before sharing. See [repository layout and release checks](docs/RELEASE.md).
+`python3 scripts/package_workspace.py` creates an allowlisted source-and-assets archive with a file inventory, hashes, privacy scan, and dependency notices. It excludes private data, installed dependencies, old build hashes, browser captures, and local reports. Read the inventory before sharing. See [repository layout and release checks](docs/RELEASE.md).
+
+The root keeps the entry points and project overview; `app/` contains the runnable application, and `docs/` contains setup and maintenance guides. See the directory map in the release guide before adding a new file.
 
 Feel free to customize the interface, grouping rules, or provider workflows for your own use. Open issues with reproduction steps, runtime versions, and redacted logs. Never attach conversation exports, credentials, or private file paths to a public issue.
 

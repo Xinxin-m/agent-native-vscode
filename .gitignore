@@ -21,3 +21,12 @@ vscode-library/builds/
 project-map/output/
 project-map/views.json
 project-map/folder-discovery.json
+
+# Portable layout: all per-user runtime state stays inside app/.
+app/data/*
+!app/data/config.example.json
+app/output/
+app/project-map/output/
+app/project-map/views.json
+app/project-map/folder-discovery.json
+app/vscode-library/builds/
