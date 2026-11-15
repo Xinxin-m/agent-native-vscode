@@ -62,6 +62,10 @@ def default_projects():
 # Claude aliases resolve to the current model of that tier, so they keep working
 # across releases; effort levels are the CLI's own --effort values.
 CLAUDE_MODELS = [
+    {"id": "claude-opus-5-5", "name": "Opus 5.5"},
+    {"id": "claude-sonnet-5-5", "name": "Sonnet 5.5"},
+    {"id": "claude-fable-5-2", "name": "Fable 5.2"},
+    {"id": "claude-haiku-5-5", "name": "Haiku 5.5"},
     {"id": "", "name": "Session default"},
     {"id": "opus", "name": "Opus (CLI alias)"},
     {"id": "opus[1m]", "name": "Opus (1M context)"},
