@@ -1,0 +1,23 @@
+# Every dashboard has its own private, locally generated library.
+data/*
+!data/.gitkeep
+!data/config.example.json
+
+# Browser-automation snapshots: these transcribe the on-screen page, i.e.
+# real chat titles and absolute paths. Never commit them.
+.playwright-cli/
+output/
+
+__pycache__/
+*.py[cod]
+
+# Local installs and build packages
+node_modules/
+*.vsix
+vscode-library/builds/
+.DS_Store
+
+# Private project-map runtime state
+project-map/output/
+project-map/views.json
+project-map/folder-discovery.json

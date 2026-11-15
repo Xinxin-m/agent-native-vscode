@@ -1,0 +1,46 @@
+{
+  "claude_projects_root": "~/.claude/projects",
+  "codex_sessions_root": "~/.codex/sessions",
+  "codex_index": "~/.codex/session_index.jsonl",
+  "excluded_cwds": [
+    "/tmp"
+  ],
+
+  "_min_user_msgs": "User turns a chat needs to be indexed at all.",
+  "min_user_msgs": 1,
+  "_min_answer_msgs": "Real answers a chat needs to be indexed. An assistant turn counts unless it is only an API error or a 'Not logged in' notice, so 1 hides chats you interrupted before the agent replied. Set 0 to keep everything.",
+  "min_answer_msgs": 1,
+
+  "_user_context": "One or two sentences about who you are and what you work on. Both the labeling and the grouping model read this, so the better it fits you, the better your chat titles and projects. Leave it out for a generic default.",
+  "user_context": "The user is a technical professional who uses AI assistants for work projects, research, and maintaining their own tools and infrastructure.",
+  "_topic_examples": "Quoted, comma-separated names of your actual workstreams — these guide the per-chat topic hint.",
+  "topic_examples": "'main project', 'reading & research', 'infra & setup', 'admin'",
+  "_project_examples": "Quoted, comma-separated project names in the style you want your sidebar to read.",
+  "project_examples": "\"Main Project\", \"Reading & Research\", \"Infra & Setup\", \"Client Work\"",
+  "_project_rules": "Plain-sentence rules for the grouping model, one string each. Use these to stop a workstream being split up, e.g. \"'Acme' is one project covering everything done for that client; never split it into per-task projects.\"",
+  "project_rules": [],
+  "_misc_project": "Where operational one-offs land.",
+  "misc_project": "Miscellaneous & Ops",
+
+  "_pipeline": "Budget per refresh. Every one of these also accepts a DASHBOARD_<KEY> environment override, so a hook or cron line can change one without editing this file.",
+  "enrich_limit": 120,
+  "enrich_workers": 4,
+  "enrich_timeout": 420,
+  "classify_batch": 150,
+  "index_timeout": 900,
+  "enrich_stage_timeout": 1200,
+  "classify_stage_timeout": 1800,
+
+  "_freshness_window": "How long a chat still reads as fresh in the library: live, 1d, 3d, or 7d. Also settable from Settings.",
+  "freshness_window": "1d",
+  "port": 8744,
+  "enable_model_labeling": false,
+  "_enable_model_labeling": "Opt in to paid CLI title/tag/project labeling. False keeps all pipeline refreshes deterministic; changing this never sends a chat message.",
+
+  "models": {
+    "bulk": "claude-haiku-4-5",
+    "reasoning": "claude-sonnet-5",
+    "reviewed": "2026-08-20"
+  },
+  "_models": "Which Claude model plays each role. Read ../MODELS.md before changing these — and bump 'reviewed' (YYYY-MM-DD) whenever you verify them, even if nothing changed. An agent should re-check a selection older than ~30 days."
+}

@@ -1,0 +1,9 @@
+/** One immediate, viewport-level tooltip for native/title and accessible icon labels. */
+export function installTooltips(doc:Document){
+ let target:HTMLElement|null=null,savedTitle:string|null=null,previousDescription:string|null=null;
+ const tip=doc.createElement('div');tip.id='workbench-tooltip';tip.role='tooltip';tip.className='workbench-tooltip';tip.hidden=true;doc.body.append(tip);
+ function hide(){if(target){if(savedTitle!==null)target.setAttribute('title',savedTitle);if(previousDescription===null)target.removeAttribute('aria-describedby');else target.setAttribute('aria-describedby',previousDescription);}target=null;tip.hidden=true;}
+ function show(event:Event){const element=event.target instanceof Element?event.target.closest<HTMLElement>('[title],button[aria-label],[role="button"][aria-label]'):null;if(element===target)return;hide();if(!element)return;const label=element.getAttribute('title')||element.getAttribute('aria-label');if(!label)return;target=element;savedTitle=element.getAttribute('title');previousDescription=element.getAttribute('aria-describedby');element.removeAttribute('title');element.setAttribute('aria-describedby',[previousDescription,tip.id].filter(Boolean).join(' '));tip.textContent=label;tip.hidden=false;const rect=element.getBoundingClientRect(),width=tip.offsetWidth,height=tip.offsetHeight;tip.style.left=Math.max(8,Math.min(rect.left+rect.width/2-width/2,innerWidth-width-8))+'px';tip.style.top=(rect.bottom+height+12<innerHeight?rect.bottom+6:Math.max(8,rect.top-height-6))+'px';}
+ function leave(event:Event){if(target&&!target.contains((event as MouseEvent).relatedTarget as Node))hide();}
+ doc.addEventListener('pointerover',show);doc.addEventListener('focusin',show);doc.addEventListener('pointerout',leave);doc.addEventListener('focusout',hide);doc.addEventListener('pointerdown',hide);doc.addEventListener('scroll',hide,true);doc.addEventListener('keydown',e=>{if(e.key==='Escape')hide()});
+}

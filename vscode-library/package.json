@@ -1,0 +1,56 @@
+{
+  "name": "library-workspace",
+  "displayName": "Library Chat",
+  "description": "Use the existing local Library broker from ordinary VS Code.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "extensionKind": [
+    "ui"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onUri",
+    "onWebviewPanel:library.projectMap"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Read conversations; sending, attachments and run controls require workspace trust."
+    },
+    "virtualWorkspaces": false
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "library.open",
+        "title": "Library: Open Chat"
+      },
+      {
+        "command": "library.openProjectMap",
+        "title": "Library: Open Project Map"
+      }
+    ],
+    "configuration": {
+      "title": "Library Chat",
+      "properties": {
+        "library.endpoint": {
+          "type": "string",
+          "default": "http://127.0.0.1:8744",
+          "scope": "application",
+          "description": "Existing Library HTTP loopback origin. This extension never starts a broker or provider."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "package": "python3 package.py"
+  },
+  "license": "MIT"
+}
