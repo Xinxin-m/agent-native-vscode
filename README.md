@@ -1,6 +1,8 @@
 # Agent Native VS Code
 
-Agent Native VS Code combines a customized Code-OSS desktop, Claude Code and Codex in one project-organized workspace. Search conversations across accounts, work with chats and files side by side, and choose the provider, account, working folder and host for each conversation.
+**Your agents. Your workspaces. One VS Code.**
+
+Think VS Code + Claude Code + Codex, with tab groups and a UI you can shape. Keep chats from all your connected accounts and working folders together, automatically organized into projects. Open several conversations beside your code and documents, and switch providers as the work changes.
 
 The regular **Library Code** desktop uses its own chat interface backed by the provider CLIs. This repository ships that desktop source in `desktop/` and its shared backend and browser client in `app/`. It does not distribute Library Code Official or proprietary provider extensions.
 
@@ -8,19 +10,24 @@ Start the shared service with the quick start below, then follow [Build Library 
 
 ![Library with a Claude chat and a Codex chat open side by side](docs/screenshots/hero.png)
 
-## Why
+## Work across projects and agents
 
-An editor gives one vendor's agent a side panel next to the code. Library reads the transcripts that the Claude Code and Codex CLIs already write, covers both providers and every account you connect, and shows which sessions are running now. The conversations take the screen, and the file tree and the editor are panes you open when you need them. The repository also ships the rules its maintaining agents follow, so you change the interface by asking an agent. Ask it to move search into the sidebar header, and it edits the source, rebuilds the client and keeps the change in your copy.
+Pick up a project without hunting through separate apps and terminal sessions. Find its Claude and Codex conversations together, search the history, and see which agents are still working. Keep a research chat beside a PDF, open another project's files in the next pane, or continue the work with a different provider.
+
+Use the desktop when you want the VS Code workspace tree, editor, terminal and commands around your chats. Use the browser when you want to focus on conversations and view their files. Both use the same chat history, and you can use either on its own.
+
+The interface is yours to change. Ask an agent to move search into the sidebar header or adjust the layout; the repository includes the source and working rules it needs to make that change in your copy.
 
 ## Features
 
 - **One chat library.** Claude Code and Codex conversations from all your accounts, searchable by title or by full message text.
-- **Projects.** Chats are grouped into projects by working folder, with no model calls. You can rename, merge, pin and archive projects, and opt in to model labeling that groups chats by topic.
+- **Automatic project organization.** Sessions are grouped into projects by working folder, with no model calls. You can rename, merge, pin and archive projects, and opt in to model labeling that groups chats by topic.
+- **Switch providers as you work.** Move from Claude Code to Codex or back through a linked handoff. Review the context before sending; the original native session stays intact, and the new provider starts its own session.
 - **Live sessions.** See which agents are running on your machine and on remote hosts you connect over SSH, their status and last message, and stop the ones you no longer need.
 - **Panes and tabs.** Any chat or file opens in any pane. Split, drag and rearrange panes, and keep several projects open in one window. A Files tab shows one workspace, and you can drag files from one workspace to another.
-- **Rendered documents.** Markdown and HTML open rendered. Edit the source beside the rendered view, save, and compare the file with its last Git commit.
+- **Documents beside your chats.** View PDFs, Markdown and HTML alongside a conversation. Edit Markdown and HTML source beside the rendered view, save, and compare the file with its last Git commit.
 - **Run controls.** Continue a conversation through the native CLI, answer the agent's questions and approve its tools. While the agent is working, queue a message for the end of its turn or steer it with a message it reads at its next step.
-- **Subagent tree.** See every subagent a chat started and open any of them.
+- **Subagent tree.** See a chat’s recorded subagents and open their available conversations.
 - **Accounts.** Connect several Claude and Codex accounts and see each account's usage and reset times.
 
 | Library and search | Projects |
