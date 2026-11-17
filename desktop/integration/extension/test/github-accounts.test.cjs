@@ -1,0 +1,3 @@
+const {test}=require('node:test');const assert=require('node:assert/strict');const {list}=require('../github-accounts.cjs');
+test('reading GitHub accounts never opens login or returns tokens',async()=>{const api={authentication:{getSession:()=>assert.fail('Unexpected login'),getAccounts:async()=>[{id:'1',label:'user',accessToken:'secret'}]}};assert.deepEqual(await list(api),{accounts:[{id:'1',label:'user'}]});});
+test('only an explicit connect starts authentication',async()=>{let calls=0;const api={authentication:{getSession:async(id,scopes,options)=>{calls++;assert.equal(id,'github');assert.equal(options.createIfNone,true);return {accessToken:'secret'}},getAccounts:async()=>[]}};assert.deepEqual(await list(api,true),{accounts:[]});assert.equal(calls,1);});

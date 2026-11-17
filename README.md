@@ -1,162 +1,107 @@
-# Library Workspace
+# Agent Native VS Code
 
-**The flexibility of VS Code, your Claude Code and Codex accounts, and a workspace you can make your own.**
+Agent Native VS Code combines a customized Code-OSS desktop, Claude Code and Codex in one project-organized workspace. Search conversations across accounts, work with chats and files side by side, and choose the provider, account, working folder and host for each conversation.
 
-Library brings your agents, conversations, projects, and files into one local workspace. Keep several projects open in a single window, work across chat and file tabs, and arrange the interface around the way you build.
+The regular **Library Code** desktop uses its own chat interface backed by the provider CLIs. This repository ships that desktop source in `desktop/` and its shared backend and browser client in `app/`. It does not distribute Library Code Official or proprietary provider extensions.
 
-- **All your Claude Code and Codex accounts together.** Connect profiles, choose an account, and check its available quota and reset times.
-- **Active work and history, organized by project.** Follow running sessions, search earlier decisions, and continue conversations without losing their context.
-- **Multiple workspaces in one window.** Keep chats, editors, documents, and project maps side by side in tabs and split panes.
-- **A UI you can shape.** Rearrange panes and tune colors, text size, spacing, and reading width to suit your work.
+Start the shared service with the quick start below, then follow [Build Library Code](desktop/docs/build-and-update.md) to reconstruct and build the pinned Code-OSS desktop. macOS Apple Silicon is the verified desktop target. The browser client also runs on Linux.
 
-One shared local backend connects the browser workspace and Library Chat inside VS Code. Your installed Claude Code and Codex CLIs execute the work; your history stays on your computer.
+![Library with a Claude chat and a Codex chat open side by side](docs/screenshots/hero.png)
 
-The full desktop direction combines a customized Code-OSS editor with these Library capabilities. This repository ships the browser workspace and a VS Code extension today. Automatic project tab groups are part of that direction; the current release provides project classification and manually arranged tabs and panes.
+## Why
 
-## Start with your agent
+An editor gives one vendor's agent a side panel next to the code. Library reads the transcripts that the Claude Code and Codex CLIs already write, covers both providers and every account you connect, and shows which sessions are running now. The conversations take the screen, and the file tree and the editor are panes you open when you need them. The repository also ships the rules its maintaining agents follow, so you change the interface by asking an agent. Ask it to move search into the sidebar header, and it edits the source, rebuilds the client and keeps the change in your copy.
 
-Clone or download this repository, then give Claude Code or Codex this prompt:
+## Features
 
-> Read README.md and docs/AGENT-ONBOARDING.md. Install Library Workspace for me. Discover my local Claude Code and Codex histories, explain which folders you found, and import them without model calls. Help me connect the accounts I choose; let me skip any provider. Open official sign-in links when needed and keep passwords and login codes in the provider's own flow. Verify each connected identity in the dashboard. Help me select working folders, check automatic project grouping, and optionally install Library Chat in VS Code. Preserve existing settings, projects, drafts, and running sessions. Report what works and what still needs my input.
+- **One chat library.** Claude Code and Codex conversations from all your accounts, searchable by title or by full message text.
+- **Projects.** Chats are grouped into projects by working folder, with no model calls. You can rename, merge, pin and archive projects, and opt in to model labeling that groups chats by topic.
+- **Live sessions.** See which agents are running on your machine and on remote hosts you connect over SSH, their status and last message, and stop the ones you no longer need.
+- **Panes and tabs.** Any chat or file opens in any pane. Split, drag and rearrange panes, and keep several projects open in one window. A Files tab shows one workspace, and you can drag files from one workspace to another.
+- **Rendered documents.** Markdown and HTML open rendered. Edit the source beside the rendered view, save, and compare the file with its last Git commit.
+- **Run controls.** Continue a conversation through the native CLI, answer the agent's questions and approve its tools. While the agent is working, queue a message for the end of its turn or steer it with a message it reads at its next step.
+- **Subagent tree.** See every subagent a chat started and open any of them.
+- **Accounts.** Connect several Claude and Codex accounts and see each account's usage and reset times.
 
-The full [agent onboarding guide](docs/AGENT-ONBOARDING.md) covers discovery, account connection, verification, troubleshooting, and upgrades.
-
-## What you can do
-
-- Search and organize local Claude Code and Codex conversations by project.
-- Open chat and file tabs beside each other; preview images, Markdown, HTML, PDF, and source files.
-- Continue conversations through the native provider and follow broker-managed work from multiple clients.
-- Keep drafts while switching tabs, inspect pending questions and permissions, and see run status.
-- Connect multiple Claude and Codex profiles and inspect their verified identities in Accounts.
-- Group conversations automatically, then rename projects or move chats yourself.
-
-The browser workspace has the broadest feature set. The optional VS Code extension continues existing conversations using the same backend. It keeps the native editor, terminal, and other extensions.
-
-## Requirements
-
-| Component | Requirement |
+| Library and search | Projects |
 | --- | --- |
-| Runtime | Python 3.11+, macOS or Linux, and a browser |
-| History | Local Claude Code or Codex transcript files; authentication is unnecessary just to read them |
-| Execution | The corresponding provider CLI, signed in, with access to the conversation's working folder |
-| Frontend development | Node.js compatible with `app/workbench/package.json` dependencies and npm |
-| VS Code client | Desktop VS Code 1.85+ and the optional local extension |
+| ![Search across all messages](docs/screenshots/library-search.png) | ![Projects directory](docs/screenshots/projects.png) |
+| **Live sessions** | **Queue and steer** |
+| ![Running sessions on this Mac and on a remote host, with stop controls](docs/screenshots/sessions.png) | ![A running chat with two queued messages and the Steer button](docs/screenshots/steer-and-queue.png) |
+| **Files from two workspaces** | **A chat beside a Markdown file in split view** |
+| ![A chat beside two Files tabs, with a file dragged from one workspace onto a folder in the other](docs/screenshots/files.png) | ![Markdown source and preview beside a chat](docs/screenshots/rendered-editing.png) |
+| **Diff against Git** | **Subagent tree** |
+| ![Markdown file compared with Git HEAD](docs/screenshots/rendered-diff.png) | ![Subagents started by one chat, nested under it](docs/screenshots/subagent-tree.png) |
+| **Settings** | **Accounts and usage** |
+| ![Settings page with search and sections](docs/screenshots/settings.png) | ![Claude and Codex accounts with usage bars](docs/screenshots/accounts.png) |
 
-Python serves the bundled browser client using its standard library. Node is only needed for frontend development. Windows is not currently supported by the POSIX execution and file services.
+## Choose your interface
 
-Install providers using their official instructions: [Claude Code setup](https://code.claude.com/docs/en/setup) and [Codex CLI](https://github.com/openai/codex). Provider authentication and subscription requirements are separate from Library.
+| | Library Code desktop | Browser workspace |
+| --- | --- | --- |
+| What you open | A dedicated Code-OSS application | Your browser at `http://127.0.0.1:8744/workbench` |
+| Distinctive tools | VS Code-style commands, workspace file tree, file editors and terminal, with Library chats in the same window | Chat with Claude Code and Codex across workspaces and accounts, search history, and view PDFs and other files alongside chats |
+| Source | `desktop/` | `app/workbench/` |
+| Requirements | Built macOS Apple Silicon app, local Python backend, provider CLIs | Python backend, browser, provider CLIs; Node only to rebuild the client |
 
-## Quick start
+You can use either interface independently. The desktop needs the backend service, but no browser window needs to stay open. The browser needs no desktop installation. Both use the same backend and conversation history; their window layouts and drafts are client state.
 
-Clone the shared repository, then install:
+### Desktop setup
+
+Start the backend using the commands below, then follow [Build Library Code](desktop/docs/build-and-update.md) to check out the pinned upstream source, apply the patch, build and install the regular desktop. Keep the backend running at `http://127.0.0.1:8744`, or set `library.endpoint` to another supported loopback endpoint. You can then close the browser and use the desktop on its own.
+
+### Browser setup
+
+You need macOS or Linux, Python 3.11 or newer first on your PATH (the system Python on macOS is too old), a browser, and Claude Code, Codex or both, installed and signed in. Windows is not supported. Node.js is needed only to rebuild the interface, because the built client is in the repository.
 
 ```sh
-git clone https://github.com/Xinxin-m/library-workspace.git
-cd library-workspace
+git clone https://github.com/Xinxin-m/agent-native-vscode.git
+cd agent-native-vscode
 ./install.sh --no-refresh
 python3 app/pipeline.py --parse-only
 ./run.sh
 ```
 
-Visit **http://127.0.0.1:8744/workbench**. The installer creates private configuration, merges lifecycle hooks without replacing existing hooks, and installs a helper skill. Optional `./install.sh --service` adds a login service. Review `./install.sh --help` for selective installation and removal.
+Open http://127.0.0.1:8744/workbench. `install.sh` creates your private configuration, adds session hooks to your Claude Code and Codex settings without replacing existing hooks, and installs a helper skill. `./install.sh --help` lists the options, including `--service` to start Library at login and `--uninstall`, which removes the hooks and keeps your library. The import step reads your local transcripts and makes no model calls. If another program already uses port 8744, set `port` in `app/data/config.json`.
 
-For a first launch without changing provider hooks or installing a skill:
+You can also hand the setup to your agent. Open Claude Code or Codex in the cloned folder and say:
 
-```sh
-mkdir -p app/data
-cp -n app/data/config.example.json app/data/config.json
-python3 app/pipeline.py --parse-only
-./run.sh
+> Read README.md and docs/AGENT-ONBOARDING.md, then install Library for me. Import my chats without model calls, help me connect my accounts, and tell me what still needs my input.
+
+To use Library chats inside VS Code, build the extension with `cd app/vscode-library && python3 package.py`, then run **Extensions: Install from VSIX** on the file it prints. It needs VS Code 1.85 or newer and the Library server running.
+
+## What is in the repository
+
+```
+desktop/        regular Library Code source, pinned Code-OSS patch and build instructions
+app/            server, agent broker, transcript indexer and account adapters (Python)
+app/workbench/  browser workspace source (React, Dockview, Monaco)
+app/web/        built browser workspace, served by the Python server
+app/vscode-library/  Library Chat extension for VS Code
+app/project-map/     read-only project graph
+prompts/        general operating rules for agents in a long-lived workspace
+agents/         agent roles: what each one does and when to use it
+docs/           onboarding, release checks and screenshots
+scripts/        release packager with an allowlist and privacy scan
+AGENTS.md       instructions for an agent working on this repository
 ```
 
-`cp -n` preserves an existing configuration. Fresh configuration disables model labeling. Importing history does not send messages or invoke a model.
+## How it evolves with you
 
-## Connect your accounts
+`AGENTS.md` at the root is the file Codex loads in this repository, and `CLAUDE.md` imports it for Claude Code. It tells the agent to read `prompts/` before it changes anything. When you ask for a change to the layout, the colors or the way projects are grouped, the agent follows those rules, edits the code and keeps the change. You can edit the rules and roles as well, and install them for your other work. See [prompts/README.md](prompts/README.md) and [agents/README.md](agents/README.md).
 
-Open the **Profile** control, then **Accounts**. Review discovered native accounts or choose **Connect account** for Claude or Codex. Follow the displayed provider login flow and choose **Check sign-in**. An account counts as connected only after its identity is verified.
+## Privacy
 
-Each additional account gets its own native profile directory. Passwords, login codes, and provider tokens belong in the provider's own flow. The dashboard does not need them pasted into a conversation. On systems without automatic terminal opening, your agent can run the setup command shown by the interface.
+Library runs on your computer and listens only on `127.0.0.1`. Private library state stays in `app/data/`; original transcripts remain in the provider’s local storage, and each client keeps its own layout and drafts. Git ignores `app/data/`. Library has no telemetry. It contacts other machines in three cases: to read each connected account's identity and usage from Anthropic and OpenAI with that account's own login; when your agents run, through the Claude Code and Codex CLIs; and over SSH to remote hosts you configure. Model labeling of chats is off by default; if you turn it on, chat text goes to the provider through the CLI you configure.
 
-Supported account connections are **Claude Code and Codex**. Gmail, calendars, Slack, and other service integrations are outside this release. A session owned by another native client may need an explicit handoff or branch before Library can continue it.
+## Contributing
 
-## How projects are grouped
+Contributions to the layout, the visuals, and the agent rules and roles are welcome. Use synthetic data in tests and screenshots, and never commit transcripts or `app/data/`. Read [CONTRIBUTING.md](CONTRIBUTING.md) before you open a pull request.
 
-A workspace directory is a useful first grouping signal. It is also common to discuss several projects in one directory or one project across several directories.
+## Current limits
 
-Fresh installs use deterministic workspace grouping without model calls. Optional AI labeling can improve titles, keywords, and topic grouping across folders. Set `enable_model_labeling` to `true` in your private configuration only after choosing the model and budget with your agent. The pipeline uses a lower-cost model for labels and bounded batches for topic classification. Calls go through the configured provider CLI and use that provider's allowance.
+Changing a conversation’s provider, host or working folder creates a linked handoff; it does not rewrite the original native session. Remote file browsing is supported, but remote file writes and remote attachments are not. Automatic tab grouping is planned.
 
-To refine untouched workspace groups after opting in, run `python3 app/classify.py --refine-workspaces`. Review your grouping rules and model budget before running it.
+## License and credits
 
-Start with a flat project list. Keep related work in one project when separate folders add navigation without helping you act. Archive completed conversations individually while ongoing work stays visible. Parent projects remain available when distinct workstreams justify them.
-
-After each pipeline refresh, a local classification review checks recent or changed conversations, configured purpose rules, workspace seeds, and possible duplicate project names. It writes `app/data/classification-review.json` for your agent to inspect. This review makes no model calls and changes no assignments. The report also checks structural issues: empty project shells, one-child parents, and groups containing only archived work. Ask your agent to review it during normal maintenance and propose the smallest useful change: merge overlapping folders, split genuinely independent work, or archive completed work. Reuse accepted decisions as durable purpose rules so later refreshes preserve them. Any optional model classification still follows your explicit labeling setting and budget.
-
-Manual assignments take precedence. Keep your own project names and grouping rules in private configuration; they should never become defaults for another user. The [onboarding guide](docs/AGENT-ONBOARDING.md) explains the fields and migration checks.
-
-## Workspaces and project graphs
-
-The browser workspace supports mixed chat/file tabs and split panes. Project maps use the included read-only companion in `app/project-map/` on loopback port 53962. `./run.sh` starts or reuses it. For a service installation that starts the backend directly, run `python3 app/start_project_map.py` if the map is unavailable. Graphs show conversations, explicit agent relationships, and recorded inputs and outputs.
-
-A general editable task dependency graph and arbitrary third-party account integrations remain future work. Conversation lineage is shown only when explicit evidence links a parent and child; a shared directory or similar title does not prove a dependency.
-
-## VS Code
-
-Keep the Library server running, then build the local extension:
-
-```sh
-cd app/vscode-library
-python3 package.py
-```
-
-Install the printed VSIX through **Extensions: Install from VSIX**, then run **Library: Open Chat** from the Command Palette. Both clients connect to the same loopback service. Configure `library.endpoint` if you use another port. See the [extension guide](app/vscode-library/README.md) for client limits and shared-session behavior.
-
-The extension is a local VSIX, not a Marketplace publication or a full Code-OSS fork.
-
-## Configuration and private data
-
-`app/data/config.example.json` is the portable template. Your `app/data/config.json` controls transcript roots, exclusions, port, model labeling, and project rules. Default histories are:
-
-- Claude Code: `~/.claude/projects/`
-- Codex: `~/.codex/sessions/`, with optional names from `~/.codex/session_index.jsonl`
-
-Paths support `~` and environment variables. Viewing an imported conversation and resuming it have different requirements: resume also needs the original provider, account, host, and working directory.
-
-Everything generated under `app/data/` is private and ignored by Git. This includes conversation text, titles, projects, account profiles, configuration, broker journals, logs, and file-access grants. Browser storage holds drafts and layouts; back it up separately when migrating machines.
-
-## Maintain and troubleshoot
-
-```sh
-python3 app/doctor.py                 # diagnose configuration and indexing
-python3 app/pipeline.py --parse-only  # import changed transcripts without models
-python3 app/pipeline.py               # refresh under your configured labeling policy
-```
-
-If history is missing, check the transcript roots and exclusions before changing anything. A chat normally needs a user message and a real assistant answer; `min_answer_msgs: 0` includes unanswered chats. If a service cannot find a CLI, set `claude_bin` or `codex_bin` in private configuration. If sign-in remains incomplete, finish provider login and check again.
-
-Before restarting a running backend, inspect `/api/runs` and the broker journals for active work. Closing a tab does not stop its agent. Keep existing configuration and private data during upgrades. `./install.sh --uninstall` removes installed integration and retains your library.
-
-## Develop and share
-
-```sh
-cd app/workbench
-npm ci
-npm run build
-```
-
-The repository includes the browser build, so a fresh user can run Python directly. Rebuild after frontend edits. Development tests and release QA use fixtures rather than real paid messages.
-
-`python3 scripts/package_workspace.py` creates an allowlisted source-and-assets archive with a file inventory, hashes, privacy scan, and dependency notices. It excludes private data, installed dependencies, old build hashes, browser captures, and local reports. Read the inventory before sharing. See [repository layout and release checks](docs/RELEASE.md).
-
-The root keeps the entry points and project overview; `app/` contains the runnable application, and `docs/` contains setup and maintenance guides. See the directory map in the release guide before adding a new file.
-
-Feel free to customize the interface, grouping rules, or provider workflows for your own use. Open issues with reproduction steps, runtime versions, and redacted logs. Never attach conversation exports, credentials, or private file paths to a public issue.
-
-## Security and limitations
-
-Library is a single-user local application. Its server binds to loopback and can read or edit authorized files, launch provider processes, and perform destructive transcript actions when requested. Keep it off public network interfaces. Separate people should run separate instances with separate operating-system accounts and credentials.
-
-Provider transcript formats can change. Remote hosts require explicit SSH setup; remote attachments and some desktop operations have platform limits. Quota estimates and native session ownership can be incomplete. Unknown identity or quota must remain visible as unknown.
-
-## License
-
-MIT for this repository's application code. Bundled dependencies retain their own licenses; see `THIRD-PARTY-LICENSES.txt` in release packages and the notices alongside extension vendor assets.
+MIT, see [LICENSE](LICENSE). The desktop derives from Microsoft Code-OSS; its upstream license and third-party notices are preserved in `desktop/`. The workspace uses the Monaco editor from VS Code (MIT, Microsoft), Dockview, React, markdown-it, KaTeX, DOMPurify, Lucide and PDF.js, each under its own license; release archives list them in `THIRD-PARTY-LICENSES.txt`. Claude Code and Codex are products of Anthropic and OpenAI; Library runs their CLIs and is not affiliated with either company.

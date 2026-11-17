@@ -60,7 +60,7 @@ def paths_from_call(name,args,cwd):
   if '\n' not in token and len(token)<600 and token.startswith(('/','~/')) and Path(token).suffix:
    out.append((str(Path(token).expanduser()),'read' if reader else 'reference'))
  # Nested functions.exec carries source text, not a JSON input object.
- for path in re.findall(r'''["']((?:/Users/|/sailhome/|/private/|/tmp/|~/)[^"'\n]{1,500}\.[a-zA-Z0-9]{1,10})["']''',command):
+ for path in re.findall(r'''["']((?:/Users/|/home/|/[a-z]+home/|/private/|/tmp/|~/)[^"'\n]{1,500}\.[a-zA-Z0-9]{1,10})["']''',command):
   if not any(path==p for p,_ in out):out.append((str(Path(path).expanduser()),'reference'))
  return list(dict.fromkeys(out))
 

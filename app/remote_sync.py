@@ -10,7 +10,7 @@ For each `remote_sources` entry in data/config.json:
       | rsync -a --files-from=- HOST:.codex/sessions/   data/remote/<name>/codex-sessions/
   rsync -a HOST:.codex/session_index.jsonl data/remote/<name>/codex-session_index.jsonl
 
-Only find and rsync run on the remote (the SC login node is small). Nothing is
+Only find and rsync run on the remote (a cluster login node may be small). Nothing is
 ever deleted on either side. When any file changed, pipeline.py (incremental)
 runs afterwards so the index picks the new transcripts up.
 
@@ -25,7 +25,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(ROOT, "data")
 SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15"]
 # rsync always runs with -W (whole file): macOS /usr/bin/rsync is openrsync
-# (protocol 29), and its delta transfer against SC's rsync 3.2.7 dies with
+# (protocol 29), and its delta transfer against a remote rsync 3.2.7 dies with
 # "unexpected end of file" on some files (verified 2026-10-21 on a 23 MB jsonl).
 LIST_TIMEOUT = 300
 RSYNC_TIMEOUT = 1800

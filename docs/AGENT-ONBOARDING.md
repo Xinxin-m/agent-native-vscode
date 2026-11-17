@@ -4,7 +4,7 @@ Give your agent this instruction:
 
 > Read the repository README.md and this guide, then set up Workspace on my computer. Find my Claude and Codex installations, index my existing chats without paid model calls, help me sign into each account, choose my working folders, and open the finished workspace. Preserve my existing settings and data. Tell me what still needs my input.
 
-Use this guide when an agent installs this project on another person's computer. Each installation keeps that person's transcripts, accounts, projects, and drafts locally. Start with a clean source checkout or the prepared share archive. Preserve any existing `app/data/` directory and provider configuration.
+Each installation keeps its user's transcripts, accounts, projects, and drafts locally. Start with a clean source checkout or the prepared share archive. Preserve any existing `app/data/` directory and provider configuration.
 
 ## Requirements
 
@@ -61,7 +61,7 @@ Rebuild the frontend only when source changes require it:
 ```sh
 cd workbench
 npm ci
-# Development tests are excluded from this release archive.
+npm test        # unit tests (Vitest)
 npm run build
 ```
 
@@ -97,7 +97,7 @@ Every refresh writes a local `data/classification-review.json` without model cal
 
 Keep the project list flat unless independent workstreams justify nesting. Archive completed conversations individually when the larger project remains active. This review runs after refreshes, without a wall-clock schedule.
 
-Have your agent read this report periodically and after starting a new workstream. Inspect each conversation's actual purpose before moving it. Propose dedicated projects, parent groups, merges and archives as the work evolves. Preserve manual placements, including explicit Ungrouped choices. Applications discussed from a research folder can belong to an application project. Folder paths are evidence, not the final taxonomy.
+Have your agent read this report periodically and after starting a new workstream. Inspect each conversation's actual purpose before moving it. Propose dedicated projects, parent groups, merges and archives as the work evolves. Preserve manual placements, including explicit Ungrouped choices. A chat started in one project's folder can belong to another project; treat folder paths as evidence and let the user settle the taxonomy.
 
 Private `classification_rules` entries in `data/config.json` accept `project_id`, regex lists `any`, `all`, and `exclude`, and a plain-language `reason`. Rule order expresses priority; overlapping destinations are flagged for review. The report never changes assignments. Keep personal rules out of the shared repository. To regenerate the report alone, run `python3 project_review.py`.
 

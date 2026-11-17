@@ -1,8 +1,8 @@
 import type {Resource} from '../state/types';
-export function resourceId(r:Resource){return r.kind==='project'?'project:'+r.projectId:r.kind==='url'?'url:'+r.url:r.kind==='chat'?'chat:'+(r.key||r.draftId||'new'):r.kind==='file'?'file:'+(r.host_id||'mac')+':'+(r.path||r.file_id):r.kind;}
+export function resourceId(r:Resource){return r.kind==='project'?'project:'+r.projectId:r.kind==='url'?'url:'+r.url:r.kind==='chat'?'chat:'+(r.key||r.draftId||'new'):r.kind==='file'?'file:'+(r.host_id||'mac')+':'+(r.path||r.file_id):r.kind==='files'?'files:'+(r.root_id||''):r.kind;}
 export function encodeResource(r:Resource){return '#resource='+encodeURIComponent(JSON.stringify(r));}
 export function decodeResource(hash:string):Resource|null {
- try {const raw=new URLSearchParams(hash.replace(/^#/,'' )).get('resource');if(!raw)return null;const r=JSON.parse(raw);if(!['chat','file','url','welcome','settings','overview','project'].includes(r.kind))return null;if(r.kind==='project'&&(typeof r.projectId!=='string'||!r.projectId||r.projectId.length>200))return null;if(r.kind==='url'&&(!r.url||!/^https?:\/\//i.test(r.url)))return null;if(r.kind==='file'&&typeof r.path!=='string'&&!r.file_id)return null;if(r.kind==='chat'&&!r.key&&!r.draftId)return null;return r;}catch{return null;}
+ try {const raw=new URLSearchParams(hash.replace(/^#/,'' )).get('resource');if(!raw)return null;const r=JSON.parse(raw);if(!['chat','file','url','welcome','settings','overview','project','sessions','files'].includes(r.kind))return null;if(r.kind==='project'&&(typeof r.projectId!=='string'||!r.projectId||r.projectId.length>200))return null;if(r.kind==='url'&&(!r.url||!/^https?:\/\//i.test(r.url)))return null;if(r.kind==='file'&&typeof r.path!=='string'&&!r.file_id)return null;if(r.kind==='chat'&&!r.key&&!r.draftId)return null;return r;}catch{return null;}
 }
 export function parseFileLink(value:string,cwd:string,host_id='mac'):Resource|null {
  if(value.startsWith('#'))return null;

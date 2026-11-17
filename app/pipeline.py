@@ -9,8 +9,9 @@ Every caller goes through here, so there is a single definition of stage order,
 timeouts, and locking: the Claude/Codex session hooks, the dashboard's Rescan
 button, and a human at a shell.
 
-  python3 pipeline.py                 # incremental, labelling capped (hook mode)
-  python3 pipeline.py --uncapped      # label the whole backlog
+  python3 pipeline.py                 # hook mode: index + first labels for a handful of chats
+  python3 pipeline.py --daily         # launchd, once a day: index + daily relabel + grouping
+  python3 pipeline.py --uncapped      # Rescan: every pending first label, daily relabel forced
   python3 pipeline.py --full          # re-parse every transcript from scratch
   python3 pipeline.py --parse-only    # deterministic stages only, no model calls
   python3 pipeline.py --reason rescan # tag the log line
@@ -21,6 +22,9 @@ refresh then makes one more pass, because the indexer may already have read the
 transcript that just changed. An explicit request (--wait, used by the Rescan
 button) queues instead, so pressing the button always does the work that was
 asked for.
+
+Labelling cost: hooks never run the daily relabel and label at most
+`first_label_limit` chats per run (one batched call). See enrich.py.
 
 Recursion: the labelling stage shells out to `claude -p`, which itself fires the
 session hooks. DASHBOARD_REFRESH_ACTIVE is exported into the stages so those
@@ -36,6 +40,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "data")
@@ -96,7 +101,7 @@ def run_stage(log, script, args, timeout):
         return False
 
 
-def refresh(reason="manual", full=False, uncapped=False, parse_only=False, wait=False, keep_missing=False):
+def refresh(reason="manual", full=False, uncapped=False, parse_only=False, wait=False, keep_missing=False, daily=False):
     """Run the stages in order. Returns True if the library is fully current."""
     os.makedirs(DATA, exist_ok=True)
     cfg = config()
@@ -119,7 +124,7 @@ def refresh(reason="manual", full=False, uncapped=False, parse_only=False, wait=
                 os.remove(PENDING_PATH)
             except FileNotFoundError:
                 pass
-            ok = _run_pass(cfg, reason, full, uncapped, parse_only, keep_missing)
+            ok = _run_pass(cfg, reason, full, uncapped, parse_only, keep_missing, daily)
             try:
                 with open(PENDING_PATH) as fh:
                     reason = "queued:" + (fh.read().strip() or "hook")
@@ -129,12 +134,12 @@ def refresh(reason="manual", full=False, uncapped=False, parse_only=False, wait=
         return ok
 
 
-def _run_pass(cfg, reason, full, uncapped, parse_only, keep_missing):
+def _run_pass(cfg, reason, full, uncapped, parse_only, keep_missing, daily=False):
     """One parse -> label -> group pass. Caller holds the lock."""
     stamp = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
     with open(LOG_PATH, "a") as log:
         log.write(f"\n{stamp} refresh reason={reason}"
-                  f"{' full' if full else ''}{' uncapped' if uncapped else ''}"
+                  f"{' full' if full else ''}{' uncapped' if uncapped else ''}{' daily' if daily else ''}"
                   f"{' parse-only' if parse_only else ''}\n")
 
         index_args = (["--full"] if full else []) + (["--keep-missing"] if keep_missing else [])
@@ -153,17 +158,56 @@ def _run_pass(cfg, reason, full, uncapped, parse_only, keep_missing):
                 return False
             return run_stage(log, "project_review.py", [], 120)
 
-        limit = "0" if uncapped else str(setting(cfg, "enrich_limit", 120))
-        workers = str(setting(cfg, "enrich_workers", 4))
-        timeout = int(setting(cfg, "enrich_stage_timeout", 3600 if uncapped else 1200))
-        if not run_stage(log, "enrich.py",
-                         ["--workers", workers, "--limit", limit], timeout):
+        # Hooks: first labels only, a handful per run. Daily and Rescan runs add
+        # the once-a-day relabel of chats that gained turns, and grouping.
+        stage = ["--first"]
+        if uncapped:
+            stage += ["--daily", "--force"]
+        elif daily:
+            stage += ["--daily"]
+        else:
+            stage += ["--limit", str(setting(cfg, "first_label_limit", 6))]
+        timeout = int(setting(cfg, "enrich_stage_timeout", 3600 if (uncapped or daily) else 1200))
+        enriched = run_stage(log, "enrich.py", stage, timeout)
+        if not enriched:
             log.write("labelling incomplete; grouping still runs on what exists\n")
 
-        grouped = run_stage(log, "classify.py", [],
-                         int(setting(cfg, "classify_stage_timeout", 1800)))
+        # classify.py needs a model call per batch: only when asked for (daily,
+        # Rescan) or when enough chats wait, never for one chat in a hook.
+        grouped = run_stage(log, "classify.py", [] if (uncapped or daily) else ["--min", "10"],
+                            int(setting(cfg, "classify_stage_timeout", 1800)))
         reviewed = run_stage(log, "project_review.py", [], 120)
-        return grouped and reviewed
+        return enriched and grouped and reviewed
+
+
+
+def refresh_daily_with_retry(*, clock=time.time, sleep=time.sleep, day=None, **kwargs):
+    """The scheduled job retries unavailable providers, without holding refresh.lock.
+
+    Three same-day retries at the provider backoff boundary; ordinary hooks and
+    manual rescans do not acquire this long-lived retry behavior.
+    """
+    day = day or (lambda: datetime.datetime.fromtimestamp(clock()).date())
+    started_day = day()
+    for attempt in range(4):
+        ok = refresh(**kwargs)
+        if ok or not kwargs.get('daily') or attempt == 3:
+            return ok
+        try:
+            with open(os.path.join(DATA, 'enrich_backoff.json')) as fh:
+                until = float(json.load(fh).get('until', 0))
+        except (OSError, ValueError, TypeError):
+            return False
+        if until <= clock() or datetime.datetime.fromtimestamp(until).date() != started_day:
+            return False
+        # A minute at a time permits a same-day/opt-out check after wakeup.
+        while clock() < until:
+            if day() != started_day or config().get('enable_model_labeling') is False:
+                return False
+            sleep(min(60, until - clock()))
+        if day() != started_day:
+            return False
+    return False
 
 
 def main():
@@ -171,7 +215,8 @@ def main():
     parser.add_argument("--reason", default="manual",
                         help="tag for the log line (hook, session-end, rescan...)")
     parser.add_argument("--full", action="store_true", help="re-parse every transcript")
-    parser.add_argument("--uncapped", action="store_true", help="label the whole backlog")
+    parser.add_argument("--uncapped", action="store_true", help="all pending first labels plus a forced daily relabel")
+    parser.add_argument("--daily", action="store_true", help="also run the once-a-day relabel")
     parser.add_argument("--parse-only", action="store_true", help="no model calls")
     parser.add_argument("--keep-missing", action="store_true", help="retain history whose source is unavailable")
     parser.add_argument("--wait", action="store_true",
@@ -179,8 +224,9 @@ def main():
     parser.add_argument("--quiet", action="store_true", help="say nothing on stdout")
     args = parser.parse_args()
 
-    ok = refresh(reason=args.reason, full=args.full, uncapped=args.uncapped,
-                 parse_only=args.parse_only, wait=args.wait, keep_missing=args.keep_missing)
+    ok = refresh_daily_with_retry(reason=args.reason, full=args.full, uncapped=args.uncapped,
+                 parse_only=args.parse_only, wait=args.wait, keep_missing=args.keep_missing,
+                 daily=args.daily)
     if not args.quiet:
         print(("library is current" if ok else
                "refresh incomplete -- see data/refresh.log") + f" ({args.reason})")

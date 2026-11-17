@@ -1,0 +1,17 @@
+.file-tree .file-row{padding-top:5px;padding-bottom:5px;gap:5px;border-radius:calc(var(--radius)*.5)}
+.file-tree .file-root{font-weight:500;margin-top:4px}
+.file-tree .file-row small{font-size:10px;color:var(--muted)}
+.file-row-spacer{width:13px;flex:none}
+.file-tree .file-row.is-selected{background:color-mix(in srgb,var(--accent) 14%,transparent)}
+.file-tree .file-row.is-drop,.file-tree .file-row.in-drop{background:color-mix(in srgb,var(--accent) 10%,transparent)}
+.file-tree .file-row.is-drop{outline:1px solid var(--accent);outline-offset:-1px}
+.file-tree .file-row.is-drop-bad{outline:1px dashed var(--muted);outline-offset:-1px}
+.file-move-dialog{width:min(440px,90vw);padding:20px}
+.file-move-dialog p{margin:0 0 18px;font-size:13px;line-height:1.5}
+.file-move-dialog div{display:flex;justify-content:flex-end;gap:8px}
+.file-move-dialog button{padding:6px 12px;font-size:12px;border:1px solid var(--line);border-radius:calc(var(--radius)*.6)}
+.file-move-dialog button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.file-root-line{position:relative}
+.file-root-open{position:absolute;right:2px;top:calc(50% + 2px);transform:translateY(-50%);opacity:0;padding:3px}
+.file-root-line:hover .file-root-open,.file-root-open:focus-visible{opacity:1}
+.files-tab-view{height:100%;display:flex;flex-direction:column;padding:8px 12px 0;overflow:hidden}

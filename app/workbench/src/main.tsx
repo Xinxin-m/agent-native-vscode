@@ -3,6 +3,8 @@ import {createRoot} from 'react-dom/client';
 import App from './App';
 import {installTooltips} from './ui/tooltips';
 import {installPopupDismissal} from './ui/dismiss';
+import {installRunningIndicator} from './ui/runningIndicator';
 installPopupDismissal(document);
 installTooltips(document);
+installRunningIndicator(document);
 createRoot(document.getElementById('root')!).render(<App/>);

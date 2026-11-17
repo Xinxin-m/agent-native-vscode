@@ -1,0 +1,3 @@
+import {describe,it,expect} from 'vitest';
+import {composerHeightLimit} from './composerHeight';
+describe('composer height',()=>{it('caps automatic sizing at eight lines, a quarter pane and 240 pixels with a two-line floor',()=>{expect(composerHeightLimit(20,6,1200,null)).toBe(166);expect(composerHeightLimit(30,6,3000,null)).toBe(240);expect(composerHeightLimit(20,6,400,null)).toBe(100);expect(composerHeightLimit(20,6,100,null)).toBe(46);});it('honors explicitly selected pane fractions',()=>{expect(composerHeightLimit(20,6,1000,.45)).toBe(450);expect(composerHeightLimit(20,6,100,.3)).toBe(46);});});

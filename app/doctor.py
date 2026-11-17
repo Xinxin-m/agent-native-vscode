@@ -165,6 +165,15 @@ def check_hooks(fix):
 
 
 # --------------------------------------------------------------- 4/5. library
+def _labelled_users(rec):
+    if isinstance(rec.get("labelled_n_user"), int):
+        return rec["labelled_n_user"]
+    try:
+        return int(str(rec.get("content_sig", "")).split(":")[0])
+    except ValueError:
+        return 10 ** 9  # unsigned legacy label: adopted for free on the next run, not stale
+
+
 def check_library(fix):
     index = load(os.path.join(DATA, "index.json"), {})
     if index == "CORRUPT":
@@ -192,12 +201,12 @@ def check_library(fix):
     failed = [k for k, v in enrich.items() if k in roots and isinstance(v, dict) and "error" in v]
     stale = [k for k, m in roots.items()
              if k in enrich and isinstance(enrich[k], dict)
-             and "content_sig" in enrich[k]
-             and enrich[k]["content_sig"] != m.get("content_sig")]
+             and not enrich[k].get("provisional") and enrich[k].get("model") != "deterministic"
+             and (m.get("n_user") or 0) > _labelled_users(enrich[k])]
     fallback = [k for k, v in enrich.items() if isinstance(v, dict) and v.get("fallback")]
     for label, keys, hint in (("unlabelled chats", missing, "python3 pipeline.py --uncapped"),
-                              ("failed labels", failed, "python3 enrich.py --workers 4"),
-                              ("stale labels (chat grew)", stale, "python3 pipeline.py --uncapped")):
+                              ("failed labels", failed, "python3 enrich.py --first"),
+                              ("labels waiting for the daily update", stale, "python3 pipeline.py --daily")):
         report(OK if not keys else WARN, label, str(len(keys)), hint if keys else "")
     if fallback:
         report(OK, "local fallback labels", f"{len(fallback)} (model would not label these)")
@@ -218,6 +227,30 @@ def check_library(fix):
                "raise min_answer_msgs, or python3 indexer.py --full")
 
 
+def check_daily_label(cfg):
+    """The once-a-day relabel is a launchd agent (macOS) or user timer (Linux)."""
+    label = "com.chatdashboard.daily-label"
+    want = str(cfg.get("daily_label_time") or "04:45")
+    if sys.platform == "darwin":
+        plist = os.path.join(HOME, "Library", "LaunchAgents", label + ".plist")
+        loaded = subprocess.run(["launchctl", "list", label], capture_output=True).returncode == 0
+        text = open(plist).read() if os.path.exists(plist) else ""
+        h, _, m = want.partition(":")
+        scheduled = f"<integer>{int(h or 4)}</integer>" in text and f"<key>Minute</key><integer>{int(m or 0)}</integer>" in text
+    else:
+        loaded = subprocess.run(["systemctl", "--user", "is-enabled", label + ".timer"], capture_output=True).returncode == 0
+        text, scheduled = "x", True
+    state = load(os.path.join(DATA, "label_state.json"), {}) or {}
+    last = state.get("last_daily") if isinstance(state, dict) else None
+    if not loaded or not text:
+        report(WARN, "daily relabel job", "not installed: chats are labelled once and never refreshed",
+               "./install.sh --daily-label")
+    elif not scheduled:
+        report(WARN, "daily relabel job", f"installed but not at daily_label_time {want}", "./install.sh --daily-label")
+    else:
+        report(OK, "daily relabel job", f"scheduled {want} local; last run {last or 'never'}")
+
+
 # ------------------------------------------------------------------ 6. server
 def check_server(cfg):
     port = int(cfg.get("port") or 8744)
@@ -225,7 +258,13 @@ def check_server(cfg):
     try:
         with urllib.request.urlopen(url, timeout=8) as response:
             payload = json.load(response)
-        report(OK, "server", f"answering on {port} ({len(payload.get('chats', []))} chats visible)")
+        served = (payload.get("config") or {}).get("data_dir")
+        if not served or os.path.realpath(served) != os.path.realpath(DATA):
+            report(BAD, "server", f"port {port} is answered by another Library install"
+                   + (f" (data at {served})" if served else " that does not report its data folder"),
+                   f"stop that install or set a free \"port\" in {os.path.join(DATA, 'config.json')}")
+            return
+        report(OK, "server", f"this checkout is answering on {port} ({len(payload.get('chats', []))} chats visible)")
         if "compose_options" not in payload:
             report(WARN, "server build", "running older code than this checkout",
                    "restart it: ./run.sh")
@@ -266,6 +305,7 @@ def main():
     cfg = check_config(fix)
     check_hooks(fix)
     check_library(fix)
+    check_daily_label(cfg)
     check_server(cfg)
     check_leftovers()
 

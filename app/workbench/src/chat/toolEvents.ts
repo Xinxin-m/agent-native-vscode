@@ -13,6 +13,7 @@ export function groupToolEvents(events:RunEvent[]):ToolActivity[]{
 
 export function activityEvents(events:RunEvent[],pending:RunEvent[]){return events.filter(e=>!['delta','start','done','state','request_resolved','provider_event','tool','tool_result'].includes(e.event)&&!pending.some(p=>p.seq===e.seq));}
 export function sessionStatus(run:any,verifiedRunning:boolean,awaiting:boolean,transcriptStatus?:string,nativeStatus?:string){
+ if(run.status==='remote_idle')return 'Remote Control connected';
  if(run.status==='queued')return 'Queued';
  if(run.status==='interrupting')return 'Stopping';
  if(awaiting||['awaiting_approval','awaiting_input','waiting_approval','waiting_input'].includes(run.status))return 'Waiting for you';

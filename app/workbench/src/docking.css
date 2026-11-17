@@ -11,3 +11,12 @@
 .chat-activity-dot{width:5px;height:5px;flex-shrink:0;border-radius:50%;background:#6094c7;box-shadow:0 0 0 2px color-mix(in srgb,#6094c7 10%,transparent)}
 @keyframes workspace-tab-running{0%{transform:translateX(-100%);opacity:0}25%{opacity:.7}75%{opacity:.7}100%{transform:translateX(300%);opacity:0}}
 @media(prefers-reduced-motion:reduce){.workbench-tab.is-running:after{animation:none;left:25%;opacity:.6}}
+
+/* Give pane dividers a visible line and a forgiving drag target. */
+.dockview-theme-workbench{--dv-separator-border:var(--line);--dv-sash-color:transparent}
+.dockview-theme-workbench .dv-split-view-container.dv-horizontal>.dv-sash-container>.dv-sash{width:10px}
+.dockview-theme-workbench .dv-split-view-container.dv-vertical>.dv-sash-container>.dv-sash{height:10px}
+.dockview-theme-workbench .dv-split-view-container.dv-horizontal>.dv-sash-container>.dv-sash:not(.dv-disabled){background-image:linear-gradient(var(--line),var(--line));background-size:1px 100%;background-position:center;background-repeat:no-repeat}
+.dockview-theme-workbench .dv-split-view-container.dv-vertical>.dv-sash-container>.dv-sash:not(.dv-disabled){background-image:linear-gradient(var(--line),var(--line));background-size:100% 1px;background-position:center;background-repeat:no-repeat}
+.dockview-theme-workbench .dv-sash-container>.dv-sash:not(.dv-disabled)::after{content:"";position:absolute;left:50%;top:50%;width:3px;height:24px;transform:translate(-50%,-50%);border-radius:2px;background:var(--muted);opacity:.45;pointer-events:none}
+.dockview-theme-workbench .dv-split-view-container.dv-vertical>.dv-sash-container>.dv-sash:not(.dv-disabled)::after{width:24px;height:3px}

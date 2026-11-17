@@ -70,6 +70,8 @@ def search(data, query):
             skipped += 1
             continue
         for turn_index, turn in enumerate(chat.get('turns') or []):
+            if turn.get('channel') == 'analysis':
+                continue
             text = str(turn.get('text') or '')
             position = text.casefold().find(folded)
             if position < 0:

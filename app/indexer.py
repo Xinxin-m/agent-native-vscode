@@ -25,26 +25,58 @@ index entry (left behind when a chat is filtered out or its transcript is gone).
 They are derived data -- a later run rebuilds any copy whose transcript exists --
 but deletion is opt-in so a bad filter setting cannot quietly throw work away.
 """
-import json, os, re, sys, glob, time, fcntl
+import json, os, re, sys, glob, time, fcntl, stat
 import datetime
+import hashlib
 
 # Bumped whenever meta_of() gains a field the rest of the pipeline reads, so
 # already-indexed chats are re-parsed once instead of keeping stale metadata.
 # 3: node, model_main, models, usage, usage_days (dashboard v2).
-META_V = 6
+import auth_failure
+
+META_V = 9
 LINEAGE_FIELDS = ('agent_id', 'parent_agent_id', 'parent_session_id', 'parent_key',
                   'root_key', 'root_session_id', 'is_child', 'agent_label',
                   'agent_path', 'spawned_children', 'lineage_source',
                   'provider_account_id', 'usage_host')
 EXECUTION_FIELDS = ('account_id', 'execution_host', 'host_id', 'conversation_key',
                     'source_key', 'source_session_id', 'source_provider', 'source_turn',
-                    'context_omitted_chars', 'last_run_id')
+                    'context_omitted_chars', 'last_run_id', 'quota_failover_from')
 
 
 def preserve_execution_metadata(chat, previous):
     for key in EXECUTION_FIELDS:
         if key in previous:
             chat[key] = previous[key]
+
+def mark_quota_handoff_seed(chat, trusted_run=None):
+    """Mark only the broker-identified seed for this exact native session."""
+    provenance = chat.get('quota_failover_from') or {}
+    if provenance.get('mode') == 'native_resume':
+        for turn in chat.get('turns') or []:
+            turn.pop('internal_handoff_seed', None)
+        return
+    turns = chat.get('turns') or []
+    rid = chat.get('last_run_id') or ''
+    if trusted_run is None and re.fullmatch(r'[A-Za-z0-9_-]+', rid):
+        try:
+            with open(os.path.join(DATA, 'execution', 'runs', rid, 'run.json')) as handle:
+                trusted_run = json.load(handle)
+        except (OSError, ValueError):
+            return
+    if (not isinstance(trusted_run, dict) or trusted_run.get('id') != rid or
+            trusted_run.get('session_id') != chat.get('id') or
+            trusted_run.get('provider') != 'claude' or
+            trusted_run.get('quota_failover_from') != provenance):
+        return
+    if (chat.get('source') != 'claude' or not provenance.get('run_id') or
+            provenance.get('native_session_id') != chat.get('id') or not turns):
+        return
+    turn = turns[0]
+    if (turn.get('role') == 'user' and isinstance(turn.get('text'), str) and
+            hashlib.sha256(turn['text'].encode('utf-8')).hexdigest() == provenance.get('prompt_sha256')):
+        turn['internal_handoff_seed'] = True
+
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "data")
@@ -134,6 +166,7 @@ def atomic_json_dump(obj, path, indent=None):
 
 def needs_attention(status, turns, explicit=False):
     """Conservatively identify a turn that cannot continue without the user."""
+    turns = [t for t in turns if t.get("channel") != "analysis"]
     if status != "working" or not turns or turns[-1].get("role") != "assistant":
         return False
     if explicit:
@@ -285,6 +318,8 @@ def parse_claude(path):
         except Exception:
             continue
         t = d.get("type")
+        if t in ("session-owner", "tools-used", "thread_settings_applied"):
+            continue
         agent_id = d.get('agentId') or agent_id
         content = (d.get('message') or {}).get('content')
         if t == 'assistant' and isinstance(content, list):
@@ -348,6 +383,9 @@ def parse_claude(path):
                         if op:
                             add_file((b.get("input") or {}).get("file_path")
                                      or (b.get("input") or {}).get("notebook_path"), op)
+                    elif isinstance(b, dict) and b.get("type") == "thinking" and (b.get("thinking") or "").strip():
+                        turns.append({"role": "assistant", "channel": "analysis",
+                                      "text": b["thinking"].strip(), "ts": tsv or ""})
             txt = text_blocks(content).strip()
             if txt:
                 turn = {"role": "assistant", "text": txt, "ts": tsv or ""}
@@ -453,13 +491,15 @@ def parse_codex_file(path):
             d = json.loads(line)
         except Exception:
             continue
+        p = d.get("payload") if isinstance(d.get("payload"), dict) else {}
+        t = d.get("type")
+        pt = p.get("type", "")
+        if t in ("session-owner", "tools-used", "thread_settings_applied") or pt == "thread_settings_applied":
+            continue
         tsv = d.get("timestamp")
         if tsv:
             ts_first = ts_first or tsv
             ts_last = tsv
-        p = d.get("payload") if isinstance(d.get("payload"), dict) else {}
-        t = d.get("type")
-        pt = p.get("type", "")
         if t == "session_meta":
             cwd = p.get("cwd", "")
             src = p.get('source') if isinstance(p.get('source'), dict) else {}
@@ -498,6 +538,10 @@ def parse_codex_file(path):
                     _int(last.get("output_tokens")), cr,
                     _int(last.get("cache_write_input_tokens"))))
                 usage_ids.append(json.dumps([tsv, total, last], sort_keys=True))
+        elif t == 'event_msg' and (pt == 'error' or pt == 'task_complete' and p.get('error')):
+            failure = auth_failure.from_event('codex', d, at=tsv)
+            turns.append({'role': 'assistant', 'text': failure['raw'], 'ts': tsv or '', 'error': True, 'failure': failure})
+            status = 'failed'
         elif t == "event_msg" and pt == "task_started":
             status = "working"
         elif t == "event_msg" and pt in ("task_complete", "turn_aborted"):
@@ -631,6 +675,8 @@ def merge_consecutive(turns):
             out[-1]["text"] = (out[-1]["text"] + "\n\n" + t["text"]).strip()
             # a merged turn is only an error turn if every part was one, so a
             # real answer followed by a 529 retry still counts as an answer
+            if t.get("ts") and not t.get("error"):
+                out[-1]["ts"] = t["ts"]
             if not t.get("error"):
                 out[-1].pop("error", None)
         else:
@@ -641,10 +687,14 @@ def merge_consecutive(turns):
 def finish(source, sid, path, cwd, branch, title, turns, files,
            ts_first, ts_last, extra=None):
     turns = merge_consecutive(turns)
+    for turn in turns:
+        if turn.get('error'):
+            turn['failure'] = turn.get('failure') or auth_failure.classify(source, turn.get('text', ''), (extra or {}).get('account_id'), turn.get('ts'))
     n_user = sum(1 for t in turns if t["role"] == "user")
     n_asst = sum(1 for t in turns if t["role"] == "assistant")
     n_answer = sum(1 for t in turns
-                   if t["role"] == "assistant" and not t.get("error"))
+                   if t["role"] == "assistant" and not t.get("error")
+                   and t.get("channel") != "analysis")
     key = f"{source}-{sid}"
     chat = {
         "key": key, "source": source, "id": sid, "file": path,
@@ -652,14 +702,21 @@ def finish(source, sid, path, cwd, branch, title, turns, files,
         "ts_first": ts_first, "ts_last": ts_last,
         "n_user": n_user, "n_asst": n_asst, "n_answer": n_answer,
         "last_role": turns[-1]["role"] if turns else "",
+        "last_assistant_ts": next((t.get("ts", "") for t in reversed(turns) if t["role"] == "assistant" and not t.get("error") and t.get("channel") != "analysis" and t.get("ts")), ""),
         "files_changed": [
             {"path": p, **c} for p, c in sorted(files.items())
         ],
         "turns": turns,
     }
+    last_answer = next((turn for turn in reversed(turns) if turn.get('role') == 'assistant' and turn.get('channel') != 'analysis'), {})
+    if last_answer.get('failure'):
+        chat['failure'] = last_answer['failure']
+        chat['status'] = 'failed'
     chat["files_all"] = [path]
     if extra:
         chat.update(extra)
+    if chat.get('failure'):
+        chat['status'] = 'failed'
     return chat
 
 
@@ -687,11 +744,13 @@ def meta_of(chat):
         "file": chat["file"], "files_all": chat["files_all"],
         "cwd": chat["cwd"], "title_seed": chat["title_seed"],
         "ts_first": chat["ts_first"], "ts_last": chat["ts_last"],
+        **({'failure': chat['failure']} if chat.get('failure') else {}),
         "n_user": chat["n_user"], "n_asst": chat["n_asst"],
         "n_answer": chat["n_answer"],
         "content_sig": content_sig(chat),
         "meta_v": META_V,
         "last_role": chat.get("last_role", ""),
+        "last_assistant_ts": chat.get("last_assistant_ts", ""),
         "status": chat.get("status", "complete"),
         "attention_required": bool(chat.get("attention_required", False)),
         "n_files": len(chat["files_changed"]),
@@ -830,6 +889,48 @@ def resolve_lineage(index):
 
 
 # ---------------------------------------------------------------- main
+def official_transcript_aliases():
+    """Ignore only aliases whose private ownership record still matches the file.
+
+    Current Claude SDKs reject final-component symlinks. Official's lookup aliases
+    therefore share the source inode. A stale alias after atomic source replacement
+    is still excluded, but an unrelated replacement or the last surviving copy is
+    retained. Reading this manifest never changes a transcript or its ownership.
+    """
+    shared = os.environ.get('LIBRARY_OFFICIAL_SHARED') or os.path.join(HOME, '.library-code-official-shared')
+    try:
+        with open(os.path.join(shared, 'session-aliases.json')) as handle:
+            manifest = json.load(handle)
+        if not isinstance(manifest, dict) or manifest.get('version') != 1:
+            return set()
+        aliases = manifest.get('aliases')
+        if not isinstance(aliases, dict):
+            return set()
+    except (OSError, ValueError):
+        return set()
+    owned = set()
+    for alias, record in aliases.items():
+        if not isinstance(record, dict) or record.get('kind') != 'hardlink':
+            continue
+        source = record.get('source')
+        if not isinstance(source, str) or not os.path.isabs(alias) or not os.path.isabs(source):
+            continue
+        # Inspect the final alias component itself before resolving parents; a
+        # replacement symlink must never hide its unrelated target.
+        alias, source = os.path.abspath(alias), os.path.realpath(source)
+        if os.path.realpath(alias) == source:
+            continue
+        try:
+            info = os.lstat(alias)
+            original = os.lstat(source)
+        except OSError:
+            continue
+        if (stat.S_ISREG(info.st_mode) and stat.S_ISREG(original.st_mode)
+                and (info.st_dev, info.st_ino) == (record.get('dev'), record.get('ino'))):
+            owned.add(os.path.realpath(alias))
+    return owned
+
+
 def main():
     full = "--full" in sys.argv
     cfg = load_config()
@@ -856,6 +957,7 @@ def main():
 
     # work units: claude = one file per chat; codex = all rollouts of a session
     # id. Each unit maps node -> [paths] so a uuid seen on two nodes is merged.
+    aliases = official_transcript_aliases()
     units = {}  # key -> (source, {node: [paths]})
     for node, croot, xroot, _xindex in roots:
         for pd in sorted(glob.glob(os.path.join(croot, "*")) if croot else []):
@@ -863,6 +965,8 @@ def main():
                 claude_files = glob.glob(os.path.join(pd, '*.jsonl'))
                 claude_files += glob.glob(os.path.join(pd, '*', 'subagents', '*.jsonl'))
                 for f in sorted(claude_files):
+                    if os.path.islink(f) or (node in ('mac', 'local') and os.path.realpath(f) in aliases):
+                        continue
                     sid = os.path.splitext(os.path.basename(f))[0]
                     if os.path.basename(os.path.dirname(f)) == 'subagents':
                         sid = os.path.basename(os.path.dirname(os.path.dirname(f))) + '-agent-' + sid.removeprefix('agent-')
@@ -871,6 +975,8 @@ def main():
                         .setdefault(node, []).append(f)
         for f in sorted(glob.glob(os.path.join(xroot, "**", "*.jsonl"),
                                   recursive=True) if xroot else []):
+            if os.path.islink(f):
+                continue
             key = "codex-" + codex_session_id(f)
             units.setdefault(key, ("codex", {}))[1].setdefault(node, []).append(f)
 
@@ -882,7 +988,7 @@ def main():
         if (prev and prev.get("src_sig") == src_sig(paths)
                 and prev.get("meta_v") == META_V):
             # unchanged since the last run, but still honour the current filter
-            if prev.get("n_answer", 1) < min_answers and not prev.get('is_child'):
+            if prev.get("n_answer", 1) < min_answers and not prev.get('is_child') and not prev.get('failure'):
                 n_noanswer += 1
                 continue
             seen_keys.add(key)
@@ -892,7 +998,7 @@ def main():
         if not chat or (not chat.get('is_child') and chat["n_user"] < cfg["min_user_msgs"]):
             n_drop += 1
             continue
-        if chat["n_answer"] < min_answers and not chat.get('is_child'):
+        if chat["n_answer"] < min_answers and not chat.get('is_child') and not chat.get('failure'):
             # asked but never answered: interrupted mid-turn, or every reply was
             # an API error. Nothing to read, so keep it out of the dashboard.
             n_noanswer += 1
@@ -906,6 +1012,7 @@ def main():
         except (OSError, ValueError):
             pass
         preserve_execution_metadata(chat, previous)
+        mark_quota_handoff_seed(chat)
         chat['source_locations'] = source_locations(by_node, cfg)
         chat['account_attribution'] = 'verified' if chat.get('account_id') else 'unknown'
         atomic_json_dump(chat, cpath)

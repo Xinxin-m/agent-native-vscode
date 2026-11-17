@@ -1,3 +1,4 @@
+import '../chat/authRecovery.js';
 import {api} from '../api/client';
 import {useEffect,useState} from 'react';
 import {useWorkbench} from './context';
@@ -9,15 +10,19 @@ const timestamp=(value:any)=>typeof value==='number'?value*(value<1e12?1000:1):D
 function readViewed():Record<string,string>{try{return JSON.parse(globalThis.localStorage?.getItem(viewedKey)||'{}')}catch{return {}}}
 function nativeKey(resource:Resource){return resource.key||(resource.kind==='chat'?conversations.peek(conversationIdentity(resource))?.nativeKey:undefined);}
 export function chatActivity(resource:Resource,data:any,runs:any[]=[],attention:any[]=[],viewed:Record<string,string>={},liveSessions:any[]=[]){
- if(resource.kind!=='chat')return {unread:false,running:false,awaiting:false};
+ if(resource.kind!=='chat')return {unread:false,running:false,awaiting:false,finished:false,recovery:false};
  const key=nativeKey(resource),chat=(data?.chats||[]).find((c:any)=>c.key===key)||resource.meta||{};
  const exactRuns=runs.filter((run:any)=>(key&&[run.key,run.conversation_key].includes(key))||(resource.runId&&run.id===resource.runId));
+ const latest=[...exactRuns].sort((a:any,b:any)=>timestamp(b.created_at)-timestamp(a.created_at))[0];
  const active=exactRuns.filter((run:any)=>run.status&&!terminal(run.status));
  const awaiting=attention.some((item:any)=>(key&&[item.key,item.conversation_key].includes(key))||active.some((run:any)=>run.id===item.run_id));
- const seen=Math.max(timestamp(key&&viewed[key]),timestamp(key&&data?.views?.[key]?.last));
- return {unread:!!key&&timestamp(chat.ts_last)>seen,running:active.length>0||liveSessions.some(s=>key&&s.chat_key===key&&s.alive&&!s.process_only&&Number(s.observed_at)>0&&Date.now()/1000-Number(s.observed_at)<150&&Number(s.observed_at)<=Date.now()/1000+5),awaiting};
+ // Replies older than the first time this client tracked reading ('*') count as read, so a fresh client is never blue on every chat.
+ const seen=Math.max(timestamp(key&&viewed[key]),timestamp(key&&data?.views?.[key]?.last),timestamp(viewed['*']));
+ const finished=!active.length&&exactRuns.some((run:any)=>run.status==='completed'&&timestamp(run.finished_at)>seen);
+ return {recovery:latest?Boolean(latest.failure&&latest.failure.kind!=='other'&&latest.status==='failed'):Boolean(chat.failure&&chat.failure.kind!=='other'),unread:!!key&&timestamp(chat.last_assistant_ts)>seen,finished,running:active.length>0||liveSessions.some(s=>key&&s.chat_key===key&&s.alive&&!s.process_only&&Number(s.observed_at)>0&&Date.now()/1000-Number(s.observed_at)<150&&Number(s.observed_at)<=Date.now()/1000+5),awaiting};
 }
 export const canMarkChatViewed=(visibility:string,focused:boolean)=>visibility==='visible'&&focused;
 export function markChatViewed(resource:Resource){if(!canMarkChatViewed(document.visibilityState,document.hasFocus()))return;const key=resource.kind==='chat'&&nativeKey(resource);if(!key)return;const viewed=readViewed(),previous=timestamp(viewed[key]);viewed[key]=new Date().toISOString();if(!previous||timestamp(resource.meta?.ts_last)>previous)void api('/api/view',{key,ts:viewed[key]}).catch(()=>{});try{localStorage.setItem(viewedKey,JSON.stringify(viewed));}catch{}window.dispatchEvent(new Event(eventName));}
-export function useChatActivities(){const wb=useWorkbench(),[viewed,setViewed]=useState(readViewed);useEffect(()=>{const refresh=()=>setViewed(readViewed());window.addEventListener(eventName,refresh);window.addEventListener('storage',refresh);return()=>{window.removeEventListener(eventName,refresh);window.removeEventListener('storage',refresh);};},[]);return (resource:Resource)=>chatActivity(resource,wb.data,wb.runs,wb.attention||[],viewed,wb.liveSessions||[]);}
+function readTrackedViews(){const viewed=readViewed();if(!viewed['*']){viewed['*']=new Date().toISOString();try{localStorage.setItem(viewedKey,JSON.stringify(viewed));}catch{}}return viewed;}
+export function useChatActivities(){const wb=useWorkbench();useEffect(()=>{for(const account of wb.accounts||[])(window as any).LibraryRecovery?.toastWarning({account,accounts:wb.accounts,request:api,onAccounts:()=>void wb.refresh()});const latest=new Map<string,any>();for(const r of [...(wb.runs||[])].sort((a:any,b:any)=>timestamp(b.created_at)-timestamp(a.created_at))){const key=r.conversation_key||r.key||r.id;if(!latest.has(key))latest.set(key,r)}for(const run of [...latest.values()].filter((r:any)=>r.status==='failed'&&r.failure&&r.failure.kind!=='other').slice(0,3)){const key=run.key||run.conversation_key,visible=[...document.querySelectorAll<HTMLElement>('.wb-conversation')].some(node=>node.dataset.chatKey===key&&node.getClientRects().length);if(!visible)(window as any).LibraryRecovery?.toastFailure({run,accounts:wb.accounts,request:api,onRun:(next:any)=>wb.open({kind:'chat',key:next.key||key,runId:next.id,title:'Recovered conversation'}),onAccounts:()=>void wb.refresh()})}},[wb.runs,wb.accounts]);const [viewed,setViewed]=useState(readTrackedViews);useEffect(()=>{const refresh=()=>setViewed(readViewed());window.addEventListener(eventName,refresh);window.addEventListener('storage',refresh);return()=>{window.removeEventListener(eventName,refresh);window.removeEventListener('storage',refresh);};},[]);return (resource:Resource)=>chatActivity(resource,wb.data,wb.runs,wb.attention||[],viewed,wb.liveSessions||[]);}
 export function useChatActivity(resource:Resource){return useChatActivities()(resource);}

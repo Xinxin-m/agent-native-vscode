@@ -3,23 +3,29 @@ import {createDraftRepository,draftEventIdentity,type FileDraft,type DraftConten
 import type {Resource} from '../state/types';
 import {api,query,ApiError} from '../api/client';
 import {contentUrl,coveringRoot,decodeText,fileIdentity,viewerKind,type FileRecord} from './helpers';
-export interface DocumentState {file?:FileRecord;text:string;baseText:string;baseVersion?:string;dirty:boolean;loading:boolean;saving:boolean;error?:string;conflict?:{text:string;version:string};persistenceError?:string;refreshError?:string;recoveries?:FileDraft[];recoveryError?:string}
+export interface DocumentState {file?:FileRecord;text:string;baseText:string;baseVersion?:string;dirty:boolean;loading:boolean;saving:boolean;error?:string;conflict?:{text:string;version:string};persistenceError?:string;refreshError?:string;recoveries?:FileDraft[];unassignedRecoveries?:FileDraft[];recoveryError?:string}
 const records=new Map<string,DocumentState>(),listeners=new Map<string,Set<()=>void>>();
 const EMPTY:DocumentState={text:'',baseText:'',dirty:false,loading:true,saving:false};
 const fallbackWriter=globalThis.crypto?.randomUUID?.()||'writer-'+Date.now();
 function drafts(){let writer=fallbackWriter;try{writer=new URLSearchParams(location.search).get('window')||writer;}catch{}return createDraftRepository(localStorage,writer);}
 function availableRecoveries(id:string){const repo=drafts();return repo.list(id).filter(d=>d.writer!==repo.writer);}
-export function documentKey(r:Resource){return fileIdentity(r.host_id||'mac',r.path||'');}
+export function documentKey(r:Resource){return r.path?fileIdentity(r.host_id||'mac',r.path):r.file_id?JSON.stringify([r.host_id||'mac',{file_id:r.file_id}]):fileIdentity(r.host_id||'mac','');}
+export function unassignedDrafts(r:Resource,repo:{list:(id:string)=>FileDraft[]}){return !r.path&&r.file_id?repo.list(fileIdentity(r.host_id||'mac','')):[];}
 export function snapshot(id:string){return records.get(id)||EMPTY;}
 function update(id:string,patch:Partial<DocumentState>){records.set(id,{...snapshot(id),...patch});listeners.get(id)?.forEach(fn=>fn());}
 function persist(id:string){const d=snapshot(id);try{const repo=drafts();if(d.dirty)repo.save(id,{text:d.text,baseText:d.baseText,version:d.baseVersion});else repo.clearOwn(id);update(id,{persistenceError:undefined,recoveries:availableRecoveries(id)});}catch{update(id,{persistenceError:'Browser storage is full. Keep this window open and save or download your draft.'});}}
 export function restoreDraft(resource:Resource,key:string){const id=documentKey(resource),d=snapshot(id);try{const repo=drafts(),saved=repo.list(id).find(r=>r.storageKey===key);if(!saved)return;if(d.dirty&&d.text!==saved.text)repo.archive(id,{text:d.text,baseText:d.baseText,version:d.baseVersion});const disk=d.conflict?.text??d.baseText,diskVersion=d.file?.version||d.baseVersion;update(id,{text:saved.text,baseText:saved.baseText,baseVersion:saved.version,dirty:saved.text!==disk,conflict:saved.version!==diskVersion?{text:disk,version:diskVersion||''}:undefined,recoveryError:undefined});persist(id);}catch{update(id,{recoveryError:'The current draft could not be backed up. Nothing was replaced. Download it before restoring another draft.'});}}
 export function discardDraft(resource:Resource,key:string){const id=documentKey(resource);try{drafts().discard(id,key);update(id,{recoveries:availableRecoveries(id),recoveryError:undefined});}catch{update(id,{recoveryError:'The saved draft could not be removed.'});}}
 export function useFileDocument(resource:Resource){const id=documentKey(resource);return useSyncExternalStore(fn=>{if(!listeners.has(id))listeners.set(id,new Set());listeners.get(id)!.add(fn);return ()=>{listeners.get(id)?.delete(fn);};},()=>snapshot(id));}
+// A moved file keeps its buffer: unsaved text is saved under the new path, then the view reloads there.
+export function moveDocument(from:Resource,to:Resource){const old=documentKey(from),id=documentKey(to),d=records.get(old);if(!d)return;if(d.dirty){const repo=drafts();repo.save(id,{text:d.text,baseText:d.baseText,version:d.baseVersion});repo.clearOwn(old);}records.delete(old);records.delete(id);}
 export function changeText(resource:Resource,text:string){const id=documentKey(resource),d=snapshot(id);update(id,{text,dirty:text!==d.baseText});persist(id);}
 export async function resolveFile(resource:Resource):Promise<FileRecord>{
  const host=resource.host_id||'mac',chatKey=resource.key||resource.meta?.chat_key;let root=resource.root_id,relative:string|undefined;
- if(resource.file_id&&!root){const result=await api(query('/api/files/stat',{file_id:resource.file_id}));return result.resource;}
+ if(resource.file_id&&!root){
+  try{const result=await api(query('/api/files/stat',{file_id:resource.file_id}));return result.resource;}
+  catch(error){if(!(error instanceof ApiError)||error.status!==404||!chatKey||!resource.path)throw error;const result=await api('/api/files/reference',{chat_key:chatKey,path:resource.path});if(!result.resource?.file_id||(result.resource.host_id||'mac')!==host)throw new Error('The refreshed file reference belongs to a different host.');return result.resource;}
+ }
  const data=await api(query('/api/files/roots',{host_id:host,chat_key:chatKey}));
  const roots=data.roots||[];const match=root?roots.find((r:any)=>(r.root_id||r.id)===root):coveringRoot(roots,host,resource.path||'');
  if(match){root=match.root_id||match.id;relative=(resource.path||'').slice(match.path.replace(/\/$/,'').length).replace(/^\//,'')||'.';}
@@ -43,9 +49,9 @@ async function hydrateDocument(resource:Resource,force=false){
  const previous=snapshot(id);if(force&&previous.dirty)throw new Error('Save or compare your unsaved changes before refreshing.');
  update(id,{loading:true,error:undefined});
  try{const file=await resolveFile(resource),kind=viewerKind(file.name,file.mime);update(id,{file});let text='';if(['source','markdown','html'].includes(kind))text=await textFor(file);
-  let saved:FileDraft|undefined,recoveries:FileDraft[]=[];try{const repo=drafts(),all=repo.list(id);saved=all.find(d=>d.writer===repo.writer)||(all.length===1&&all[0].legacy?all[0]:undefined);recoveries=all.filter(d=>d.writer!==repo.writer);}catch{}
+  let saved:FileDraft|undefined,recoveries:FileDraft[]=[],unassignedRecoveries:FileDraft[]=[];try{const repo=drafts(),all=repo.list(id);unassignedRecoveries=unassignedDrafts(resource,repo);if(!resource.path&&resource.file_id&&file.path)unassignedRecoveries=[...unassignedRecoveries,...repo.list(fileIdentity(file.host_id,file.path))];saved=all.find(d=>d.writer===repo.writer)||(all.length===1&&all[0].legacy?all[0]:undefined);recoveries=all.filter(d=>d.writer!==repo.writer);}catch{}
   const restored=Boolean(saved);
-  update(id,{file,text:restored?saved.text:text,baseText:restored?saved.baseText:text,baseVersion:restored?saved.version:file.version,dirty:restored&&saved.text!==text,loading:false,error:undefined,recoveries,conflict:restored&&saved.version!==file.version?{text,version:file.version}:undefined});
+  update(id,{file,text:restored?saved.text:text,baseText:restored?saved.baseText:text,baseVersion:restored?saved.version:file.version,dirty:restored&&saved.text!==text,loading:false,error:undefined,recoveries,unassignedRecoveries,conflict:restored&&saved.version!==file.version?{text,version:file.version}:undefined});
   if(restored&&saved.text!==text)persist(id);
  }catch(e){update(id,{loading:false,error:(e as Error).message});}
 }

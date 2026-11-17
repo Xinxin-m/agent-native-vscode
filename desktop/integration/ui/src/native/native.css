@@ -1,0 +1,20 @@
+html,body,#root{height:100%;margin:0;padding:0;overflow:hidden}body{background:var(--paper);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}#root{display:flex;flex-direction:column}.sidebar{width:100%!important;min-width:0!important;height:100%;border:0;position:relative!important;inset:auto!important;transform:none!important}.sidebar-dismiss{display:none!important}.sidebar-scroll{flex:1;min-height:0}.wb-conversation{height:100%;min-height:0;flex:1}.native-error{padding:12px;background:var(--panel);font-size:12px}.native-error button{margin-left:8px}.native-toast{position:fixed;bottom:14px;left:10%;max-width:80%;z-index:1000;background:var(--panel);box-shadow:0 3px 12px #0004;padding:12px}.development-link{font-size:11px;color:var(--muted);text-align:left;padding:6px 18px}.project-directory{padding:24px;overflow:auto}.project-directory details{padding:12px 0;border-bottom:1px solid var(--line)}.directory-chat{display:block;width:100%;text-align:left;padding:10px}.settings-page{overflow:auto;height:100%;min-height:0;flex:1 1 auto}.sidebar-top .brand{font-size:17px}.chat-empty h1{font-size:26px}.chat-composer-area{padding:12px 24px 20px}.chat-quiet-tools{padding-top:12px}@media(max-width:420px){.chat-composer-area{padding:8px}.chat-quiet-tools{padding:8px}.chat-reading{padding:8px 14px}}
+
+.sidebar-top{display:none}.sidebar-modes{margin-top:12px}
+
+.sidebar{font-family:var(--vscode-font-family);font-size:13px;background:var(--vscode-sideBar-background);color:var(--vscode-sideBar-foreground,var(--vscode-foreground))}.sidebar-modes{margin:8px 12px 12px;padding:3px;border-radius:7px;background:var(--vscode-editor-background)}.sidebar-modes button{font-size:12px;border-radius:5px}.sidebar-modes button.active{background:var(--vscode-list-inactiveSelectionBackground);color:var(--vscode-list-inactiveSelectionForeground,var(--vscode-foreground))}.sidebar .section-label{font-size:11px}.sidebar .chat-row{border-radius:5px}
+
+.provider-filter{display:flex;gap:4px;margin:0 14px 8px}.provider-filter button{flex:1;font-size:11px;padding:5px;border-radius:5px;color:var(--muted)}.provider-filter button[aria-pressed=true]{background:var(--vscode-list-inactiveSelectionBackground);color:var(--vscode-list-inactiveSelectionForeground,var(--vscode-foreground))}
+
+/* One navigation row: view switch on the left, contextual actions on the right. */
+.sidebar-header{display:flex;align-items:center;justify-content:space-between;gap:4px;min-height:44px;flex-shrink:0;padding:6px 0}
+.sidebar-header .sidebar-modes{flex:0 1 auto;min-width:0;margin:0;padding:2px;gap:1px;background:transparent;border-radius:6px}
+.sidebar-header .sidebar-modes button{flex:none;padding:5px 7px;gap:0;line-height:20px;white-space:nowrap}
+.sidebar-header .sidebar-modes button.selected{background:var(--vscode-list-inactiveSelectionBackground);color:var(--vscode-list-inactiveSelectionForeground,var(--vscode-foreground));box-shadow:none}
+.sidebar-header-actions{display:flex;align-items:center;gap:1px;flex:none}
+.sidebar-header-actions .icon-button{width:26px;height:30px;border-radius:5px}
+.sidebar-header-actions .icon-button[aria-expanded=true]{background:var(--vscode-list-inactiveSelectionBackground);color:var(--ink)}
+.sidebar-navigation{display:contents}
+.sidebar-header~.provider-filter{margin:0 0 8px}
+.sidebar-header~.search-field{margin-bottom:8px}
+@media(max-width:210px){.sidebar{padding-left:6px;padding-right:6px}.sidebar-header .sidebar-modes button{padding-left:5px;padding-right:5px}}

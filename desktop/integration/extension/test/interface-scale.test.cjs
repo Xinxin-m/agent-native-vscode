@@ -1,0 +1,4 @@
+const test=require('node:test'),assert=require('node:assert/strict'),{zoomLevel,apply,SIZES}=require('../interface-scale.cjs');
+test('five choices scale the entire interface relative to 14',()=>{assert.equal(SIZES.length,5);assert.equal(zoomLevel(14),0);for(const size of SIZES)assert(Math.abs(Math.pow(1.2,zoomLevel(size))-size/14)<1e-9)});
+test('rejects unsupported values',()=>{assert.throws(()=>zoomLevel(0));assert.throws(()=>zoomLevel(200))});
+test('avoids needless setting writes and applies an explicit size',async()=>{const changes=[],config={get:()=>0,update:async(...args)=>changes.push(args)},vscode={workspace:{getConfiguration:()=>config},ConfigurationTarget:{Global:1}};await apply(vscode,14);assert.equal(changes.length,0);await apply(vscode,18);assert.equal(changes[0][0],'zoomLevel');assert.equal(changes[0][2],1)});

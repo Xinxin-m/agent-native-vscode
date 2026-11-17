@@ -30,3 +30,9 @@ app/project-map/output/
 app/project-map/views.json
 app/project-map/folder-discovery.json
 app/vscode-library/builds/
+
+# Reconstructed desktop and local artifacts
+desktop/vscode/
+desktop/VSCode-*/
+desktop/output/
+*.app/

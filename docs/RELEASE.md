@@ -6,6 +6,7 @@
 | --- | --- |
 | `app/*.py` | Cohesive local backend, broker, indexing pipeline, and provider adapters |
 | `scripts/` | Sanitized release packager |
+| `scripts/harness/` | Agent harness scripts (metrics, scoreboard, sweep, hooks) and their tests |
 | Root `install.sh`, `run.sh` | Small launchers for the application |
 | `app/workbench/src/` | Browser client source |
 | `app/web/workbench/` | Current bundled browser client; ship referenced assets only |
@@ -22,7 +23,7 @@ The development machine may contain private requirement notes and QA reports. Th
 
 1. Build the browser client from the locked dependencies.
 2. Run `python3 scripts/package_workspace.py` from the root. It creates a new dated output directory and never overwrites a previous release.
-3. Extract the archive into a new writable directory. Inspect `PACKAGE-INVENTORY.json` and `PRIVACY-SCAN.json` there.
+3. Inspect `PACKAGE-INVENTORY.json` and `PRIVACY-SCAN.json` beside the archive; they are not part of the shipped tree. The scan fails the build and prints `file:line` for any hit of the private deny-list (`data/privacy-denylist.txt`, one term per line, never shipped), personal home paths, emails, phone numbers, `.edu` hostnames or credential-shaped values. Then extract the archive into a new writable directory.
 4. Confirm that `app/data/` contains only `config.example.json`. No source histories, account profiles, journals, logs, screenshots, or personal configuration should ship.
 5. With a temporary home directory, create configuration and run `python3 app/pipeline.py --parse-only`. Confirm empty history is accepted without provider model calls.
 6. Start the extracted server on an unused loopback port. Verify Workspace loads, accounts return a truthful empty/discovered state, and missing histories have useful empty states. Stop only this test process.

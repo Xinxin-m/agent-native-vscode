@@ -1,0 +1,8 @@
+/** Preserve server ordering and the first useful snippet across overlapping pages. */
+export function uniqueChats<T extends {key:string}>(chats:T[]):T[]{const seen=new Set<string>();return chats.filter(chat=>{if(!chat.key||seen.has(chat.key))return false;seen.add(chat.key);return true;});}
+export function providerLabel(chat:{source?:string;provider?:string;key?:string}){const provider=chat.source||chat.provider||chat.key?.split('-')[0];return provider==='claude'?'Claude':provider==='codex'?'Codex':'Unknown provider';}
+export function searchParts(value:any,query:string):{text:string;match:boolean}[]{const text=String(value||''),needle=query.trim();if(!needle)return [{text,match:false}];const expression=new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'giu'),parts:{text:string;match:boolean}[]=[];let end=0;for(const match of text.matchAll(expression)){if(match.index!>end)parts.push({text:text.slice(end,match.index),match:false});parts.push({text:match[0],match:true});end=match.index!+match[0].length;}if(end<text.length)parts.push({text:text.slice(end),match:false});return parts.length?parts:[{text,match:false}];}
+
+export function isRootChat(chat:any){return !chat.is_child&&!chat.parent_key&&!chat.parent_agent_id&&!chat.parent_session_id&&(!chat.root_key||chat.root_key===chat.key);}
+
+export function historyChats(chats:any[],provider:string,query:string){const needle=query.trim().toLowerCase();return uniqueChats(chats).filter(c=>isRootChat(c)&&!c.automation&&(!provider||(c.source||c.key?.split('-')[0])===provider)&&(!needle||[c.title,c.description,c.first_prompt].join(' ').toLowerCase().includes(needle))).sort((a,b)=>String(b.ts_last).localeCompare(String(a.ts_last))).slice(0,80);}

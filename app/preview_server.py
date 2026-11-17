@@ -1,5 +1,6 @@
 """One scoped loopback origin per artifact, with relative/root-relative assets."""
 import secrets
+import posixpath
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -63,8 +64,15 @@ class PreviewServer:
                 if not relative or relative.endswith('/'):
                     relative += 'index.html'
                 try:
-                    resource = scope['service'].stat(scope['root_id'], relative)
-                    raw = scope['service'].read(scope['root_id'], relative) if self.command != 'HEAD' else None
+                    if scope.get('file_id'):
+                        if relative != scope['entry']:
+                            raise fs.FileError('outside_root', 'This preview only permits its referenced file', 403)
+                        resource = scope['service'].stat(file_id=scope['file_id'])
+                        raw = scope['service'].read(file_id=scope['file_id']) if self.command != 'HEAD' else None
+                    else:
+                        scoped_path = '/'.join(filter(None, (scope.get('prefix',''), relative)))
+                        resource = scope['service'].stat(scope['root_id'], scoped_path)
+                        raw = scope['service'].read(scope['root_id'], scoped_path) if self.command != 'HEAD' else None
                 except fs.FileError as exc:
                     self.send_error(exc.status, str(exc))
                     return
@@ -95,17 +103,37 @@ class PreviewServer:
                          name='workbench-preview-'+token[:6]).start()
         return http
 
-    def register(self, host_id, directory, entry, app_origin, allow_network=False):
-        fs.local_host(host_id)
+    def register(self, host_id, directory, entry, app_origin, allow_network=False, root_id=None, file_id=None):
         if not isinstance(allow_network, bool):
             raise fs.FileError('invalid_request', 'allow_network must be a boolean')
         parsed = urlsplit(app_origin)
         if parsed.scheme != 'http' or parsed.hostname not in ('127.0.0.1','localhost') or parsed.path or parsed.query or parsed.fragment or parsed.username:
             raise fs.FileError('invalid_origin','Preview parent must be the loopback workbench')
-        service = fs.FileService(default_root=None)
-        root = service._root(directory,'read')
-        service.roots = {root['id']:root}
-        service.stat(root['id'],entry)
+        fs.parts(entry)
+        if not entry:
+            raise fs.FileError('invalid_path', 'Preview entry is required')
+        prefix = ''
+        if file_id:
+            service = fs.instance()
+            resource = service.stat(file_id=file_id)
+            if resource['host_id'] != (host_id or 'mac') or resource['path'] != posixpath.join(directory, entry):
+                raise fs.FileError('outside_root', 'Preview does not match its file reference', 403)
+            root = {'id':None, 'path':directory}
+        elif root_id:
+            service = fs.instance()
+            root = service.get_root(root_id)
+            if root['host_id'] != (host_id or 'mac'):
+                raise fs.FileError('outside_root', 'Preview host does not match its root', 403)
+            prefix = posixpath.relpath(directory, root['path'])
+            if prefix == '.': prefix = ''
+            fs.parts(prefix)
+            service.stat(root_id, '/'.join(filter(None, (prefix,entry))))
+        else:
+            fs.local_host(host_id)
+            service = fs.FileService(default_root=None)
+            root = service._root(directory,'read')
+            service.roots = {root['id']:root}
+            service.stat(root['id'],entry)
         token = secrets.token_urlsafe(32)
         expires = time.time()+1800
         expired_listeners = []
@@ -120,7 +148,8 @@ class PreviewServer:
             if len(self.tokens) >= 128:
                 raise fs.FileError('preview_limit','Close or wait for existing previews to expire',429)
             self.tokens[token] = {'service':service,'root_id':root['id'],'expires_at':expires,
-                                  'app_origin':app_origin,'allow_network':allow_network}
+                                  'app_origin':app_origin,'allow_network':allow_network,
+                                  'file_id':file_id,'entry':entry,'prefix':prefix}
         for listener in expired_listeners:
             listener.shutdown()
             listener.server_close()
@@ -156,7 +185,8 @@ def register(req, query, body):
         if _INSTANCE is None:
             _INSTANCE = PreviewServer()
     return _INSTANCE.register(body.get('host_id'),body.get('artifact_directory'),body.get('entry_path'),
-                              'http://' + req.headers.get('Host',''),body.get('allow_network',False))
+                              'http://' + req.headers.get('Host',''),body.get('allow_network',False),
+                              body.get('root_id'),body.get('file_id'))
 
 
 ROUTES = {('POST','/api/previews'):register}

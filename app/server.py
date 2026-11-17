@@ -17,12 +17,14 @@ Endpoints
   POST /api/send              {key, message, model?, effort?} resume via claude/codex CLI
   POST /api/open              {path} open file in editor
 """
-import json, mimetypes, os, re, shutil, subprocess, sys, threading, time, urllib.parse
+import gzip, hashlib, json, mimetypes, os, re, shutil, stat, subprocess, sys, threading, time, urllib.parse
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import clis  # noqa: E402  (the CLIs are invisible to a service's minimal PATH)
 from automation import automation_kind, effective_projects
+import json_cache
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "data")
@@ -39,6 +41,14 @@ FILES = {
 }
 LOCK = threading.Lock()
 SCAN_LOCK = threading.Lock()
+STATE_LOCK = threading.Lock()  # guards _STATE, the cached /api/state bytes
+_STATE = {}
+_STATE_HISTORY = OrderedDict()  # Current and four previous chat-row fingerprints.
+_CHAT_CACHE = OrderedDict()
+_CHAT_LOCK = threading.Lock()
+_RESPONSE_LOCK = threading.Lock()
+_STATE_ERROR = {}  # last failed build: {"message", "at", "logged"}; cleared by a good build
+STATE_RETRY_S = 5
 
 
 def jload(name, default):
@@ -61,11 +71,24 @@ def default_projects():
 # ------------------------------------------------- models the composer offers
 # Claude aliases resolve to the current model of that tier, so they keep working
 # across releases; effort levels are the CLI's own --effort values.
+# Exact versions come from the model tiers file, which is kept current.
+CLAUDE_TIERS = os.path.expanduser("~/.claude/evolve/data/models.json")
+
+
+def claude_models():
+    try:
+        tiers = json.load(open(CLAUDE_TIERS)).get("tiers") or {}
+    except Exception:
+        tiers = {}
+    out = []
+    for t in tiers.values():
+        m = re.match(r"claude-([a-z]+)-(\d+)(?:-(\d+))?$", str(t.get("claude") or ""))
+        if m and all(x["id"] != t["claude"] for x in out):
+            out.append({"id": t["claude"], "name": m[1].title() + " " + m[2] + ("." + m[3] if m[3] else "")})
+    return out + CLAUDE_MODELS
+
+
 CLAUDE_MODELS = [
-    {"id": "claude-opus-5-5", "name": "Opus 5.5"},
-    {"id": "claude-sonnet-5-5", "name": "Sonnet 5.5"},
-    {"id": "claude-fable-5-2", "name": "Fable 5.2"},
-    {"id": "claude-haiku-5-5", "name": "Haiku 5.5"},
     {"id": "", "name": "Session default"},
     {"id": "opus", "name": "Opus (CLI alias)"},
     {"id": "opus[1m]", "name": "Opus (1M context)"},
@@ -103,7 +126,7 @@ def codex_models():
 
 def compose_options():
     return {
-        "claude": {"models": CLAUDE_MODELS, "efforts": CLAUDE_EFFORTS},
+        "claude": {"models": claude_models(), "efforts": CLAUDE_EFFORTS},
         "codex": {"models": codex_models(), "efforts": CODEX_EFFORTS},
     }
 
@@ -117,15 +140,234 @@ def config_exclusions(cfg):
     return [value for value in values if isinstance(value, str) and value.strip()] if isinstance(values, list) else []
 
 
-def data_revision():
-    """A cheap token for the browser to learn that library data changed."""
-    newest = 0
-    for name in ("index", "enrich", "projects", "flags", "views", "config"):
+def build_state():
+    """The /api/state payload without its revision."""
+    with LOCK:
+        index = jload("index", {})
+        enrich = jload("enrich", {})
+        flags = jload("flags", default_flags())
+        archived = set(flags.get("archived", []))
+        starred = set(flags.get("starred", []))
+        cfg = jload("config", {})
+        cfg = cfg if isinstance(cfg, dict) else {}
+        excluded = config_exclusions(cfg)
+        cfg = dict(cfg, excluded_cwds=excluded)
+        chats = []
+        dirs = {}
+        for k, m in index.items():
+            cwd = m.get("cwd") or "?"
+            dirs[cwd] = dirs.get(cwd, 0) + 1
+            if any(cwd == e or cwd.startswith(e.rstrip("/") + "/")
+                   for e in excluded):
+                continue
+            e = enrich.get(k) or {}
+            chats.append({**{x: m[x] for x in
+                             ("key", "source", "id", "file", "cwd", "title_seed",
+                              "ts_first", "ts_last", "n_user", "n_asst", "n_files",
+                              "first_prompt")},
+                          "files_all": m.get("files_all", [m["file"]]),
+                          # v2 fields written by the indexer (see docs/V2-CONTRACTS.md)
+                          "node": m.get("node", "mac"),
+                          "model_main": m.get("model_main", ""),
+                          "models": m.get("models", {}),
+                          **{field: m[field] for field in ('account_id', 'execution_host', 'host_id', 'conversation_key', 'source_key', 'last_run_id', 'parent_key', 'root_key', 'parent_agent_id', 'parent_session_id', 'agent_id', 'agent_label', 'agent_path', 'is_child', 'lineage_source', 'spawned_children', 'source_locations', 'account_attribution') if field in m},
+                          "usage": m.get("usage", {}),
+                          "title": (flags.get("titles") or {}).get(k) or e.get("title") or m.get("title_seed")
+                                   or (m.get("first_prompt") or "")[:60] or k,
+                          "description": e.get("description", ""),
+                          "keywords": e.get("keywords", []),
+                          "topic_hint": e.get("topic_hint", ""),
+                          "is_ops": e.get("is_ops", False),
+                          "automation": bool(automation_kind(m)),
+                          "automation_kind": automation_kind(m),
+                          "enriched": "title" in e,
+                          "status": m.get("status", "complete"),
+                          "last_role": m.get("last_role", ""),
+                          "last_assistant_ts": m.get("last_assistant_ts", ""),
+                          "transcript_revision": json.dumps(m.get("src_sig", [])),
+                          "attention_required": bool(m.get("attention_required", False)),
+                          "archived": k in archived or bool(automation_kind(m)),
+                          "starred": k in starred})
+        project_state = effective_projects(index, jload("projects", default_projects()))
+        from session_lineage import effective_assignments
+        project_state["assignments"] = effective_assignments(index, project_state["assignments"])
+        from projects import display_state
+        project_state = display_state(index, project_state, flags, cfg)
+        return {
+            "chats": chats,
+            "projects": project_state,
+            "chat_flags": flags,
+            "views": jload("views", {}),
+            "config": {**cfg, "data_dir": DATA},
+            "dirs": [{"cwd": c, "n": n,
+                      "excluded": any(c == e or c.startswith(e.rstrip("/") + "/")
+                                      for e in excluded)}
+                     for c, n in sorted(dirs.items(), key=lambda x: -x[1])],
+            # Pending means not attempted yet. Failed label attempts are
+            # tracked separately so the UI never implies a worker is
+            # still running after a timeout.
+            "enrich_pending": sum(1 for k in index if k not in enrich),
+            "enrich_failed": sum(1 for k in index
+                                 if "error" in (enrich.get(k) or {})),
+            "compose_options": compose_options(),
+            # what THIS process can execute, which is what matters for
+            # resuming a chat and for a Rescan it launches
+            "cli_paths": {n: clis.cli(n) for n in ("claude", "codex")},
+        }
+
+
+def _state_signature():
+    sig = []
+    for path in [FILES[n] for n in ("index", "enrich", "projects", "flags", "views", "config")] + [CODEX_MODELS_CACHE]:
         try:
-            newest = max(newest, os.stat(FILES[name]).st_mtime_ns)
+            st = os.stat(path)
+            sig.append((path, st.st_mtime_ns, st.st_size, st.st_ino))
         except OSError:
-            pass
-    return str(newest)
+            sig.append((path, None))
+    return tuple(sig)
+
+
+def _serialized_json(payload):
+    body = json.dumps(payload, ensure_ascii=False).encode()
+    return {"etag": hashlib.sha256(body).hexdigest()[:24], "body": body}
+
+
+def _chat_signature(path):
+    st = os.stat(path)
+    if not stat.S_ISREG(st.st_mode):
+        raise FileNotFoundError(path)
+    return (st.st_mtime_ns, st.st_size, st.st_ino)
+
+
+def chat_body(key):
+    """Reuse serialized chat bytes; title reads never take the mutation LOCK."""
+    path = os.path.join(CHATS, os.path.basename(key) + ".json")
+    signature = _chat_signature(path)
+    flags = json_cache.latest(FILES["flags"], default_flags())
+    title = (flags.get("titles") or {}).get(key) if isinstance(flags, dict) else None
+    version = (signature, title)
+    with _CHAT_LOCK:
+        cached = _CHAT_CACHE.get(path)
+        if cached and cached["version"] == version:
+            _CHAT_CACHE.move_to_end(path)
+            return cached
+        with open(path) as handle:
+            chat = json.load(handle)
+        if title:
+            chat["title"] = title
+        response = {**_serialized_json(chat), "version": version}
+        _CHAT_CACHE[path] = response
+        _CHAT_CACHE.move_to_end(path)
+        # Bound both transcript count and raw byte storage. Lazy gzip adds at
+        # most roughly another copy without retaining the parsed transcripts.
+        while len(_CHAT_CACHE) > 64 or sum(len(row["body"]) for row in _CHAT_CACHE.values()) > 32 * 1024 * 1024:
+            _CHAT_CACHE.popitem(last=False)
+        return response
+
+
+def _remember_state_rows(state):
+    rows = {row["key"]: hashlib.sha256(json.dumps(row, ensure_ascii=False, sort_keys=True).encode()).digest()
+            for row in state["payload"].get("chats", [])}
+    state["rows"] = rows
+    _STATE_HISTORY[state["etag"]] = rows
+    _STATE_HISTORY.move_to_end(state["etag"])
+    while len(_STATE_HISTORY) > 5:
+        _STATE_HISTORY.popitem(last=False)
+
+
+def _state_response(state, since):
+    previous = _STATE_HISTORY.get(since) if since else None
+    if previous is None:
+        return state  # Legacy/full shape, also the recovery path for old tokens.
+    responses = state.setdefault("deltas", {})
+    if since not in responses:
+        payload = state["payload"]
+        delta = {"delta": True, "since": since, "revision": state["etag"],
+                 "changed": [row for row in payload.get("chats", []) if previous.get(row["key"]) != state["rows"][row["key"]]],
+                 "removed": sorted(set(previous) - set(state["rows"])),
+                 "state": {key: value for key, value in payload.items() if key != "chats"}}
+        responses[since] = _serialized_json(delta)
+    return responses[since]
+
+
+def state_body(since=None):
+    """Serialized /api/state, rebuilt only when one of its input files changed.
+
+    The revision is a hash of the content, so a rewrite that changes nothing a
+    client sees (same projects, same index) does not make clients refetch."""
+    global _STATE
+    with STATE_LOCK:
+        sig = _state_signature()  # taken after the wait, so a queued caller reuses a newer build
+        if _STATE.get("sig") != sig:
+            if _STATE_ERROR and time.time() - _STATE_ERROR["at"] < STATE_RETRY_S:
+                raise RuntimeError(_STATE_ERROR["message"])  # still failing; do not rebuild yet
+            try:
+                payload = build_state()
+                body = json.dumps(payload, ensure_ascii=False).encode()
+            except Exception as exc:
+                message = f"{type(exc).__name__}: {exc}"[:300]
+                if _STATE_ERROR.get("message") != message:  # log once per distinct error
+                    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} /api/state build failed: {message}", flush=True)
+                _STATE_ERROR.update(message=message, at=time.time())
+                raise
+            _STATE_ERROR.clear()
+            etag = hashlib.sha256(body).hexdigest()[:24]
+            # "revision" stays the last key, as before
+            body = body[:-1] + b', "revision": "' + etag.encode() + b'"}'
+            if not _STATE:
+                _STATE_HISTORY.clear()
+            snapshot = {"sig": sig, "etag": etag, "body": body, "payload": payload}
+            _remember_state_rows(snapshot)
+            _STATE = snapshot  # Publish only after every derived field is ready.
+        return _state_response(_STATE, since)
+
+
+def gzipped_state(state):
+    # Each response object owns its compressed representation, including chat
+    # and delta responses. A concurrent new state cannot change these bytes.
+    with _RESPONSE_LOCK:
+        if "gzip" not in state:
+            state["gzip"] = gzip.compress(state["body"], 1, mtime=0)
+        return state["gzip"]
+
+
+def data_revision():
+    """A cheap token for the browser to learn that library data changed.
+
+    Never waits for a rebuild: a stale cache starts one in the background and
+    the next poll sees the new revision once it is ready."""
+    state = _STATE
+    retry = time.time() - _STATE_ERROR.get("at", 0) >= STATE_RETRY_S
+    if not state:
+        if retry:
+            try:
+                return state_body()["etag"]
+            except Exception:
+                pass
+        return ""
+    if retry and state["sig"] != _state_signature() and STATE_LOCK.acquire(blocking=False):
+        STATE_LOCK.release()
+        threading.Thread(target=_rebuild_quietly, daemon=True).start()
+    return state["etag"]
+
+
+def _rebuild_quietly():
+    try:
+        state_body()
+    except Exception:
+        pass  # recorded in _STATE_ERROR and logged by state_body
+
+
+def revision_payload():
+    revision = data_revision()
+    error = _STATE_ERROR.get("message")
+    # Looking up the already imported module must never initialize a broker.
+    broker = getattr(sys.modules.get("broker"), "_BROKER", None)
+    runs = getattr(getattr(broker, "store", None), "revision", "")
+    payload = {"revision": revision, "runs": runs}
+    if error:
+        payload["error"] = error
+    return payload
 
 
 # ---------------------------------------------------------------- actions
@@ -233,6 +475,8 @@ def delete_chat(key):
             if key in flags.get(name, []):
                 flags[name] = [item for item in flags[name] if item != key]
                 changed = True
+        if (flags.get("titles") or {}).pop(key, None) is not None:
+            changed = True
         if changed:
             jsave("flags", flags)
         return {"ok": True, "removed": removed}
@@ -296,6 +540,39 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_state(self, state):
+        etag = '"%s"' % state["etag"]
+        sent = [t.strip().removeprefix("W/") for t in self.headers.get("If-None-Match", "").split(",")]
+        if etag in sent or "*" in sent:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            return
+        accepted = {}
+        for item in self.headers.get("Accept-Encoding", "").lower().split(","):
+            parts = [part.strip() for part in item.split(";")]
+            quality = 1.0
+            for option in parts[1:]:
+                if option.startswith("q="):
+                    try:
+                        quality = float(option[2:])
+                    except ValueError:
+                        quality = 0.0
+            accepted[parts[0]] = quality
+        body = gzipped_state(state) if accepted.get("gzip", accepted.get("*", 0)) > 0 else state["body"]
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("ETag", etag)
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Vary", "Accept-Encoding")
+        if body is not state["body"]:
+            self.send_header("Content-Encoding", "gzip")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _static(self, rel):
         path = os.path.realpath(os.path.join(WEB, rel.lstrip("/")))
         if os.path.commonpath([os.path.realpath(WEB), path]) != os.path.realpath(WEB) or not os.path.isfile(path):
@@ -326,84 +603,21 @@ class Handler(BaseHTTPRequestHandler):
         if u.path.startswith("/static/"):
             return self._static(u.path[len("/static/"):])
         if u.path == "/api/state":
-            with LOCK:
-                index = jload("index", {})
-                enrich = jload("enrich", {})
-                flags = jload("flags", default_flags())
-                archived = set(flags.get("archived", []))
-                starred = set(flags.get("starred", []))
-                cfg = jload("config", {})
-                cfg = cfg if isinstance(cfg, dict) else {}
-                excluded = config_exclusions(cfg)
-                cfg = dict(cfg, excluded_cwds=excluded)
-                chats = []
-                dirs = {}
-                for k, m in index.items():
-                    cwd = m.get("cwd") or "?"
-                    dirs[cwd] = dirs.get(cwd, 0) + 1
-                    if any(cwd == e or cwd.startswith(e.rstrip("/") + "/")
-                           for e in excluded):
-                        continue
-                    e = enrich.get(k) or {}
-                    chats.append({**{x: m[x] for x in
-                                     ("key", "source", "id", "file", "cwd", "title_seed",
-                                      "ts_first", "ts_last", "n_user", "n_asst", "n_files",
-                                      "first_prompt")},
-                                  "files_all": m.get("files_all", [m["file"]]),
-                                  # v2 fields written by the indexer (see docs/V2-CONTRACTS.md)
-                                  "node": m.get("node", "mac"),
-                                  "model_main": m.get("model_main", ""),
-                                  "models": m.get("models", {}),
-                                  **{field: m[field] for field in ('account_id', 'execution_host', 'host_id', 'conversation_key', 'source_key', 'last_run_id', 'parent_key', 'root_key', 'parent_agent_id', 'agent_id', 'agent_label', 'agent_path', 'is_child', 'lineage_source', 'spawned_children', 'source_locations', 'account_attribution') if field in m},
-                                  "usage": m.get("usage", {}),
-                                  "title": e.get("title") or m.get("title_seed")
-                                           or (m.get("first_prompt") or "")[:60] or k,
-                                  "description": e.get("description", ""),
-                                  "keywords": e.get("keywords", []),
-                                  "topic_hint": e.get("topic_hint", ""),
-                                  "is_ops": e.get("is_ops", False),
-                                  "automation": bool(automation_kind(m)),
-                                  "automation_kind": automation_kind(m),
-                                  "enriched": "title" in e,
-                                  "status": m.get("status", "complete"),
-                                  "last_role": m.get("last_role", ""),
-                                  "transcript_revision": json.dumps(m.get("src_sig", [])),
-                                  "attention_required": bool(m.get("attention_required", False)),
-                                  "archived": k in archived or bool(automation_kind(m)),
-                                  "starred": k in starred})
-                project_state = effective_projects(index, jload("projects", default_projects()))
-                from session_lineage import effective_assignments
-                project_state["assignments"] = effective_assignments(index, project_state["assignments"])
-                return self._json({
-                    "chats": chats,
-                    "projects": project_state,
-                    "chat_flags": flags,
-                    "views": jload("views", {}),
-                    "config": {**cfg, "data_dir": DATA},
-                    "dirs": [{"cwd": c, "n": n,
-                              "excluded": any(c == e or c.startswith(e.rstrip("/") + "/")
-                                              for e in excluded)}
-                             for c, n in sorted(dirs.items(), key=lambda x: -x[1])],
-                    # Pending means not attempted yet. Failed label attempts are
-                    # tracked separately so the UI never implies a worker is
-                    # still running after a timeout.
-                    "enrich_pending": sum(1 for k in index if k not in enrich),
-                    "enrich_failed": sum(1 for k in index
-                                         if "error" in (enrich.get(k) or {})),
-                    "compose_options": compose_options(),
-                    # what THIS process can execute, which is what matters for
-                    # resuming a chat and for a Rescan it launches
-                    "cli_paths": {n: clis.cli(n) for n in ("claude", "codex")},
-                    "revision": data_revision(),
-                })
+            try:
+                state = state_body((q.get("since") or [None])[0])
+            except Exception:
+                return self._json({"ok": False, "error": "Library state could not be built: " + _STATE_ERROR.get("message", "unknown error")}, 500)
+            return self._send_state(state)
         if u.path == "/api/revision":
-            return self._json({"revision": data_revision()})
+            return self._json(revision_payload())
         if u.path == "/api/chat":
             key = (q.get("key") or [""])[0]
-            path = os.path.join(CHATS, os.path.basename(key) + ".json")
-            if not os.path.isfile(path):
+            try:
+                return self._send_state(chat_body(key))
+            except FileNotFoundError:
                 return self._json({"error": "not found"}, 404)
-            return self._json(json.load(open(path)))
+            except (OSError, ValueError):
+                return self._json({"error": "Chat could not be read"}, 500)
         if self._plugin("GET", u.path, {k: v[0] for k, v in q.items()}, None):
             return
         self.send_error(404)
@@ -537,6 +751,30 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/api/chat_state":
             action = body.get("action")
+            if action == "rename":
+                key, title = body.get("key"), body.get("title")
+                if not isinstance(key, str) or not isinstance(title, str) or not title.strip() or len(title) > 200 or any(ord(c) < 32 for c in title):
+                    return self._json({"ok": False, "error": "Enter a title between 1 and 200 characters"}, 400)
+                with LOCK:
+                    if key not in jload("index", {}):
+                        return self._json({"ok": False, "error": "Conversation not found"}, 404)
+                    flags = jload("flags", default_flags())
+                    flags["titles"] = dict(flags.get("titles") or {}, **{key: title.strip()})
+                    jsave("flags", flags)
+                return self._json({"ok": True, "title": title.strip()})
+            if action == "reset_title":  # drop the manual rename; the generated title shows again
+                key = body.get("key")
+                with LOCK:
+                    index = jload("index", {})
+                    if not isinstance(key, str) or key not in index:
+                        return self._json({"ok": False, "error": "Conversation not found"}, 404)
+                    flags = jload("flags", default_flags())
+                    titles = dict(flags.get("titles") or {})
+                    if titles.pop(key, None) is not None:
+                        jsave("flags", dict(flags, titles=titles))
+                    m = index[key]
+                    title = (jload("enrich", {}).get(key) or {}).get("title") or m.get("title_seed") or (m.get("first_prompt") or "")[:60] or key
+                return self._json({"ok": True, "title": title})
             if action not in ("archive", "unarchive", "star", "unstar"):
                 return self._json({"ok": False, "error": "unknown chat-state action"}, 400)
             keys = body.get("keys") or [body.get("key")]
@@ -550,7 +788,7 @@ class Handler(BaseHTTPRequestHandler):
                     target.difference_update(keys)
                 else:
                     target.update(keys)
-                flags = {"archived": sorted(archived), "starred": sorted(starred)}
+                flags = {**flags, "archived": sorted(archived), "starred": sorted(starred)}
                 jsave("flags", flags)
             return self._json({"ok": True, "chat_flags": flags})
 
@@ -577,6 +815,19 @@ class Handler(BaseHTTPRequestHandler):
                     cfg["excluded_cwds"] = body["excluded_cwds"]
                 if body.get("freshness_window") in ("live", "1d", "3d", "7d"):
                     cfg["freshness_window"] = body["freshness_window"]
+                for key in ("auto_approve_tools", "attention_sound"):  # Settings > Agents
+                    if isinstance(body.get(key), bool):
+                        cfg[key] = body[key]
+                if body.get("agent_questions") in ("defer", "ask"):
+                    cfg["agent_questions"] = body["agent_questions"]
+                compact = body.get("auto_compact")
+                if isinstance(compact, dict):
+                    if not (isinstance(compact.get("enabled", True), bool) and
+                            compact.get("threshold", 0.5) in (0.4, 0.5, 0.6, 0.7) and
+                            compact.get("idle_minutes", 0) in (0, 15, 30, 60)):
+                        raise ValueError("auto_compact needs enabled, threshold 0.4-0.7 and idle_minutes 0, 15, 30 or 60")
+                    old = cfg.get("auto_compact") if isinstance(cfg.get("auto_compact"), dict) else {}
+                    cfg["auto_compact"] = {**old, **{k: compact[k] for k in ("enabled", "threshold", "idle_minutes") if k in compact}}
                 jsave("config", cfg)
             return self._json({"ok": True})
 
@@ -623,7 +874,7 @@ class Handler(BaseHTTPRequestHandler):
 # Each optional module exposes ROUTES {(method, path): handler} and
 # BACKGROUND [(fn, interval_seconds)]. Missing or broken modules are skipped
 # so the core library keeps serving. Contracts: docs/V2-CONTRACTS.md.
-PLUGIN_MODULES = ("live", "accounts", "stream", "usage_history", "remote_sync", "projects", "hosts", "broker", "session_lineage", "commands", "file_service", "preview_server", "search_api", "open_destinations", "conversation_settings", "settings_insights")
+PLUGIN_MODULES = ("live", "accounts", "stream", "usage_history", "remote_sync", "projects", "hosts", "broker", "session_lineage", "commands", "file_service", "preview_server", "search_api", "open_destinations", "conversation_settings", "settings_insights", "session_reference", "host_models", "project_suggestions")
 PLUGIN_ROUTES = {}
 PLUGIN_BACKGROUND = []
 
@@ -653,6 +904,7 @@ def run_background():
 
 
 def main():
+    sys.setswitchinterval(0.0005)
     cfg = jload("config", {})
     cfg = cfg if isinstance(cfg, dict) else {}
     port = int(cfg.get("port", 8744))

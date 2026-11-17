@@ -1,6 +1,6 @@
 ---
 name: chat-dashboard
-description: Install and operate this user's private local Library Workspace.
+description: Install and operate a local Library Workspace and keep its data private.
 ---
 
 Read {{TOOL_ROOT}}/../README.md and {{TOOL_ROOT}}/../docs/AGENT-ONBOARDING.md.

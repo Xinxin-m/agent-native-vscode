@@ -16,7 +16,7 @@ class Handler(BaseHTTPRequestHandler):
   if self.headers.get('Sec-Fetch-Site')=='cross-site':return self.json({'error':'Cross-site read blocked'},403)
   try:
    if parsed.path=='/api/projects':return self.json({'projects':catalog.projects()})
-   if parsed.path=='/api/graph':return self.json(catalog.graph(q.get('project','view-a16z'),q.get('q',''),max(0,int(q.get('offset',0))),min(40,max(1,int(q.get('limit',16)))),q.get('period','7')))
+   if parsed.path=='/api/graph':return self.json(catalog.graph(q.get('project') or next((v['id'] for v in catalog.views()),''),q.get('q',''),max(0,int(q.get('offset',0))),min(40,max(1,int(q.get('limit',16)))),q.get('period','7')))
    if parsed.path=='/api/session':return self.json(catalog.session(q.get('key','')))
    if parsed.path=='/api/resource':return self.json(catalog.resource(q.get('id','')))
    if parsed.path.startswith('/api/'):return self.json({'error':'Unknown route'},404)

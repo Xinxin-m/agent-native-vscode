@@ -34,6 +34,9 @@
   "_freshness_window": "How long a chat still reads as fresh in the library: live, 1d, 3d, or 7d. Also settable from Settings.",
   "freshness_window": "1d",
   "port": 8744,
+  "_automation_prompt_prefixes": "Opening words of prompts your own unattended jobs send, each with a label, e.g. [[\"Draft a reply on behalf of <name>\", \"reply draft\"]]. Matching chats go to the archived Automation runs project.",
+  "automation_prompt_prefixes": [],
+  "_remote_sources": "Optional SSH hosts whose transcripts are mirrored. Each entry: name, host (data-reading SSH alias), days, live_host (execution alias), live_cmd. For a Slurm cluster also set label, \"kind\": \"slurm\", node_pattern (regex the compute node hostname must match, e.g. \"node-\\\\d+\") and login_aliases (aliases that must never execute, e.g. [\"login.example.edu\"]).",
   "enable_model_labeling": false,
   "_enable_model_labeling": "Opt in to paid CLI title/tag/project labeling. False keeps all pipeline refreshes deterministic; changing this never sends a chat message.",
 
@@ -42,5 +45,5 @@
     "reasoning": "claude-sonnet-5",
     "reviewed": "2026-08-20"
   },
-  "_models": "Which Claude model plays each role. Read ../MODELS.md before changing these — and bump 'reviewed' (YYYY-MM-DD) whenever you verify them, even if nothing changed. An agent should re-check a selection older than ~30 days."
+  "_models": "Which Claude model plays each role. Check the provider's current model list before changing these — and bump 'reviewed' (YYYY-MM-DD) whenever you verify them, even if nothing changed. An agent should re-check a selection older than ~30 days."
 }
