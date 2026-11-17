@@ -48,6 +48,21 @@ class ExportTests(unittest.TestCase):
             self.assertFalse(any('node_modules' in name or name.endswith('.env') for name in values))
             manifest = json.loads(values['manifest.json'])
             self.assertEqual(manifest, {name:hashlib.sha256(value).hexdigest() for name,value in values.items() if name!='manifest.json'})
+    def test_export_keeps_referenced_chunks_and_omits_stale_hashes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);self.fixture(root)
+            media=root/'integration/extension/media';media.mkdir(parents=True)
+            for name,text in {'boot.js':'import("./main-abcdefgh.js")',
+                              'main-abcdefgh.js':'import "./lazy-ijklmnop.js"',
+                              'lazy-ijklmnop.js':'export const answer=42',
+                              'main-oldold00.js':'stale private-free build'}.items():
+                (media/name).write_text(text)
+            with patch.object(exporter.subprocess,'check_output',side_effect=self.git):
+                values=exporter.collect(root)
+            self.assertIn('integration/extension/media/lazy-ijklmnop.js',values)
+            self.assertIn('integration/extension/media/main-abcdefgh.js',values)
+            self.assertNotIn('integration/extension/media/main-oldold00.js',values)
+
     def test_archive_extract_imports_installer_without_local_toolchain(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)/'source';root.mkdir();self.fixture(root)

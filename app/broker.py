@@ -1123,6 +1123,18 @@ class Broker:
             if changed:
                 self._settle(rid, ctrl)
 
+    @staticmethod
+    def _codex_message(st, ctrl, item):
+        """Reconcile terminal snapshots with already delivered message items."""
+        if item.get('type') != 'agentMessage' or not item.get('text'):
+            return
+        identity = item.get('id') or ('text', item['text'])
+        seen = ctrl.setdefault('completed_message_ids', set())
+        if identity in seen:
+            return
+        seen.add(identity)
+        st.text += ('\n\n' if st.text else '') + item['text']
+
     def _provider_lines(self, proc, ctrl, stderr, tick=lambda: None):
         """Watch the owned leader as well as pipes inherited by descendants.
 
@@ -1675,6 +1687,7 @@ class Broker:
                     return
                 self._codex_goal(rid, ctrl, goal)
             elif method == 'turn/started':
+                ctrl['completed_message_ids'] = set()
                 ctrl['turn_id'] = (p.get('turn') or {}).get('id')
                 ctrl['last_root_turn_id'] = ctrl['turn_id']
                 ctrl.pop('native_reconciled', None)
@@ -1704,8 +1717,7 @@ class Broker:
                         self.store.emit(rid, 'compacted', {'provider': 'codex', 'session_id': st.sid})
                 elif typ == 'agentMessage' and method == 'item/completed':
                     # Final items are authoritative; preserve commentary and final separately.
-                    if item.get('text'):
-                        st.text += ('\n\n' if st.text else '') + item['text']
+                    self._codex_message(st, ctrl, item)
                 elif typ == 'fileChange':
                     self.store.emit(rid, 'file_change', item)
                 elif typ in ('commandExecution', 'mcpToolCall', 'dynamicToolCall', 'webSearch'):
@@ -1722,6 +1734,10 @@ class Broker:
                 self.store.emit(rid, 'request_resolved', {'request_id': request})
             elif method == 'turn/completed':
                 turn = p.get('turn') or {}
+                # A terminal snapshot can contain the final answer even when its
+                # individual item/completed notification was never delivered.
+                for item in turn.get('items') or []:
+                    self._codex_message(st, ctrl, item)
                 status = turn.get('status')
                 st.error = (turn.get('error') or {}).get('message') or 'Codex turn failed' if status == 'failed' else None
                 # The run stays open for subagents, queued steering and follow-ups.

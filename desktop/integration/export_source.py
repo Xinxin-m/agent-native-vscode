@@ -6,6 +6,7 @@ import gzip
 import hashlib
 import io
 import json
+import re
 import subprocess
 import tarfile
 
@@ -17,7 +18,7 @@ PORTABLE_FILES = (
     'integration/backend/web/settings-insights.js', 'integration/backend/web/settings-insights.css',
     'integration/qa/webviews.cjs', 'integration/qa/delivery-state.cjs',
     'integration/qa/draft-preservation.py', 'integration/qa/test_install_guard.py',
-    'integration/qa/test_export_source.py',
+    'integration/qa/test_export_source.py', 'integration/qa/agent-map-timeout.cjs',
 )
 UPSTREAM_PATHS = ('src', 'product.json', 'build/gulpfile.vscode.ts')
 EXCLUDED = {'node_modules', 'dist', '.git', 'test-results', 'playwright-report', '__pycache__'}
@@ -38,6 +39,16 @@ def collect(root):
         input_hashes[path] = hashlib.sha256(content).digest()
     for name in PORTABLE_FILES:
         add(root / name)
+    media = root / 'integration/extension/media'
+    chunks = {p.name: p for p in media.glob('*.js') if re.search(r'-[A-Za-z0-9_-]{8}\.js$', p.name)}
+    reachable = set()
+    queue = [p for p in media.glob('*.js') if p.name not in chunks]
+    while queue:
+        entry = queue.pop()
+        for name in re.findall(r'[A-Za-z0-9_.-]+\.js', entry.read_text()):
+            if name in chunks and name not in reachable:
+                reachable.add(name)
+                queue.append(chunks[name])
     for base in ('integration/ui', 'integration/extension'):
         for path in sorted((root / base).rglob('*')):
             rel = path.relative_to(root / base)
@@ -46,6 +57,8 @@ def collect(root):
             if path.is_symlink():
                 raise ValueError('Unexpected symlink: ' + str(path))
             if path.is_file():
+                if path.parent == media and path.name in chunks and path.name not in reachable:
+                    continue
                 add(path)
     repo = root / 'vscode'
     base = json.loads(entries['docs/upstream.json'])['commit']
