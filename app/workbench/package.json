@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
+    "prebuild": "cp ../web/workbench/index.html .previous-build.html 2>/dev/null || true",
     "build": "tsc --noEmit && vite build",
-    "postbuild": "python3 ../scripts/prune_bundles.py ../web/workbench/assets ../web/workbench/index.html --keep-days 1",
+    "postbuild": "python3 ../scripts/prune_bundles.py ../web/workbench/assets ../web/workbench/index.html .previous-build.html",
     "test": "vitest run"
   },
   "dependencies": {

@@ -1,6 +1,0 @@
-{
-  "ok": true,
-  "files_scanned": 523,
-  "findings": [],
-  "scope": "Detects absolute personal homes, known personal identities and credential-shaped values. An automated scan is not a guarantee that arbitrary private text cannot exist."
-}

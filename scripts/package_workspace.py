@@ -14,9 +14,9 @@ REPO=Path(__file__).resolve().parent
 if REPO.name == "scripts":
     REPO=REPO.parent
 ROOT=REPO/"app" if (REPO/"app/server.py").is_file() else REPO
-MODULES='accounts automation broker classify clis commands conversation_settings doctor enrich file_service host_connector hosts indexer live open_destinations pipeline preview_server projects remote_files remote_sync search_api search_chats server session_lineage session_start_refresh stream usage_history settings_insights workspace_groups project_review'.split()
-EXACT=['README.md','LICENSE','docs/RELEASE.md','.gitignore','web/settings-insights.js','web/settings-insights.css',*(name+'.py' for name in MODULES),'install.sh','run.sh','package_workspace.py','start_project_map.py','data/config.example.json','workbench/package.json','workbench/package-lock.json','workbench/tsconfig.json','workbench/vite.config.ts','workbench/index.html']
-SOURCE_SUFFIXES={'.ts','.tsx','.css','.svg','.d.ts','.json'}
+MODULES='project_suggestions label_model json_cache session_reference sessions_cli attention_watch quota_failover auth_failure auth_recovery accounts automation broker classify clis commands conversation_settings doctor enrich file_service cross_host_transfer notices host_connector host_models hosts indexer live open_destinations pipeline preview_server projects remote_files remote_sync search_api search_chats server session_lineage session_start_refresh stream usage_history settings_insights workspace_groups project_review'.split()
+EXACT=['README.md','LICENSE','docs/RELEASE.md','.gitignore','web/settings-insights.js','web/settings-insights.css',*(name+'.py' for name in MODULES),'install.sh','scripts/install_daily_label.sh','scripts/prune_bundles.py','run.sh','package_workspace.py','start_project_map.py','data/config.example.json','workbench/package.json','workbench/package-lock.json','workbench/tsconfig.json','workbench/vite.config.ts','workbench/index.html']
+SOURCE_SUFFIXES={'.js','.ts','.tsx','.css','.svg','.d.ts','.json'}
 
 
 
@@ -40,17 +40,25 @@ def files_to_ship(root=ROOT):
     names=list(EXACT)
     names += [str(p.relative_to(root)) for p in (root/'workbench/src').rglob('*') if p.is_file() and p.suffix in SOURCE_SUFFIXES]
     names += [str(p.relative_to(root)) for p in bundled_files(root)]
-    extension_files = ['package.py','bundle_project_map.py','project-map.cjs','package.json','extension.js','core.js','README.md','media/panel.js','media/state.js','media/run-phase.js','media/native-commands.json','media/panel.css','media/markdown-it.min.js','media/purify.min.js','media/markdown-it.LICENSE','media/dompurify.LICENSE']
+    extension_files = ['package.py','bundle_project_map.py','project-map.cjs','package.json','extension.js','core.js','README.md','media/panel.js','media/auth-recovery.js','media/notification-center.js','media/notification-center.css','media/session-reference-menu.js','media/state.js','media/run-phase.js','media/native-commands.json','media/panel.css','media/markdown-it.min.js','media/purify.min.js','media/markdown-it.LICENSE','media/dompurify.LICENSE']
     extension_files += ['media/project-map/'+name for name in ['index.html','style.css','markdown-it.min.js','purify.min.js','graph_state.js','content.js','layout.js','display.js','bridge.js','app.js','bundle.json']]
     names += ['vscode-library/'+name for name in extension_files]
     names += ['project-map/'+name+'.py' for name in ['server','graph_data','project_graph','consultations','activity_filter']]
     names += ['project-map/web/'+name for name in ['index.html','style.css','markdown-it.min.js','purify.min.js','graph_state.js','content.js','layout.js','display.js','bridge.js','app.js']]
-    for optional in ['docs/AGENT-ONBOARDING.md']:
+    for optional in ['docs/AGENT-ONBOARDING.md','CONTRIBUTING.md']:
         if ((REPO if root == ROOT else root)/optional).is_file():names.append(optional)
+    names += ['AGENTS.md','CLAUDE.md']  # public agent instructions; the flat development tree keeps them in release/
+    names += [str(p.relative_to(REPO if root == ROOT else root)) for p in sorted(((REPO if root == ROOT else root)/'docs/screenshots').glob('*.png'))]  # README images, synthetic data only
+    for folder in ('prompts','agents'):  # shared agent harness: top-level Markdown folders
+        base=REPO if root == ROOT else root
+        names += [str(p.relative_to(base)) for p in sorted((base/folder).glob('*.md'))]
+    names += [str(p.relative_to(base)) for p in sorted((base/'scripts/harness').glob('*')) if p.suffix in ('.py','.md','.json')]  # harness scripts and their tests
     for name in sorted(set(names)):
-        path=(REPO/name) if root == ROOT and name in {"README.md","LICENSE","docs/RELEASE.md","docs/AGENT-ONBOARDING.md",".gitignore","package_workspace.py"} else root/name
+        path=(REPO/name) if root == ROOT and (name in {"README.md","CONTRIBUTING.md","AGENTS.md","CLAUDE.md","LICENSE","docs/RELEASE.md","docs/AGENT-ONBOARDING.md",".gitignore","package_workspace.py"} or name.startswith(("prompts/","agents/","docs/screenshots/","scripts/harness/"))) else root/name
         if name == "package_workspace.py" and ROOT != REPO:
             path=REPO/"scripts/package_workspace.py"
+        if name in ("AGENTS.md","CLAUDE.md","README.md") and ROOT == REPO:
+            path=REPO/"release"/name  # root AGENTS.md/CLAUDE.md/README.md here are private development files
         if not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to((REPO if root == ROOT else root).resolve()):
             raise ValueError('Missing or unsafe allowlisted file: '+name)
         yield name,path
@@ -74,31 +82,54 @@ def third_party_licenses():
     return '\n\n'.join(blocks).encode()
 
 
-def privacy_scan(entries):
+DENYLIST=ROOT/'data/privacy-denylist.txt'  # private, one term per line; data/ never ships
+BINARY={'.woff','.woff2','.ttf','.png','.jpg','.jpeg','.gif','.ico','.pdf'}
+PATTERNS={
+  'personal_home':re.compile(rb'/(?:Users|home)/(?!example(?:/|\b)|user(?:/|\b)|<)[-\w.]+'),
+  'credential_material':re.compile(rb'(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{24,}|-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----|Bearer [A-Za-z0-9_.-]{30,}|\bAKIA[0-9A-Z]{16}\b|\bgh[pousr]_[A-Za-z0-9]{36,}|\bxox[abposr]-[A-Za-z0-9-]{10,}|\bAIza[0-9A-Za-z_-]{35}\b)'),
+  'email_identity':re.compile(rb'(?i)(?<![\w.%+-])[a-z0-9._%+-]+@(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:com|org|net|edu|gov|io|ai|dev|app|co|me|us|uk|ca|de|fr|ch|cn|jp|hk|sg|in|info|biz|xyz)(?![\w-])'),
+  'phone_number':re.compile(rb'(?<![\w.+-])(?:\+\d{1,3}[ .-]?)?(?:\(\d{3}\) ?|\d{3}[ .-])\d{3}[ .-]\d{4}(?![\w.-])'),
+  'edu_hostname':re.compile(rb'(?i)(?<![\w.-])(?:[a-z0-9-]+\.)+edu(?![\w-])'),
+}
+ALLOWED_EMAIL_DOMAINS=(b'example.com',b'example.org',b'example.net',b'users.noreply.github.com')
+
+
+def denylist_terms(path=None):
+    try:lines=Path(path or DENYLIST).read_text().splitlines()
+    except OSError:return []
+    return [line.strip() for line in lines if line.strip() and not line.lstrip().startswith('#')]
+
+
+def privacy_scan(entries,terms=None):
+    """Return one finding per hit: path, line, category and the matched text."""
+    terms=denylist_terms() if terms is None else terms
+    # A term written as =Word matches that exact case only (for words common in lowercase).
+    deny=[re.compile((rb'' if term.startswith('=') else rb'(?i)')+rb'(?<![A-Za-z0-9])'+re.escape(term.removeprefix('=').encode())+rb'(?![A-Za-z0-9])') for term in terms]
     findings=[]
-    patterns={
-      'personal_home':re.compile(rb'/(?:Users|home)/(?!example(?:/|\b)|user(?:/|\b))[-\w.]+'),
-      'credential_material':re.compile(rb'(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{24,}|-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----|Bearer [A-Za-z0-9_.-]{30,})'),
-      'email_identity':re.compile(rb'''(?<=[\s"'<>])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,24}(?=[\s"'<>])'''),
-    }
+    def hit(name,raw,category,match):
+        findings.append({'path':name,'line':raw.count(b'\n',0,match.start())+1,'category':category,'match':match.group().decode(errors='replace')[:80]})
     for name,raw in entries:
-        if Path(name).suffix.lower() in {'.woff','.woff2','.ttf','.png','.jpg','.jpeg','.gif','.ico','.pdf'}:continue
-        for category,pattern in patterns.items():
+        for pattern in deny:
+            for match in pattern.finditer(name.encode()):hit(name,b'',  'denylist_filename',match)
+        if Path(name).suffix.lower() in BINARY:continue
+        for pattern in deny:
+            for match in pattern.finditer(raw):hit(name,raw,'denylist',match)
+        for category,pattern in PATTERNS.items():
             scanned=raw.replace(b'/home/'+b'tables',b'/example/tables') if category=='personal_home' and Path(name).name.startswith('ts.worker-') else raw
-            matches=list(pattern.finditer(scanned))
-            if category=='email_identity' and name=='THIRD-PARTY-LICENSES.txt':matches=[]
-            if category=='email_identity':matches=[m for m in matches if m.group().split(b'@')[-1] not in (b'example.com',b'example.org',b'example.net') and all(part and not part.startswith(b'-') and not part.endswith(b'-') for part in m.group().split(b'@')[-1].split(b'.'))]
-            if matches:findings.append({'path':name,'category':category,'matches':len(matches)})
+            for match in pattern.finditer(scanned):
+                text=match.group().lower()
+                if category=='email_identity' and (name=='THIRD-PARTY-LICENSES.txt' or text.split(b'@')[-1].endswith(ALLOWED_EMAIL_DOMAINS)):continue
+                if category=='edu_hostname' and text.endswith(b'example.edu'):continue
+                hit(name,scanned,category,match)
     return findings
 
 
 def package(output=None,build=False):
     if build:subprocess.run(['npm','run','build'],cwd=ROOT/'workbench',check=True,stdout=subprocess.DEVNULL)
     entries=[(name,path.read_bytes()) for name,path in files_to_ship()]
-    entries=[(name,raw.replace(b'npm test\n',b'# Development tests are excluded from this release archive.\n').replace(b'The original Library remains at `/`.',b'The share archive opens Workspace from `/` as well.')) if name=='docs/AGENT-ONBOARDING.md' else (name,raw) for name,raw in entries]
     entries.append(('skill/SKILL.md',b'''---
 name: chat-dashboard
-description: Install and operate this user's private local Library Workspace.
+description: Install and operate a local Library Workspace and keep its data private.
 ---
 
 Read {{TOOL_ROOT}}/../README.md and {{TOOL_ROOT}}/../docs/AGENT-ONBOARDING.md.
@@ -116,7 +147,7 @@ Before restarting a running service, inspect /api/runs and data/execution/ for a
     for name,raw in entries:
         if name == 'package_workspace.py':
             arranged.append(('scripts/'+name,raw))
-        elif name in ('README.md','LICENSE','.gitignore','THIRD-PARTY-LICENSES.txt') or name.startswith('docs/'):
+        elif name in ('README.md','CONTRIBUTING.md','AGENTS.md','CLAUDE.md','LICENSE','.gitignore','THIRD-PARTY-LICENSES.txt') or name.startswith(('docs/','prompts/','agents/','scripts/harness/')):
             arranged.append((name,raw))
         else:
             arranged.append(('app/'+name,raw))
@@ -132,13 +163,13 @@ exec bash "$LIBRARY_REPO/app/'''+script+'" "$@"\n'
         arranged.append((script,wrapper.encode()))
     entries=arranged
     findings=privacy_scan(entries)
-    if findings:raise ValueError('Package privacy scan failed: '+json.dumps(findings))
+    if findings:raise ValueError('Package privacy scan failed:\n'+'\n'.join(f"{f['path']}:{f['line']}: {f['category']}: {f['match']}" for f in findings))
     stamp=datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
     out=Path(output) if output else ROOT/'output'/('workspace-package-'+stamp)
     out.mkdir(parents=True,exist_ok=False)
     manifest={'format':1,'created_utc':stamp,'policy':'Explicit backend/source/asset allowlist; no installed user data, profiles, transcripts, QA fixtures or local reports.','files':[{'path':name,'bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest()} for name,raw in sorted(entries)]}
-    scan={'ok':True,'files_scanned':len(entries),'findings':findings,'scope':'Detects absolute personal homes, known personal identities and credential-shaped values. An automated scan is not a guarantee that arbitrary private text cannot exist.'}
-    entries += [('PACKAGE-INVENTORY.json',json.dumps(manifest,indent=2).encode()),('PRIVACY-SCAN.json',json.dumps(scan,indent=2).encode())]
+    scan={'ok':True,'files_scanned':len(entries),'denylist_terms':len(denylist_terms()),'findings':findings,'scope':'Detects private deny-list terms, personal home paths, emails, phone numbers, .edu hostnames and credential-shaped values. An automated scan is not a guarantee that arbitrary private text cannot exist.'}
+    # Inventory and scan stay beside the archive, outside the shipped tree.
     archive=out/'library-workspace.tar.gz'
     import io
     with tarfile.open(archive,'w:gz') as tf:
