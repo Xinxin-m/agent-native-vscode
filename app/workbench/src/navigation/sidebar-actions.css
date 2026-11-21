@@ -16,10 +16,30 @@
 .sidebar-chat-title { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .chat-unread-dot,.chat-awaiting-dot { display:inline-block; flex-shrink:0; width:6px; height:6px; border-radius:50%; background:var(--accent); }
 .chat-awaiting-dot { background:var(--accent); box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 18%,transparent); }
-.sidebar-chat.is-running::after { content:""; position:absolute; pointer-events:none; height:2px; bottom:2px; left:12px; right:35px; background:linear-gradient(90deg,transparent,var(--accent),transparent); background-size:45% 100%; background-repeat:no-repeat; opacity:.4; animation:chat-running-slide 2.8s linear infinite; }
-@keyframes chat-running-slide { from { background-position:-90% 0; } to { background-position:190% 0; } }
-@media(prefers-reduced-motion:reduce) { .sidebar-chat.is-running::after { animation:none; background:var(--accent); opacity:.25; } }
+.chat-running-dot,.chat-finished-dot { display:inline-block; flex-shrink:0; width:6px; height:6px; border-radius:50%; }
+/* Same turning arc as the chat pane; it animates only while the chat runs. */
+.chat-running-dot { width:8px; height:8px; box-sizing:border-box; border-radius:50%; border:1.5px solid color-mix(in srgb,var(--accent) 22%,transparent); border-top-color:var(--accent); animation:chat-running-spin .8s linear infinite; }
+.chat-finished-dot { background:#22c55e; }
+@keyframes chat-running-spin { to { transform:rotate(360deg); } }
+.sidebar-chat.is-running[data-offscreen] .chat-running-dot,[data-page-hidden] .chat-running-dot { animation-play-state:paused; }
+@media(prefers-reduced-motion:reduce) { .chat-running-dot { animation-duration:2.4s; } }
+/* The running line moves a fixed gradient segment with transform only, so the compositor animates it without repainting. */
+.sidebar-chat.is-running::after { content:""; position:absolute; pointer-events:none; height:2px; bottom:2px; left:12px; width:calc((100% - 47px)*.45); background:linear-gradient(90deg,transparent,var(--accent),transparent); opacity:0; will-change:transform,opacity; animation:chat-running-slide 2.8s linear infinite; }
+@keyframes chat-running-slide { from { transform:translateX(-30%); opacity:0; } 15%,85% { opacity:.4; } to { transform:translateX(152%); opacity:0; } }
+.sidebar-chat.is-running[data-offscreen]::after,[data-page-hidden] .sidebar-chat.is-running::after { animation-play-state:paused; }
+@media(prefers-reduced-motion:reduce) { .sidebar-chat.is-running::after { animation:none; width:auto; right:35px; will-change:auto; background:var(--accent); opacity:.25; } }
 .search-highlight { background:#f4df83; color:#312b13; border-radius:2px; padding:0; }
 .section-label .search-mode-toggle { color:var(--ink); font-weight:500; }
+.sidebar-chat.is-selected > .chat-row { background:var(--vscode-list-activeSelectionBackground, var(--accent-soft)); color:var(--vscode-list-activeSelectionForeground, var(--ink)); }
+.sidebar-chat.is-selected > .chat-row small,.sidebar-chat > .chat-row:hover small { color:inherit; }
 
 .project-heading{display:flex;align-items:center;min-width:0}.project-heading>.project-row{flex:1;min-width:0;width:auto;padding:6px 5px}.project-actions{margin-left:auto;flex:none;width:24px;height:26px}.project-block{margin-top:0;margin-bottom:0}.project-row>.project-open{min-width:0;flex:1}.project-row>.project-open>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.project-heading>.project-row>span{gap:4px}
+.provider-filter{display:flex;gap:4px;margin:0 0 8px}.provider-filter button{flex:1;font-size:11px;padding:5px;border-radius:5px;color:var(--muted)}.provider-filter button[aria-pressed=true]{background:var(--panel);color:var(--ink);box-shadow:0 0 0 1px var(--line)}
+.sidebar-state-error{margin:0;padding:6px 12px;font-size:11px;color:var(--muted);border-top:1px solid var(--line);overflow-wrap:anywhere}
+.stop-session:disabled{color:var(--muted);cursor:default}
+
+.sidebar-workspace{margin:0 0 8px;min-width:0}
+.sidebar-workspace select{display:block;width:100%;min-width:0;font-size:12px;padding:7px 8px;overflow:hidden;text-overflow:ellipsis}
+.sidebar-workspace-error{margin:0 0 8px;font-size:11px;color:var(--muted)}
+.workspace-hidden-note{margin:4px 0 8px;font-size:11px;color:var(--muted)}.workspace-hidden-note .text-button{padding:0;font-size:inherit}
