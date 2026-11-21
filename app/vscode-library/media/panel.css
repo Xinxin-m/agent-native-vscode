@@ -24,3 +24,4 @@
 #headerStatus[data-phase="Finished"]::before{content:"✓";margin-right:5px;color:#348452;font-weight:700}
 @keyframes library-activity-spin{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){#headerStatus.is-running::before{animation-duration:2.4s}}
+#resumeCost{display:block;margin-bottom:4px}#resumeCost[hidden]{display:none}

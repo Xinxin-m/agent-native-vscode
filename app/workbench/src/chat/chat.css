@@ -70,3 +70,4 @@
 .chat-visible-phase[data-phase="Finished"]::before{content:"✓";margin-right:5px;color:#348452;font-weight:700}
 @keyframes library-status-spin{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){.chat-visible-phase.is-running::before{animation-duration:2.4s}}
+.chat-resume-cost{margin:7px 8px 0;font-size:10.5px;line-height:1.5;color:var(--muted);overflow-wrap:anywhere}

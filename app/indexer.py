@@ -32,9 +32,10 @@ import hashlib
 # Bumped whenever meta_of() gains a field the rest of the pipeline reads, so
 # already-indexed chats are re-parsed once instead of keeping stale metadata.
 # 3: node, model_main, models, usage, usage_days (dashboard v2).
+# 10: resume (context size, cache TTL, last model and effort for the resume line).
 import auth_failure
 
-META_V = 9
+META_V = 10
 LINEAGE_FIELDS = ('agent_id', 'parent_agent_id', 'parent_session_id', 'parent_key',
                   'root_key', 'root_session_id', 'is_child', 'agent_label',
                   'agent_path', 'spawned_children', 'lineage_source',
@@ -298,6 +299,9 @@ def parse_claude(path):
     agent_id = ''
     delegated = '/subagents/' in path.replace(os.sep, '/')
     calls, results = {}, []
+    # What the next turn sends: the last call's input plus its reply, or the
+    # compacted size when a compact boundary came after that call.
+    resume = {}
 
     def add_file(p, op):
         if not p:
@@ -342,7 +346,16 @@ def parse_claude(path):
         if tsv:
             ts_first = ts_first or tsv
             ts_last = tsv
-        if t == "assistant" and (delegated or not d.get('isSidechain')):
+        main_chain = delegated or not d.get('isSidechain')
+        if t == 'api-request' and main_chain and (delegated or not str(d.get('querySource', '')).startswith('agent:')):
+            effort = ((d.get('params') or {}).get('output_config') or {}).get('effort')
+            if effort:
+                resume['effort'] = effort
+        elif t == 'system' and d.get('subtype') == 'compact_boundary' and main_chain:
+            post = (d.get('compactMetadata') or {}).get('postTokens')
+            resume.update(context_tokens=_int(post) or None, compacted=True, at=tsv or '')
+            resume.pop('cache_ttl_s', None)
+        if t == "assistant" and main_chain:
             umsg = d.get("message") or {}
             u = umsg.get("usage")
             model = umsg.get("model") or ""
@@ -353,6 +366,12 @@ def parse_claude(path):
                     _int(u.get("input_tokens")), _int(u.get("output_tokens")),
                     _int(u.get("cache_read_input_tokens")),
                     _int(u.get("cache_creation_input_tokens")))
+                cache = u.get('cache_creation') or {}
+                ttl = (3600 if _int(cache.get('ephemeral_1h_input_tokens')) else
+                       300 if _int(cache.get('ephemeral_5m_input_tokens')) or _int(u.get('cache_creation_input_tokens')) else
+                       resume.get('cache_ttl_s') or (300 if _int(u.get('cache_read_input_tokens')) else 0))
+                resume.update(model=model, at=tsv or '', compacted=False, cache_ttl_s=ttl,
+                              context_tokens=sum(usage_by_msg[mid][2:]))
         if d.get("isSidechain") and not delegated:
             continue
         if t == "user":
@@ -419,6 +438,8 @@ def parse_claude(path):
             label=inp.get('description') or result.get('description') or '',
             agent_type=inp.get('subagent_type') or '', model=result.get('resolvedModel') or inp.get('model') or ''))
     extra.update(summarize_usage(list(usage_by_msg.values())))
+    if resume:
+        extra['resume'] = resume
     chat = finish("claude", sid, path, cwd, branch, title, turns, files,
                   ts_first, ts_last, extra=extra)
     chat["status"] = status
@@ -519,6 +540,12 @@ def parse_codex_file(path):
                 metadata.update(root_session_id=root, root_key='codex-' + root)
         elif t == "turn_context":
             model = p.get("model") or model
+            effort = p.get('effort') or (((p.get('collaboration_mode') or {}).get('settings') or {}).get('reasoning_effort'))
+            if effort:
+                metadata.setdefault('resume', {})['effort'] = effort
+        elif t == 'compacted':
+            # The next token_count reports the shrunk size; until then it is unknown.
+            metadata.setdefault('resume', {}).update(context_tokens=None, compacted=True, at=tsv or '')
         elif t == 'token_usage_record' and isinstance(p.get('usage'), dict):
             u = p['usage']
             tin, cr = _int(u.get('input_tokens')), _int(u.get('cached_input_tokens'))
@@ -538,6 +565,10 @@ def parse_codex_file(path):
                     _int(last.get("output_tokens")), cr,
                     _int(last.get("cache_write_input_tokens"))))
                 usage_ids.append(json.dumps([tsv, total, last], sort_keys=True))
+                metadata.setdefault('resume', {}).update(
+                    model=model, at=tsv or '', compacted=False,
+                    context_tokens=tin + _int(last.get('output_tokens')),
+                    context_window=_int(info.get('model_context_window')) or None)
         elif t == 'event_msg' and (pt == 'error' or pt == 'task_complete' and p.get('error')):
             failure = auth_failure.from_event('codex', d, at=tsv)
             turns.append({'role': 'assistant', 'text': failure['raw'], 'ts': tsv or '', 'error': True, 'failure': failure})
@@ -639,7 +670,10 @@ def parse_codex_group(sid, paths, thread_names):
     metadata, seen_usage = {}, set()
     for (_, path, p_cwd, p_turns, p_files, p_tsf, p_tsl, p_status, p_attention,
          p_usage, p_meta, p_usage_ids) in parts:
+        resume = {**metadata.get('resume', {}), **p_meta.get('resume', {})}
         metadata.update({k: v for k, v in p_meta.items() if v not in ('', None)})
+        if resume:
+            metadata['resume'] = resume
         for event, event_id in zip(p_usage, p_usage_ids):
             if event_id not in seen_usage:
                 seen_usage.add(event_id)
@@ -762,6 +796,7 @@ def meta_of(chat):
         "usage": chat.get("usage", empty_usage()),
         "usage_days": chat.get("usage_days", {}),
         "usage_buckets": chat.get("usage_buckets", []),
+        **({'resume': chat['resume']} if chat.get('resume') else {}),
         **{k: chat[k] for k in LINEAGE_FIELDS if k in chat},
         **{k: chat[k] for k in ('source_locations', 'account_attribution') if k in chat},
     }

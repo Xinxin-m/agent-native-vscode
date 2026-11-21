@@ -27,6 +27,7 @@ import {Markdown} from './Markdown';
 import {conversationOutputs,shouldSubmitOnEnter,nativeAccount,accountLabel,executionDefaults,restoreNativeSelections,needsHandoff} from './helpers';
 import './chat.css';
 import {EffortPicker, effortChoices} from './EffortPicker';
+import './resumeCost.js';
 import './picker.css';
 import {useChatActivity,markChatViewed} from '../state/activity';
 import {groupToolEvents,activityEvents,sessionStatus} from './toolEvents';
@@ -148,7 +149,11 @@ export function Conversation({resource}:{resource:Resource}){
  const selectedEffortName=efforts.find(choice=>choice.id===state.effort)?.name||
   (!state.effort&&efforts.length===1?efforts[0].name:'');
  const pickerLabel=selectedModelName+(selectedEffortName?' · '+selectedEffortName:'');
- useEffect(()=>{let cancelled=false;setSettingsNotice('');api(query('/api/conversation/defaults',{key:nativeKey||'',provider:state.provider,host_id:state.host_id,model:state.model,handoff:willHandoff?'1':'',account:willHandoff||!nativeKey||!binding?state.account:''})).then(result=>{if(cancelled)return;const current=conversations.get(id),defaults=result.defaults||{},changes:any=restoreNativeSelections(current,defaults,metadata),preferred=readJson('library.last-model.'+state.provider)||wb.preferences.defaultModels?.[state.provider];if(!nativeKey&&preferred&&!current.executionOverrides?.model)changes.model=preferred;conversations.hydrate(id,changes);setSettingsNotice(result.notice||'')}).catch(e=>{if(!cancelled)setSettingsNotice(message(e))});return()=>{cancelled=true}},[id,nativeKey,state.provider,state.host_id,state.model,state.account,willHandoff]);
+ const [resumeNow,setResumeNow]=useState(()=>Date.now());
+ const resumeLine=nativeKey&&!active&&!willHandoff?(window as any).LibraryResumeCost.describe(metadata,{now:resumeNow,catalog:modelOptions}):null;
+ // Re-check the cache on focus, and once a minute only while a warm countdown shows.
+ useEffect(()=>{const refresh=()=>setResumeNow(Date.now());window.addEventListener('focus',refresh);const timer=resumeLine?.tick?setTimeout(refresh,60000):undefined;return()=>{window.removeEventListener('focus',refresh);clearTimeout(timer)}},[resumeLine?.tick,resumeNow]);
+ useEffect(()=>{let cancelled=false;setSettingsNotice('');api(query('/api/conversation/defaults',{key:nativeKey||'',provider:state.provider,host_id:state.host_id,model:state.executionOverrides?.model?state.model:'',handoff:willHandoff?'1':'',account:willHandoff||!nativeKey||!binding?state.account:''})).then(result=>{if(cancelled)return;const current=conversations.get(id),defaults=result.defaults||{},changes:any=restoreNativeSelections(current,defaults,metadata),preferred=readJson('library.last-model.'+state.provider)||wb.preferences.defaultModels?.[state.provider];if(!nativeKey&&preferred&&!current.executionOverrides?.model)changes.model=preferred;conversations.hydrate(id,changes);setSettingsNotice(result.notice||'')}).catch(e=>{if(cancelled)return;setSettingsNotice(message(e));const own=nativeKey&&!willHandoff?metadata.resume||{}:{};conversations.hydrate(id,executionDefaults(conversations.get(id),{model:own.model||undefined,effort:own.effort||undefined}))});return()=>{cancelled=true}},[id,nativeKey,state.provider,state.host_id,state.model,state.account,willHandoff]);
  const catalog=commandCatalog(state.provider,commands,remoteCatalog?remoteModels.commands:state.provider==='claude'?nativeCommands:[]),slash=slashDismissed?null:slashQuery(state.text),slashItems=slash===null?[]:matchingCommands(catalog,slash),slashOpen=slash!==null,slashId='commands-'+id.replace(/[^a-zA-Z0-9]/g,'-');
  function chooseCommand(command:SlashCommand){if(command.disabled){patch({error:command.disabled});return}patch({text:command.insert,error:''});setSlashDismissed(true);input.current?.focus()}
  function unconfirmedRemoteMessage(){if(!conversations.get(id).remotePending)return false;patch({error:'A previous Remote Control message is awaiting confirmation. Retry the original message or save it as a recovered draft before sending another.'});return true;}
@@ -292,6 +297,7 @@ export function Conversation({resource}:{resource:Resource}){
     {useQueue&&<button type="button" className="chat-steer" title={steerFirst?'Queue for after this turn':'Deliver to the running agent now'} disabled={busy||uploading||(!state.text.trim()&&!state.attachments.length)} onClick={()=>void(steerFirst?enqueue():steer())}>{steerFirst?'Queue':'Steer'}</button>}
     <button className="chat-send" title={useQueue&&!steerFirst?'Queue message':active?'Send to the running agent':'Send message'} aria-label={useQueue&&!steerFirst?'Queue message':active?'Send to the running agent':'Send message'} disabled={busy||uploading||(!state.text.trim()&&!state.attachments.length&&!(state.pending&&!active))} onClick={()=>void submitDraft()}><ArrowUp size={18}/></button></div>
    </div>
+   {resumeLine&&<p className="chat-resume-cost" title={resumeLine.title}>{resumeLine.text}</p>}
    {handoff&&<div className="chat-handoff"><p>Start a linked {state.provider==='claude'?'Claude Code':'Codex'} session in {state.cwd} on {state.host_id}? The source conversation is retained. The broker transfers saved history and recorded tool evidence, including ancestors, with a 180,000 character cap.</p><details><summary>Visible saved history to share</summary><pre>{turns.map((t:any)=>`[${t.role}]\n${t.text}`).join('\n\n')}</pre><p>The exact transferred context and omissions are recorded on the resulting run.</p></details><div><button onClick={()=>void send('message',true)}>Continue with linked handoff</button><button onClick={()=>setHandoff(false)}>Cancel</button></div></div>}
   </div>
  </section>;
