@@ -1,0 +1,2 @@
+const test=require('node:test'),assert=require('node:assert/strict');const {doubleClickInterval}=require('../gestures.cjs');
+test('double-click arbitration follows the Mac setting with bounded fallback',()=>{assert.equal(doubleClickInterval('darwin',()=> '1.1\n'),1150);assert.equal(doubleClickInterval('darwin',()=>{throw Error('unset')}),550);assert.equal(doubleClickInterval('darwin',()=>'-1'),550);assert.equal(doubleClickInterval('linux'),550)});

@@ -31,6 +31,12 @@ app/project-map/views.json
 app/project-map/folder-discovery.json
 app/vscode-library/builds/
 
+# Reconstructed desktop and local artifacts
+desktop/vscode/
+desktop/VSCode-*/
+desktop/output/
+*.app/
+
 # Entry file of the previous client build; its chunks stay until the next build.
 workbench/.previous-build.html
 app/workbench/.previous-build.html

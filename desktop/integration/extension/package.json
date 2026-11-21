@@ -1,0 +1,444 @@
+{
+  "name": "library-code",
+  "displayName": "Library",
+  "description": "Shared Library conversations and rendered documents for Library Code.",
+  "version": "0.1.0",
+  "publisher": "library",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "main": "./extension.cjs",
+  "activationEvents": [
+    "onStartupFinished",
+    "onWebviewPanel:library.conversation",
+    "onFileSystem:library-file",
+    "onWebviewPanel:library.projectMap",
+    "onFileSystem:library-reference",
+    "onSearch:library-file"
+  ],
+  "extensionKind": [
+    "ui"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Reading works; agent actions require workspace trust."
+    }
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "library.new",
+        "title": "Library: New Conversation",
+        "icon": "$(add)"
+      },
+      {
+        "command": "library.openChat",
+        "title": "Library: Open Conversation"
+      },
+      {
+        "command": "library.show",
+        "title": "Library: Chats and Projects",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "library.development",
+        "title": "Library: Development Layout"
+      },
+      {
+        "command": "library.settings",
+        "title": "Library: Settings",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "library.projects",
+        "title": "Library: Projects"
+      },
+      {
+        "command": "library.openFiles",
+        "title": "Library: Open Files in Pane",
+        "icon": "$(folder)"
+      },
+      {
+        "command": "library.addWorkspace",
+        "title": "Files: Add Workspace",
+        "icon": "$(add)"
+      },
+      {
+        "command": "library.refresh",
+        "title": "Refresh Library",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "library.splitRight",
+        "title": "Split Right",
+        "icon": "$(split-horizontal)"
+      },
+      {
+        "command": "library.splitDown",
+        "title": "Split Down",
+        "icon": "$(split-vertical)"
+      },
+      {
+        "command": "library.search",
+        "title": "Search Conversations",
+        "icon": "$(search)"
+      },
+      {
+        "command": "library.arrange",
+        "title": "Arrange Panes\u2026",
+        "icon": "$(layout)"
+      },
+      {
+        "command": "library.openProjectMap",
+        "title": "Library: Open Project Map"
+      },
+      {
+        "command": "library.accounts",
+        "title": "Accounts",
+        "category": "Library",
+        "icon": "$(account)"
+      },
+      {
+        "command": "library.closeFilesInPane",
+        "title": "Library: Close Files in Current Pane, Keep Chats"
+      },
+      {
+        "command": "library.closeFilesEverywhere",
+        "title": "Library: Close Files in All Panes, Keep Chats"
+      },
+      {
+        "command": "library.createTabGroup",
+        "title": "Library: Create Named Tab Group"
+      },
+      {
+        "command": "library.removeTabFromGroup",
+        "title": "Library: Remove Selected Tabs from Group"
+      },
+      {
+        "command": "library.groupChatsByProject",
+        "title": "Library: Group Chats by Project"
+      },
+      {
+        "command": "library.groupChatsAndFilesByProject",
+        "title": "Library: Group Chats and Files by Project"
+      },
+      {
+        "command": "library.addTabToGroup",
+        "title": "Library: Add Selected Tabs to Group"
+      },
+      {
+        "command": "library.official.switchClaudeAccount",
+        "title": "Library: Switch Official Claude Session Account",
+        "enablement": "config.library.chatEngine == official"
+      },
+      {
+        "command": "library.official.openCodexAccountWindow",
+        "title": "Library: Open Codex Account Window",
+        "enablement": "config.library.chatEngine == official"
+      },
+      {
+        "command": "library.copyChat.reference",
+        "title": "Copy reference for an agent",
+        "enablement": "libraryChatHasIdentity"
+      },
+      {
+        "command": "library.copyChat.sessionId",
+        "title": "Copy session ID",
+        "enablement": "libraryChatHasIdentity"
+      },
+      {
+        "command": "library.copyChat.transcriptPath",
+        "title": "Copy transcript path",
+        "enablement": "libraryChatHasIdentity"
+      },
+      {
+        "command": "library.copyChat.resumeCommand",
+        "title": "Copy resume command",
+        "enablement": "libraryChatHasIdentity"
+      },
+      {
+        "command": "library.newFile",
+        "title": "Files: New File",
+        "icon": "$(new-file)"
+      },
+      {
+        "command": "library.newFolder",
+        "title": "Files: New Folder",
+        "icon": "$(new-folder)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "library",
+          "title": "Chats",
+          "icon": "library.svg"
+        }
+      ]
+    },
+    "views": {
+      "library": [
+        {
+          "id": "library.navigation",
+          "name": "Chats",
+          "type": "webview"
+        }
+      ]
+    },
+    "menus": {
+      "editor/title": [
+        {
+          "command": "library.arrange",
+          "group": "1_library@1"
+        }
+      ],
+      "view/title": [],
+      "explorer/context": [
+        {
+          "command": "library.openFiles",
+          "when": "explorerResourceIsRoot",
+          "group": "navigation@0"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "library.createTabGroup",
+          "group": "9_library_groups"
+        },
+        {
+          "command": "library.addTabToGroup",
+          "group": "9_library_groups"
+        },
+        {
+          "command": "library.removeTabFromGroup",
+          "group": "9_library_groups"
+        },
+        {
+          "command": "library.copyChat.reference",
+          "when": "libraryChatTitleMenu",
+          "group": "1_library_copy@1"
+        },
+        {
+          "command": "library.copyChat.sessionId",
+          "when": "libraryChatTitleMenu",
+          "group": "1_library_copy@2"
+        },
+        {
+          "command": "library.copyChat.transcriptPath",
+          "when": "libraryChatTitleMenu",
+          "group": "1_library_copy@3"
+        },
+        {
+          "command": "library.copyChat.resumeCommand",
+          "when": "libraryChatTitleMenu",
+          "group": "1_library_copy@4"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "library.copyChat.reference",
+          "when": "false"
+        },
+        {
+          "command": "library.copyChat.sessionId",
+          "when": "false"
+        },
+        {
+          "command": "library.copyChat.transcriptPath",
+          "when": "false"
+        },
+        {
+          "command": "library.copyChat.resumeCommand",
+          "when": "false"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Library",
+      "properties": {
+        "library.endpoint": {
+          "type": "string",
+          "default": "http://127.0.0.1:8744",
+          "scope": "application"
+        },
+        "library.layout": {
+          "type": "string",
+          "enum": [
+            "library",
+            "development"
+          ],
+          "default": "library",
+          "scope": "application"
+        },
+        "library.chatEngine": {
+          "type": "string",
+          "enum": [
+            "library",
+            "official"
+          ],
+          "enumDescriptions": [
+            "Chats open in Library panes.",
+            "Chats open in the official Claude Code and Codex panels when those extensions are installed."
+          ],
+          "default": "library",
+          "scope": "application"
+        },
+        "library.iconBar": {
+          "type": "string",
+          "enum": [
+            "visible",
+            "autoHide",
+            "hidden"
+          ],
+          "enumDescriptions": [
+            "The icon bar is always shown.",
+            "The icon bar slides in over the content when the pointer reaches the left window edge.",
+            "The icon bar is never shown. Use keyboard shortcuts or the command palette."
+          ],
+          "default": "visible",
+          "scope": "application"
+        },
+        "library.files.tabWorkspace": {
+          "type": "string",
+          "enum": [
+            "ask",
+            "all"
+          ],
+          "enumDescriptions": [
+            "A new Files tab asks which workspace to show.",
+            "A new Files tab shows every open workspace."
+          ],
+          "default": "ask",
+          "scope": "application"
+        },
+        "library.cleanWorkspace": {
+          "type": "string",
+          "enum": [
+            "chats",
+            "pinned"
+          ],
+          "enumDescriptions": [
+            "Close files in pane and Close files everywhere leave only chats open.",
+            "They also leave pinned files open."
+          ],
+          "default": "chats",
+          "scope": "application"
+        }
+      }
+    },
+    "configurationDefaults": {
+      "chat.disableAIFeatures": true,
+      "workbench.secondarySideBar.defaultVisibility": "hidden",
+      "claudeCode.preferredLocation": "panel",
+      "workbench.startupEditor": "none",
+      "workbench.activityBar.location": "default",
+      "window.commandCenter": false,
+      "workbench.statusBar.visible": false,
+      "editor.minimap.enabled": false,
+      "workbench.editor.enablePreview": true,
+      "workbench.colorTheme": "Default Dark Modern",
+      "workbench.layoutControl.enabled": false,
+      "workbench.sash.size": 10,
+      "workbench.sash.hoverDelay": 0,
+      "workbench.sash.autoHideGrippers": false,
+      "explorer.enableDragAndDrop": true,
+      "explorer.confirmDragAndDrop": true,
+      "explorer.enableUndo": true,
+      "explorer.incrementalNaming": "simple"
+    },
+    "customEditors": [
+      {
+        "viewType": "library.markdown",
+        "displayName": "Rendered Markdown",
+        "selector": [
+          {
+            "filenamePattern": "*.md"
+          },
+          {
+            "filenamePattern": "*.markdown"
+          }
+        ],
+        "priority": "default"
+      },
+      {
+        "viewType": "library.html",
+        "displayName": "Rendered HTML",
+        "selector": [
+          {
+            "filenamePattern": "*.html"
+          },
+          {
+            "filenamePattern": "*.htm"
+          }
+        ],
+        "priority": "default"
+      },
+      {
+        "viewType": "library.pdf",
+        "displayName": "PDF Reader",
+        "selector": [
+          {
+            "filenamePattern": "*.pdf"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "workbench.action.terminal.toggleTerminal",
+        "key": "ctrl+t",
+        "mac": "cmd+t"
+      },
+      {
+        "command": "library.show",
+        "key": "ctrl+l",
+        "mac": "cmd+l"
+      },
+      {
+        "command": "library.groupChatsByProject",
+        "key": "ctrl+alt+g",
+        "mac": "cmd+alt+g"
+      },
+      {
+        "command": "library.groupChatsAndFilesByProject",
+        "key": "ctrl+alt+shift+g",
+        "mac": "cmd+alt+shift+g"
+      },
+      {
+        "command": "library.settings",
+        "key": "ctrl+alt+,",
+        "mac": "cmd+alt+,"
+      },
+      {
+        "command": "library.accounts",
+        "key": "ctrl+alt+shift+,",
+        "mac": "cmd+alt+shift+,"
+      },
+      {
+        "command": "editor.action.webvieweditor.hideFind",
+        "key": "ctrl+f",
+        "mac": "cmd+f",
+        "when": "webviewFindWidgetVisible && (activeCustomEditorId == library.markdown || activeCustomEditorId == library.html)"
+      }
+    ],
+    "themes": [
+      {
+        "label": "Library Warm beige",
+        "uiTheme": "vs",
+        "path": "./themes/beige.json"
+      },
+      {
+        "label": "Library Soft sage",
+        "uiTheme": "vs",
+        "path": "./themes/sage.json"
+      }
+    ]
+  },
+  "enabledApiProposals": [
+    "fileSearchProvider2",
+    "textSearchProvider2",
+    "textSearchComplete2"
+  ]
+}

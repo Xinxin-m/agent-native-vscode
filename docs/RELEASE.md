@@ -8,6 +8,7 @@
 | Root `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md` | Instructions for coding agents and contributors |
 | Root `install.sh`, `run.sh` | Small launchers for the application |
 | `prompts/`, `agents/` | General agent rules and agent roles |
+| `desktop/` | Regular Library Code desktop source: integration code, pinned upstream patch, native additions and preserved upstream notices. The packager adds it from the sibling `library-code-oss` checkout through its `integration/export_source.py` allowlist |
 | `scripts/` | Sanitized release packager |
 | `scripts/harness/` | Agent harness scripts (metrics, scoreboard, sweep, hooks) and their tests |
 | `app/*.py` | Cohesive local backend, broker, indexing pipeline, and provider adapters |

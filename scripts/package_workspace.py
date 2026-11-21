@@ -57,11 +57,28 @@ def files_to_ship(root=ROOT):
         path=(REPO/name) if root == ROOT and (name in {"README.md","CONTRIBUTING.md","AGENTS.md","CLAUDE.md","LICENSE","docs/RELEASE.md","docs/AGENT-ONBOARDING.md",".gitignore","package_workspace.py"} or name.startswith(("prompts/","agents/","docs/screenshots/","scripts/harness/"))) else root/name
         if name == "package_workspace.py" and ROOT != REPO:
             path=REPO/"scripts/package_workspace.py"
-        if name in ("AGENTS.md","CLAUDE.md","README.md") and ROOT == REPO:
-            path=REPO/"release"/name  # root AGENTS.md/CLAUDE.md/README.md here are private development files
+        if name in ("AGENTS.md","CLAUDE.md") and ROOT == REPO:
+            path=REPO/"release"/name  # root AGENTS.md/CLAUDE.md here are private development files
         if not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to((REPO if root == ROOT else root).resolve()):
             raise ValueError('Missing or unsafe allowlisted file: '+name)
         yield name,path
+
+
+DESKTOP_EXPORT=REPO.parent/'library-code-oss/integration/export_source.py'
+
+
+def desktop_files():
+    """The regular Library Code desktop source, from its own export allowlist when the
+    sibling checkout exists, else the desktop/ folder of a public checkout."""
+    if ROOT == REPO and DESKTOP_EXPORT.is_file():
+        import importlib.util
+        spec=importlib.util.spec_from_file_location('export_source',DESKTOP_EXPORT)
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        return [('desktop/'+name,raw) for name,raw in sorted(module.collect(DESKTOP_EXPORT.parents[1]).items())]
+    base=REPO/'desktop'
+    skip={'vscode','output','node_modules'}
+    return [(str(p.relative_to(REPO)),p.read_bytes()) for p in sorted(base.rglob('*')) if p.is_file()
+            and not any(part in skip or part.startswith(('VSCode-','.')) for part in p.relative_to(base).parts)] if base.is_dir() else []
 
 
 def third_party_licenses():
@@ -118,7 +135,7 @@ def privacy_scan(entries,terms=None):
             scanned=raw.replace(b'/home/'+b'tables',b'/example/tables') if category=='personal_home' and Path(name).name.startswith('ts.worker-') else raw
             for match in pattern.finditer(scanned):
                 text=match.group().lower()
-                if category=='email_identity' and (name=='THIRD-PARTY-LICENSES.txt' or text.split(b'@')[-1].endswith(ALLOWED_EMAIL_DOMAINS)):continue
+                if category=='email_identity' and (name in ('THIRD-PARTY-LICENSES.txt','desktop/upstream-ThirdPartyNotices.txt') or text.split(b'@')[-1].endswith(ALLOWED_EMAIL_DOMAINS)):continue
                 if category=='edu_hostname' and text.endswith(b'example.edu'):continue
                 hit(name,scanned,category,match)
     return findings
@@ -126,7 +143,7 @@ def privacy_scan(entries,terms=None):
 
 def package(output=None,build=False):
     if build:subprocess.run(['npm','run','build'],cwd=ROOT/'workbench',check=True,stdout=subprocess.DEVNULL)
-    entries=[(name,path.read_bytes()) for name,path in files_to_ship()]
+    entries=[(name,path.read_bytes()) for name,path in files_to_ship()]+desktop_files()
     entries.append(('skill/SKILL.md',b'''---
 name: chat-dashboard
 description: Install and operate a local Library Workspace and keep its data private.
@@ -147,7 +164,7 @@ Before restarting a running service, inspect /api/runs and data/execution/ for a
     for name,raw in entries:
         if name == 'package_workspace.py':
             arranged.append(('scripts/'+name,raw))
-        elif name in ('README.md','CONTRIBUTING.md','AGENTS.md','CLAUDE.md','LICENSE','.gitignore','THIRD-PARTY-LICENSES.txt') or name.startswith(('docs/','prompts/','agents/','scripts/harness/')):
+        elif name in ('README.md','CONTRIBUTING.md','AGENTS.md','CLAUDE.md','LICENSE','.gitignore','THIRD-PARTY-LICENSES.txt') or name.startswith(('docs/','prompts/','agents/','scripts/harness/','desktop/')):
             arranged.append((name,raw))
         else:
             arranged.append(('app/'+name,raw))

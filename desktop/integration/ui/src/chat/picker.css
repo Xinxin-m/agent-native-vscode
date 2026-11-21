@@ -1,0 +1,96 @@
+.chat-picker-anchor { position: relative; }
+.chat-picker-anchor .chat-settings { position: static; }
+.chat-picker-anchor .chat-settings > summary svg { flex: none; }
+.chat-settings-panel.chat-picker-panel {
+ left: 0;
+ bottom: calc(100% + 8px);
+ width: min(26rem, 100%);
+ min-width: 0;
+ max-width: 100%;
+ padding: 12px;
+ overflow-x: hidden;
+ overflow-wrap: anywhere;
+}
+.chat-picker-panel .chat-picker-group {
+ display: grid;
+ gap: 6px;
+}
+.chat-picker-panel .chat-picker-group + .chat-picker-group {
+ margin-top: 10px;
+ padding-top: 10px;
+ border-top: 1px solid var(--line);
+}
+.chat-picker-panel .chat-picker-group > label,
+.chat-picker-panel .chat-picker-effort,
+.chat-picker-panel .chat-picker-folder {
+ display: grid;
+ grid-template-columns: 4.25rem minmax(0,1fr);
+ align-items: center;
+ gap: 8px;
+ margin: 0;
+ font-size: 11px;
+ color: var(--muted);
+}
+.chat-picker-panel .chat-picker-folder { align-items: start; }
+.chat-picker-folder > span { padding-top: 8px; }
+.chat-picker-panel select,
+.chat-picker-panel input:not([type=radio]) {
+ width: 100%;
+ min-width: 0;
+ max-width: 100%;
+ font: inherit;
+ padding: 5px 8px;
+ min-height: 28px;
+}
+.chat-picker-panel select,
+.chat-picker-panel input:not([type=radio]):not(:focus) {
+ overflow: hidden;
+ text-overflow: ellipsis;
+ white-space: nowrap;
+}
+.chat-picker-panel :is(select,input:not([type=radio])):focus-visible,
+.chat-effort-options input:focus-visible + span {
+ outline: 2px solid var(--accent);
+ outline-offset: 1px;
+}
+.chat-picker-panel .chat-picker-folder button {
+ padding: 3px 0;
+ justify-self: start;
+ align-self: start;
+ text-align: left;
+}
+.chat-picker-fixed { color: var(--ink); padding: 3px 8px; }
+.chat-effort-options {
+ display: flex;
+ flex-wrap: wrap;
+ gap: 3px;
+ min-width: 0;
+}
+.chat-picker-panel .chat-effort-options > label {
+ position: relative;
+ display: block;
+ max-width: 100%;
+ margin: 0;
+}
+.chat-effort-options input {
+ position: absolute;
+ opacity: 0;
+ width: 1px;
+ height: 1px;
+ padding: 0;
+}
+.chat-effort-options label > span {
+ display: block;
+ padding: 3px 5px;
+ border: 1px solid var(--line);
+ border-radius: var(--radius);
+ cursor: pointer;
+}
+.chat-effort-options label:hover > span { background: var(--rail); }
+.chat-effort-options input:checked + span {
+ background: var(--accent-soft);
+ border-color: var(--accent);
+ color: var(--ink);
+}
+.chat-effort-options input:disabled + span { opacity: .65; cursor: default; }
+.chat-effort-options small { flex-basis: 100%; }

@@ -1,0 +1,7 @@
+{
+  "commit": "9bfb9e7eefb447fcb013761b1b18e861d3d320b2",
+  "node": "24.22.1",
+  "packageManager": "pnpm@12.16.0",
+  "arch": "darwin-arm64",
+  "nodeSha256": "89c682593d76cd44233fa53b1563264e7de9cbb189cad169135c5b4fadfbc0a7"
+}

@@ -1,0 +1,3 @@
+import {it,expect} from 'vitest';
+import {recordedOutputContains} from './recordedOutput';
+it('replaces the flat aggregate with authoritative commentary and final turns',()=>{const turns=[{role:'user',text:'go'},{role:'assistant',channel:'commentary',text:'Checking.'},{role:'assistant',channel:'final',text:'Done.'}];expect(recordedOutputContains(turns,'Checking.\n\nDone.')).toBe(true);expect(recordedOutputContains(turns,'Checking.Done.')).toBe(true);expect(recordedOutputContains(turns,'new unfinished output')).toBe(false);expect(recordedOutputContains([...turns,{role:'user',text:'next'}],'Done.')).toBe(false)});

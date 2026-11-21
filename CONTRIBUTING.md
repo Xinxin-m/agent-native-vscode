@@ -4,7 +4,7 @@ We welcome changes in three areas: the UI layout, the visuals, and the prompts a
 
 ## Run from source
 
-Follow the quick start in the [README](README.md), then work on the browser client:
+Follow the quick start in the [README](README.md), then follow [desktop build instructions](desktop/docs/build-and-update.md) for Library Code or work on the browser client:
 
 ```sh
 cd app/workbench
@@ -26,7 +26,7 @@ Commit the rebuilt bundle with your source change, because users run the built c
 
 ## Rules for every change
 
-- **Parity.** One feature behaves the same in every client. Make UI changes in the browser workspace source (`app/workbench/src/`); `app/web/` holds the built bundle, a redirect page to it and the settings-insights script and style. A UI change also goes to the VS Code extension (`app/vscode-library/media/`) where that client has the same surface. If a client cannot have it, say so in the pull request.
+- **Parity.** Desktop UI source lives in `desktop/integration/ui/src/`; make equivalent changes there for shared features. One feature behaves the same in every client. Make UI changes in the browser workspace source (`app/workbench/src/`); `app/web/` holds the built bundle, a redirect page to it and the settings-insights script and style. A UI change also goes to the VS Code extension (`app/vscode-library/media/`) where that client has the same surface. If a client cannot have it, say so in the pull request.
 - **Subtract.** Prefer removing to adding. No decoration, no new color without a meaning, no second way to do the same thing. One canonical copy of each file: edit in place and never add `v2` copies.
 - **Generated menus.** Model lists come from the provider catalogs in code. Do not hard-code model names in the UI.
 - **Keep user work safe.** Never discard drafts, stop running agents, or restart a server that has active runs as a side effect of your change.

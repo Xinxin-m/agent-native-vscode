@@ -1,0 +1,2781 @@
+diff --git a/build/gulpfile.vscode.ts b/build/gulpfile.vscode.ts
+index 8de1c610ba7..614d36b2608 100644
+--- a/build/gulpfile.vscode.ts
++++ b/build/gulpfile.vscode.ts
+@@ -600,7 +600,8 @@ BUILD_TARGETS.forEach(buildTarget => {
+ 
+ 	const [vscode, vscodeMin] = ['', 'min'].map(minified => {
+ 		const sourceFolderName = `out-vscode${dashed(minified)}`;
+-		const destinationFolderName = `VSCode${dashed(platform)}${dashed(arch)}`;
++		// Library Code: a variant build packages beside the default one (a folder relative to the repository parent).
++		const destinationFolderName = process.env.LIBRARY_PACKAGE_DIR || `VSCode${dashed(platform)}${dashed(arch)}`;
+ 
+ 		const packageTasks: task.Task[] = [
+ 			compileNativeExtensionsBuildTask,
+diff --git a/product.json b/product.json
+index dfa7a76a1fc..23cf87738b9 100644
+--- a/product.json
++++ b/product.json
+@@ -1,19 +1,19 @@
+ {
+-	"nameShort": "Code - OSS",
+-	"nameLong": "Code - OSS",
+-	"applicationName": "code-oss",
+-	"dataFolderName": ".vscode-oss",
+-	"sharedDataFolderName": ".vscode-oss-shared",
+-	"win32MutexName": "vscodeoss",
++	"nameShort": "Library Code",
++	"nameLong": "Library Code",
++	"applicationName": "library-code",
++	"dataFolderName": ".library-code",
++	"sharedDataFolderName": ".library-code-shared",
++	"win32MutexName": "librarycode",
+ 	"licenseName": "MIT",
+ 	"licenseUrl": "https://github.com/microsoft/vscode/blob/main/LICENSE.txt",
+ 	"serverLicenseUrl": "https://github.com/microsoft/vscode/blob/main/LICENSE.txt",
+ 	"serverGreeting": [],
+ 	"serverLicense": [],
+ 	"serverLicensePrompt": "",
+-	"serverApplicationName": "code-server-oss",
+-	"serverDataFolderName": ".vscode-server-oss",
+-	"tunnelApplicationName": "code-tunnel-oss",
++	"serverApplicationName": "library-code-server",
++	"serverDataFolderName": ".library-code-server",
++	"tunnelApplicationName": "library-code-tunnel",
+ 	"win32DirName": "Microsoft Code OSS",
+ 	"win32NameVersion": "Microsoft Code OSS",
+ 	"win32RegValueName": "CodeOSS",
+@@ -25,16 +25,16 @@
+ 	"win32ShellNameShort": "C&ode - OSS",
+ 	"win32TunnelServiceMutex": "vscodeoss-tunnelservice",
+ 	"win32TunnelMutex": "vscodeoss-tunnel",
+-	"darwinBundleIdentifier": "com.visualstudio.code.oss",
++	"darwinBundleIdentifier": "local.library.code",
+ 	"darwinProfileUUID": "47827DD9-4734-49A0-AF80-7E19B11495CC",
+ 	"darwinProfilePayloadUUID": "CF808BE7-53F3-46C6-A7E2-7EDB98A5E959",
+-	"linuxDesktopName": "com.visualstudio.CodeOSS",
+-	"linuxIconName": "code-oss",
++	"linuxDesktopName": "local.library.Code",
++	"linuxIconName": "library-code",
+ 	"licenseFileName": "LICENSE.txt",
+ 	"reportIssueUrl": "https://github.com/microsoft/vscode/issues/new",
+ 	"nodejsArtifactFeed": "",
+ 	"electronArtifactFeed": "",
+-	"urlProtocol": "code-oss",
++	"urlProtocol": "library-code",
+ 	"agentsTelemetryAppName": "agents",
+ 	"webviewContentExternalBaseUrlTemplate": "https://{{uuid}}.vscode-cdn.net/insider/ef65ac1ba57f57f2a3961bfe94aa20481caca4c6/out/vs/workbench/contrib/webview/browser/pre/",
+ 	"builtInExtensions": [
+diff --git a/src/vs/base/node/pfs.ts b/src/vs/base/node/pfs.ts
+index 8eac76b3233..4aa2b432d02 100644
+--- a/src/vs/base/node/pfs.ts
++++ b/src/vs/base/node/pfs.ts
+@@ -511,7 +511,19 @@ async function rename(source: string, target: string, windowsRetryTimeout: numbe
+ 		// 2.) The user tries to rename a file/folder that ends with a dot. This is not
+ 		// really possible to move then, at least on UNC devices.
+ 		if (source.toLowerCase() !== target.toLowerCase() && error.code === 'EXDEV' || source.endsWith('.')) {
+-			await copy(source, target, { preserveSymlinks: false /* copying to another device */ });
++			try {
++				await copy(source, target, { preserveSymlinks: false /* copying to another device */ });
++			} catch (copyError) {
++				await rimraf(target, RimRafMode.UNLINK).catch(() => undefined);
++				throw copyError;
++			}
++
++			// Delete the source only after the copy is verified complete
++			const [copied, original] = await Promise.all([measure(target), measure(source)]);
++			if (copied.files !== original.files || copied.bytes !== original.bytes) {
++				await rimraf(target, RimRafMode.UNLINK);
++				throw new Error(`Copy to ${target} was incomplete (${copied.files} of ${original.files} files); the source was kept.`);
++			}
+ 			await rimraf(source, RimRafMode.MOVE);
+ 		} else {
+ 			throw error;
+@@ -519,6 +531,26 @@ async function rename(source: string, target: string, windowsRetryTimeout: numbe
+ 	}
+ }
+ 
++/** Counts files and bytes under a path, following symbolic links like the cross-device copy does. */
++async function measure(path: string, seen = new Set<string>()): Promise<{ files: number; bytes: number }> {
++	const stat = await fs.promises.stat(path);
++	if (!stat.isDirectory()) {
++		return { files: 1, bytes: stat.size };
++	}
++	const real = await fs.promises.realpath(path);
++	if (seen.has(real)) {
++		return { files: 0, bytes: 0 };
++	}
++	seen.add(real);
++	const total = { files: 0, bytes: 0 };
++	for (const name of await fs.promises.readdir(path)) {
++		const child = await measure(join(path, name), seen);
++		total.files += child.files;
++		total.bytes += child.bytes;
++	}
++	return total;
++}
++
+ /** Renames without copy/delete fallback, retaining Windows retries for transient errors. */
+ async function renameAtomic(source: string, target: string, windowsRetryTimeout: number | false = 60000, renameFn: typeof fs.promises.rename = fs.promises.rename): Promise<void> {
+ 	if (source === target) {
+diff --git a/src/vs/base/parts/ipc/electron-main/ipc.electron.ts b/src/vs/base/parts/ipc/electron-main/ipc.electron.ts
+index 11037accc23..673ca8bdbda 100644
+--- a/src/vs/base/parts/ipc/electron-main/ipc.electron.ts
++++ b/src/vs/base/parts/ipc/electron-main/ipc.electron.ts
+@@ -52,7 +52,8 @@ export class Server extends IPCServer {
+ 					Server.Clients.delete(id);
+ 				}
+ 
+-				onDidClientReconnect.dispose();
++				// Keep the emitter alive until every disconnect listener has run.
++				queueMicrotask(() => onDidClientReconnect.dispose());
+ 			});
+ 			const protocol = new ElectronProtocol(webContents, onMessage);
+ 
+diff --git a/src/vs/platform/notification/common/notification.ts b/src/vs/platform/notification/common/notification.ts
+index 43db795ae04..9bb5e6e3396 100644
+--- a/src/vs/platform/notification/common/notification.ts
++++ b/src/vs/platform/notification/common/notification.ts
+@@ -139,6 +139,9 @@ export function isNotificationSource(thing: unknown): thing is INotificationSour
+ 
+ export interface INotification extends INotificationProperties {
+ 
++	/** Optional timeout for a Library account toast. Zero keeps the toast open. */
++	readonly toastTimeout?: { readonly milliseconds: number; readonly isPaused: () => boolean };
++
+ 	/**
+ 	 * The id of the notification. If provided, will be used to compare
+ 	 * notifications with others to decide whether a notification is
+diff --git a/src/vs/workbench/api/browser/viewsExtensionPoint.ts b/src/vs/workbench/api/browser/viewsExtensionPoint.ts
+index 833787070f3..dbb901f82e0 100644
+--- a/src/vs/workbench/api/browser/viewsExtensionPoint.ts
++++ b/src/vs/workbench/api/browser/viewsExtensionPoint.ts
+@@ -414,7 +414,7 @@ class ViewsExtensionHandler implements IWorkbenchContribution {
+ 					[id, { mergeViewWithContainerWhenSingleView: true }]
+ 				),
+ 				hideIfEmpty: true,
+-				order,
++				order: extensionId?.value === 'library.library-code' && id === 'workbench.view.extension.library' ? -1 : order,
+ 				icon,
+ 			}, location);
+ 
+diff --git a/src/vs/workbench/browser/actions/layoutActions.ts b/src/vs/workbench/browser/actions/layoutActions.ts
+index 4156d1c9a3f..dd0d9987e26 100644
+--- a/src/vs/workbench/browser/actions/layoutActions.ts
++++ b/src/vs/workbench/browser/actions/layoutActions.ts
+@@ -19,10 +19,9 @@ import { IViewsService } from '../../services/views/common/viewsService.js';
+ import { QuickPickItem, IQuickInputService, IQuickPickItem, IQuickPickSeparator, IQuickPick } from '../../../platform/quickinput/common/quickInput.js';
+ import { IDialogService } from '../../../platform/dialogs/common/dialogs.js';
+ import { IPaneCompositePartService } from '../../services/panecomposite/browser/panecomposite.js';
+-import { ToggleAuxiliaryBarAction } from '../parts/auxiliarybar/auxiliaryBarActions.js';
+ import { TogglePanelAction } from '../parts/panel/panelActions.js';
+ import { ICommandService } from '../../../platform/commands/common/commands.js';
+-import { AuxiliaryBarVisibleContext, PanelAlignmentContext, PanelVisibleContext, SideBarVisibleContext, FocusedViewContext, InEditorZenModeContext, IsMainEditorCenteredLayoutContext, MainEditorAreaVisibleContext, IsMainWindowFullscreenContext, PanelPositionContext, IsAuxiliaryWindowFocusedContext, IsSessionsWindowContext, TitleBarStyleContext, IsAuxiliaryWindowContext, CustomMenuBarVisibleContext, LayoutModeContext } from '../../common/contextkeys.js';
++import { PanelAlignmentContext, PanelVisibleContext, SideBarVisibleContext, FocusedViewContext, InEditorZenModeContext, IsMainEditorCenteredLayoutContext, MainEditorAreaVisibleContext, IsMainWindowFullscreenContext, PanelPositionContext, IsAuxiliaryWindowFocusedContext, IsSessionsWindowContext, TitleBarStyleContext, IsAuxiliaryWindowContext, CustomMenuBarVisibleContext, LayoutModeContext } from '../../common/contextkeys.js';
+ import { Codicon } from '../../../base/common/codicons.js';
+ import { ThemeIcon } from '../../../base/common/themables.js';
+ import { DisposableStore } from '../../../base/common/lifecycle.js';
+@@ -881,31 +880,6 @@ registerAction2(class extends Action2 {
+ 			});
+ 		});
+ 
+-
+-		const sidePanels = paneCompositePartService.getPinnedPaneCompositeIds(ViewContainerLocation.AuxiliaryBar);
+-		sidePanels.forEach(panel => {
+-			const container = viewDescriptorService.getViewContainerById(panel)!;
+-			const containerModel = viewDescriptorService.getViewContainerModel(container);
+-
+-			let hasAddedView = false;
+-			containerModel.visibleViewDescriptors.forEach(viewDescriptor => {
+-				if (viewDescriptor.canMoveView) {
+-					if (!hasAddedView) {
+-						results.push({
+-							type: 'separator',
+-							label: localize('secondarySideBarContainer', "Secondary Side Bar / {0}", containerModel.title)
+-						});
+-						hasAddedView = true;
+-					}
+-
+-					results.push({
+-						id: viewDescriptor.id,
+-						label: viewDescriptor.name.value
+-					});
+-				}
+-			});
+-		});
+-
+ 		return results;
+ 	}
+ 
+@@ -997,13 +971,6 @@ class MoveFocusedViewAction extends Action2 {
+ 			});
+ 		}
+ 
+-		if (!(isViewSolo && currentLocation === ViewContainerLocation.AuxiliaryBar)) {
+-			items.push({
+-				id: '_.auxiliarybar.newcontainer',
+-				label: localize('moveFocusedView.newContainerInSidePanel', "New Secondary Side Bar Entry")
+-			});
+-		}
+-
+ 		items.push({
+ 			type: 'separator',
+ 			label: localize('sidebar', "Side Bar")
+@@ -1046,27 +1013,6 @@ class MoveFocusedViewAction extends Action2 {
+ 				};
+ 			}));
+ 
+-		items.push({
+-			type: 'separator',
+-			label: localize('secondarySideBar', "Secondary Side Bar")
+-		});
+-
+-		const pinnedAuxPanels = paneCompositePartService.getPinnedPaneCompositeIds(ViewContainerLocation.AuxiliaryBar);
+-		items.push(...pinnedAuxPanels
+-			.filter(panel => {
+-				if (panel === viewDescriptorService.getViewContainerByViewId(focusedViewId)!.id) {
+-					return false;
+-				}
+-
+-				return !viewDescriptorService.getViewContainerById(panel)!.rejectAddedViews;
+-			})
+-			.map(panel => {
+-				return {
+-					id: panel,
+-					label: viewDescriptorService.getViewContainerModel(viewDescriptorService.getViewContainerById(panel)!).title
+-				};
+-			}));
+-
+ 		quickPick.items = items;
+ 
+ 		disposables.add(quickPick.onDidAccept(() => {
+@@ -1368,7 +1314,6 @@ if (!isMacintosh || !isNative) {
+ ToggleVisibilityActions.push(...[
+ 	CreateToggleLayoutItem(ToggleActivityBarVisibilityActionId, ContextKeyExpr.notEquals('config.workbench.activityBar.location', 'hidden'), localize('activityBar', "Activity Bar"), { whenA: ContextKeyExpr.equals('config.workbench.sideBar.location', 'left'), iconA: activityBarLeftIcon, iconB: activityBarRightIcon }),
+ 	CreateToggleLayoutItem(ToggleSidebarVisibilityAction.ID, SideBarVisibleContext, localize('sideBar', "Primary Side Bar"), { whenA: ContextKeyExpr.equals('config.workbench.sideBar.location', 'left'), iconA: panelLeftIcon, iconB: panelRightIcon }),
+-	CreateToggleLayoutItem(ToggleAuxiliaryBarAction.ID, AuxiliaryBarVisibleContext, localize('secondarySideBar', "Secondary Side Bar"), { whenA: ContextKeyExpr.equals('config.workbench.sideBar.location', 'left'), iconA: panelRightIcon, iconB: panelLeftIcon }),
+ 	CreateToggleLayoutItem(TogglePanelAction.ID, PanelVisibleContext, localize('panel', "Panel"), panelIcon),
+ 	CreateToggleLayoutItem(ToggleStatusbarVisibilityAction.ID, ContextKeyExpr.equals('config.workbench.statusBar.visible', true), localize('statusBar', "Status Bar"), statusBarIcon),
+ ]);
+diff --git a/src/vs/workbench/browser/layout.ts b/src/vs/workbench/browser/layout.ts
+index 2e7e9e7cb31..3d3d8137d05 100644
+--- a/src/vs/workbench/browser/layout.ts
++++ b/src/vs/workbench/browser/layout.ts
+@@ -2275,6 +2275,7 @@ export abstract class Layout extends Disposable implements IWorkbenchLayoutServi
+ 
+ 	setAuxiliaryBarMaximized(maximized: boolean): boolean {
+ 		if (
++			maximized ||									// Library Code has no secondary side bar
+ 			this.inMaximizedAuxiliaryBarTransition ||		// prevent re-entrance
+ 			(maximized === this.isAuxiliaryBarMaximized())	// return early if state is already present
+ 		) {
+@@ -2389,7 +2390,11 @@ export abstract class Layout extends Disposable implements IWorkbenchLayoutServi
+ 	}
+ 
+ 	private setAuxiliaryBarHidden(hidden: boolean, skipLayout?: boolean): void {
+-		if (hidden && this.setAuxiliaryBarMaximized(false) && !this.isVisible(Parts.AUXILIARYBAR_PART)) {
++		if (!hidden) {
++			return; // Library Code has no secondary side bar
++		}
++
++		if (hidden &&this.setAuxiliaryBarMaximized(false) && !this.isVisible(Parts.AUXILIARYBAR_PART)) {
+ 			return; // return: leaving maximised auxiliary bar made this part hidden
+ 		}
+ 
+@@ -3355,6 +3360,10 @@ class LayoutStateModel extends Disposable {
+ 			}
+ 		}
+ 
++		// Library Code has no secondary side bar, even if a stored layout had one
++		this.setRuntimeValue(LayoutStateKeys.AUXILIARYBAR_HIDDEN, true);
++		this.setRuntimeValue(LayoutStateKeys.AUXILIARYBAR_WAS_LAST_MAXIMIZED, false);
++
+ 		// Both editor and panel should not be hidden on startup unless auxiliary bar is maximized
+ 		if (
+ 			this.getRuntimeValue(LayoutStateKeys.PANEL_HIDDEN) &&
+diff --git a/src/vs/workbench/browser/parts/activitybar/activitybarPart.ts b/src/vs/workbench/browser/parts/activitybar/activitybarPart.ts
+index ae0a09c34ce..a3254e4a618 100644
+--- a/src/vs/workbench/browser/parts/activitybar/activitybarPart.ts
++++ b/src/vs/workbench/browser/parts/activitybar/activitybarPart.ts
+@@ -4,6 +4,7 @@
+  *--------------------------------------------------------------------------------------------*/
+ 
+ import './media/activitybarpart.css';
++import { LibraryAutoHide } from './libraryAutoHide.js';
+ import './media/activityaction.css';
+ import { localize, localize2 } from '../../../../nls.js';
+ import { ActionsOrientation } from '../../../../base/browser/ui/actionbar/actionbar.js';
+@@ -11,12 +12,12 @@ import { Part } from '../../part.js';
+ import { mainWindow } from '../../../../base/browser/window.js';
+ import { ActivityBarPosition, IWorkbenchLayoutService, LayoutSettings, Parts, Position, FLOATING_PANEL_INNER_MARGIN, FLOATING_PANEL_MARGIN, getFloatingPanelMargin, getFloatingPanelOuterMargin, isFloatingTopEdgeExposed, isCompactMenuInTitlebar } from '../../../services/layout/browser/layoutService.js';
+ import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
+-import { DisposableStore, MutableDisposable } from '../../../../base/common/lifecycle.js';
++import { DisposableStore, MutableDisposable, toDisposable } from '../../../../base/common/lifecycle.js';
+ import { ToggleSidebarPositionAction, ToggleSidebarVisibilityAction } from '../../actions/layoutActions.js';
+ import { IThemeService, IColorTheme, registerThemingParticipant } from '../../../../platform/theme/common/themeService.js';
+ import { ACTIVITY_BAR_BACKGROUND, ACTIVITY_BAR_BORDER, ACTIVITY_BAR_FOREGROUND, ACTIVITY_BAR_ACTIVE_BORDER, ACTIVITY_BAR_BADGE_BACKGROUND, ACTIVITY_BAR_BADGE_FOREGROUND, ACTIVITY_BAR_INACTIVE_FOREGROUND, ACTIVITY_BAR_ACTIVE_BACKGROUND, ACTIVITY_BAR_DRAG_AND_DROP_BORDER, ACTIVITY_BAR_ACTIVE_FOCUS_BORDER, MODERN_ACTIVITY_BAR_BACKGROUND, MODERN_ACTIVITY_BAR_INACTIVE_BACKGROUND } from '../../../common/theme.js';
+ import { activeContrastBorder, contrastBorder, focusBorder } from '../../../../platform/theme/common/colorRegistry.js';
+-import { addDisposableListener, append, EventType, isAncestor, $, clearNode, Dimension } from '../../../../base/browser/dom.js';
++import { addDisposableListener, append, EventType, isAncestor, isAncestorOfActiveElement, $, clearNode, Dimension } from '../../../../base/browser/dom.js';
+ import { assertReturnsDefined } from '../../../../base/common/types.js';
+ import { CustomMenubarControl } from '../titlebar/menubarControl.js';
+ import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
+@@ -42,6 +43,8 @@ import { IWorkbenchEnvironmentService } from '../../../services/environment/comm
+ import { IViewsService } from '../../../services/views/common/viewsService.js';
+ import { SwitchCompositeViewAction } from '../compositeBarActions.js';
+ import { IHostService } from '../../../services/host/browser/host.js';
++import { IProductService } from '../../../../platform/product/common/productService.js';
++import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
+ 
+ export class ActivitybarPart extends Part {
+ 
+@@ -97,8 +100,8 @@ export class ActivitybarPart extends Part {
+ 
+ 	//#region IView
+ 
+-	get minimumWidth(): number { return this.baseWidth + this.floatingHorizontalGutter; }
+-	get maximumWidth(): number { return this.baseWidth + this.floatingHorizontalGutter; }
++	get minimumWidth(): number { return this.autoHide ? 0 : this.baseWidth + this.floatingHorizontalGutter; }
++	get maximumWidth(): number { return this.autoHide ? 0 : this.baseWidth + this.floatingHorizontalGutter; }
+ 	readonly minimumHeight: number = 0;
+ 	readonly maximumHeight: number = Number.POSITIVE_INFINITY;
+ 
+@@ -179,6 +182,10 @@ export class ActivitybarPart extends Part {
+ 	private _isCompact: boolean;
+ 	private activeWindowId: number | undefined;
+ 
++	// Library Code: `library.iconBar: autoHide` takes the bar out of the layout and slides it over the content.
++	private autoHide = false;
++	private readonly autoHideListeners = this._register(new MutableDisposable<DisposableStore>());
++
+ 	constructor(
+ 		private readonly location: ViewContainerLocation,
+ 		private readonly paneCompositePart: IPaneCompositePart,
+@@ -192,8 +199,14 @@ export class ActivitybarPart extends Part {
+ 		super(Parts.ACTIVITYBAR_PART, { hasTitle: false }, themeService, storageService, layoutService);
+ 
+ 		this._isCompact = this.configurationService.getValue<boolean>(LayoutSettings.ACTIVITY_BAR_COMPACT) ?? false;
++		this.updateAutoHide();
+ 
+ 		this._register(this.configurationService.onDidChangeConfiguration(e => {
++			if (e.affectsConfiguration('library.iconBar')) {
++				this.updateAutoHide();
++				this._onDidChange.fire(undefined);
++			}
++
+ 			if (e.affectsConfiguration(LayoutSettings.ACTIVITY_BAR_COMPACT)) {
+ 				this._isCompact = this.configurationService.getValue<boolean>(LayoutSettings.ACTIVITY_BAR_COMPACT) ?? false;
+ 				this.updateCompactStyle();
+@@ -245,6 +258,88 @@ export class ActivitybarPart extends Part {
+ 		}
+ 	}
+ 
++	private updateAutoHide(): void {
++		const product = this.instantiationService.invokeFunction(accessor => accessor.get(IProductService));
++		this.autoHide = product.applicationName.startsWith('library-code') && this.configurationService.getValue<string>('library.iconBar') === 'autoHide';
++		if (!this.element) {
++			return;
++		}
++		const element = this.element;
++		element.classList.toggle('library-autohide', this.autoHide);
++		if (!this.autoHide) {
++			this.autoHideListeners.clear();
++			element.classList.remove('library-revealed');
++			return;
++		}
++		if (this.autoHideListeners.value) {
++			return;
++		}
++
++		// Webviews have a separate event loop. Order their translated coordinates with native moves,
++		// and keep the revealed bar stable while it slides underneath a stationary pointer.
++		const store = new DisposableStore();
++		const edge = append(this.layoutService.mainContainer, $('.library-iconbar-edge'));
++		const controller = new LibraryAutoHide(() => element.offsetWidth || this.baseWidth,
++			shown => element.classList.toggle('library-revealed', shown));
++		const document = element.ownerDocument;
++		let pointerOnBar = false;
++		let popupOriginOnBar = false;
++		let dragging = false;
++		let nativeMenuOpen = false;
++		const ownedPopups = new Set<Element>();
++		const popupSelector = '.context-view .monaco-menu-container, .context-view .monaco-menu, .monaco-hover, .monaco-tooltip, [role="tooltip"]';
++		let previousPopups = new Set<Element>(document.querySelectorAll(popupSelector));
++		const visible = (node: Element) => node.isConnected && node.getBoundingClientRect().width > 0 && node.getBoundingClientRect().height > 0;
++		const protect = () => {
++			for (const node of ownedPopups) { if (!visible(node)) { ownedPopups.delete(node); } }
++			controller.protect(isAncestorOfActiveElement(element), dragging || nativeMenuOpen || ownedPopups.size > 0);
++		};
++		const contextMenus = this.instantiationService.invokeFunction(accessor => accessor.get(IContextMenuService));
++		store.add(contextMenus.onDidShowContextMenu(() => {
++			if (pointerOnBar || popupOriginOnBar || isAncestorOfActiveElement(element)) { nativeMenuOpen = true; protect(); }
++		}));
++		store.add(contextMenus.onDidHideContextMenu(() => { nativeMenuOpen = false; popupOriginOnBar = false; protect(); }));
++		const observer = new mainWindow.MutationObserver(() => {
++			const current = new Set<Element>(Array.from(document.querySelectorAll(popupSelector)).filter(visible));
++			for (const node of current) {
++				if (!previousPopups.has(node) && visible(node) && (pointerOnBar || popupOriginOnBar || isAncestorOfActiveElement(element))) {
++					ownedPopups.add(node);
++					popupOriginOnBar = false;
++				}
++			}
++			previousPopups = current;
++			protect();
++		});
++		observer.observe(this.layoutService.mainContainer, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'aria-hidden'] });
++		const stamp = (event: Event) => mainWindow.performance.timeOrigin + event.timeStamp;
++		store.add(addDisposableListener(document, 'mousemove', (event: MouseEvent) => {
++			pointerOnBar = event.target instanceof mainWindow.Node && element.contains(event.target);
++			if (!pointerOnBar) { popupOriginOnBar = false; }
++			controller.pointer(event.clientX, stamp(event));
++			protect();
++		}, true));
++		store.add(addDisposableListener(mainWindow, 'vscode-webview-mouse-activity', (event: CustomEvent<{ clientX?: number; timestamp?: number }>) => {
++			if (Number.isFinite(event.detail.clientX) && Number.isFinite(event.detail.timestamp)) {
++				if (controller.pointer(event.detail.clientX!, event.detail.timestamp!)) { pointerOnBar = false; popupOriginOnBar = false; }
++			}
++		}));
++		store.add(addDisposableListener(document, 'mouseleave', (event: MouseEvent) => { pointerOnBar = false; popupOriginOnBar = false; controller.leave(stamp(event)); }));
++		store.add(addDisposableListener(mainWindow, 'blur', (event: Event) => controller.leave(stamp(event))));
++		store.add(addDisposableListener(document, 'focusin', protect, true));
++		store.add(addDisposableListener(document, 'focusout', () => { queueMicrotask(protect); }, true));
++		for (const type of ['pointerdown', 'contextmenu']) {
++			store.add(addDisposableListener(document, type, (event: Event) => { popupOriginOnBar = event.target instanceof mainWindow.Node && element.contains(event.target); }, true));
++		}
++		for (const type of ['dragstart', 'drag']) {
++			store.add(addDisposableListener(mainWindow, type, () => { dragging = true; protect(); }, true));
++		}
++		for (const type of ['dragend', 'drop']) {
++			store.add(addDisposableListener(mainWindow, type, () => { dragging = false; protect(); }, true));
++		}
++		store.add(toDisposable(() => { observer.disconnect(); controller.dispose(); edge.remove(); }));
++		this.autoHideListeners.value = store;
++	}
++
+ 	private recreateCompositeBar(): void {
+ 		if (!this.content || !this.compositeBar.value) {
+ 			return;
+@@ -298,6 +393,7 @@ export class ActivitybarPart extends Part {
+ 		this.content = append(this.element, $('.content'));
+ 
+ 		this.updateCompactStyle();
++		this.updateAutoHide();
+ 
+ 		if (this.layoutService.isVisible(Parts.ACTIVITYBAR_PART)) {
+ 			this.show();
+@@ -377,6 +473,9 @@ export class ActivitybarPart extends Part {
+ 	}
+ 
+ 	override layout(width: number, height: number): void {
++		if (this.autoHide) {
++			width = this.baseWidth; // the grid gives it no width; the bar still draws at full size
++		}
+ 		super.layout(width, height, 0, 0);
+ 
+ 		if (!this.content) {
+diff --git a/src/vs/workbench/browser/parts/activitybar/media/activitybarpart.css b/src/vs/workbench/browser/parts/activitybar/media/activitybarpart.css
+index a3d1701f9a5..34e85902ca9 100644
+--- a/src/vs/workbench/browser/parts/activitybar/media/activitybarpart.css
++++ b/src/vs/workbench/browser/parts/activitybar/media/activitybarpart.css
+@@ -77,3 +77,31 @@
+ 	width: 100%;
+ 	height: 35px;
+ }
++
++/* Library Code: auto-hidden icon bar slides over the content without taking layout width */
++.monaco-workbench .part.activitybar.library-autohide {
++	position: relative;
++	z-index: 40;
++	transform: translateX(calc(-100% - 8px));
++	transition: transform 120ms ease-out;
++}
++
++.monaco-workbench .part.activitybar.library-autohide.library-revealed {
++	transform: none;
++	box-shadow: var(--vscode-shadow-md);
++}
++
++.monaco-workbench > .library-iconbar-edge {
++	position: absolute;
++	top: 0;
++	bottom: 0;
++	left: 0;
++	width: 6px;
++	z-index: 41;
++}
++
++@media (prefers-reduced-motion: reduce) {
++	.monaco-workbench .part.activitybar.library-autohide {
++		transition: none;
++	}
++}
+diff --git a/src/vs/workbench/browser/parts/auxiliarybar/auxiliaryBarActions.ts b/src/vs/workbench/browser/parts/auxiliarybar/auxiliaryBarActions.ts
+index 19346c2741b..cec4b6c16d6 100644
+--- a/src/vs/workbench/browser/parts/auxiliarybar/auxiliaryBarActions.ts
++++ b/src/vs/workbench/browser/parts/auxiliarybar/auxiliaryBarActions.ts
+@@ -9,7 +9,7 @@ import { Action2, MenuId, MenuRegistry, registerAction2 } from '../../../../plat
+ import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
+ import { registerIcon } from '../../../../platform/theme/common/iconRegistry.js';
+ import { Categories } from '../../../../platform/action/common/actionCommonCategories.js';
+-import { AuxiliaryBarMaximizedContext, AuxiliaryBarVisibleContext, IsAuxiliaryWindowContext, IsSessionsWindowContext, SecondarySideBarVisibleContext } from '../../../common/contextkeys.js';
++import { AuxiliaryBarMaximizedContext, AuxiliaryBarVisibleContext, SecondarySideBarVisibleContext } from '../../../common/contextkeys.js';
+ import { ViewContainerLocation, ViewContainerLocationToString } from '../../../common/views.js';
+ import { ActivityBarPosition, IWorkbenchLayoutService, LayoutSettings, Parts } from '../../../services/layout/browser/layoutService.js';
+ import { IPaneCompositePartService } from '../../../services/panecomposite/browser/panecomposite.js';
+@@ -21,11 +21,6 @@ import { SwitchCompositeViewAction } from '../compositeBarActions.js';
+ const maximizeIcon = registerIcon('auxiliarybar-maximize', Codicon.screenFull, localize('maximizeIcon', 'Icon to maximize the secondary side bar.'));
+ const closeIcon = registerIcon('auxiliarybar-close', Codicon.close, localize('closeIcon', 'Icon to close the secondary side bar.'));
+ 
+-const auxiliaryBarRightIcon = registerIcon('auxiliarybar-right-layout-icon', Codicon.layoutSidebarRight, localize('toggleAuxiliaryIconRight', 'Icon to toggle the secondary side bar off in its right position.'));
+-const auxiliaryBarRightOffIcon = registerIcon('auxiliarybar-right-off-layout-icon', Codicon.layoutSidebarRightOff, localize('toggleAuxiliaryIconRightOn', 'Icon to toggle the secondary side bar on in its right position.'));
+-const auxiliaryBarLeftIcon = registerIcon('auxiliarybar-left-layout-icon', Codicon.layoutSidebarLeft, localize('toggleAuxiliaryIconLeft', 'Icon to toggle the secondary side bar in its left position.'));
+-const auxiliaryBarLeftOffIcon = registerIcon('auxiliarybar-left-off-layout-icon', Codicon.layoutSidebarLeftOff, localize('toggleAuxiliaryIconLeftOn', 'Icon to toggle the secondary side bar on in its left position.'));
+-
+ export class ToggleAuxiliaryBarAction extends Action2 {
+ 
+ 	static readonly ID = 'workbench.action.toggleAuxiliaryBar';
+@@ -46,24 +41,7 @@ export class ToggleAuxiliaryBarAction extends Action2 {
+ 			metadata: {
+ 				description: localize('openAndCloseAuxiliaryBar', 'Open/Show and Close/Hide Secondary Side Bar'),
+ 			},
+-			f1: true,
+-			keybinding: {
+-				weight: KeybindingWeight.WorkbenchContrib,
+-				primary: KeyMod.CtrlCmd | KeyMod.Alt | KeyCode.KeyB
+-			},
+-			menu: [
+-				{
+-					id: MenuId.LayoutControlMenuSubmenu,
+-					group: '0_workbench_layout',
+-					order: 1
+-				},
+-				{
+-					id: MenuId.MenubarAppearanceMenu,
+-					group: '2_workbench_layout',
+-					order: 2,
+-					when: IsSessionsWindowContext.negate()
+-				}
+-			]
++			f1: false, // Library Code has no secondary side bar: no palette entry, key or menu item
+ 		});
+ 	}
+ 
+@@ -110,7 +88,7 @@ registerAction2(class FocusAuxiliaryBarAction extends Action2 {
+ 			id: FocusAuxiliaryBarAction.ID,
+ 			title: FocusAuxiliaryBarAction.LABEL,
+ 			category: Categories.View,
+-			f1: true,
++			f1: false,
+ 		});
+ 	}
+ 
+@@ -131,44 +109,6 @@ registerAction2(class FocusAuxiliaryBarAction extends Action2 {
+ 
+ MenuRegistry.appendMenuItems([
+ 	{
+-		id: MenuId.LayoutControlMenu,
+-		item: {
+-			group: 'navigation',
+-			command: {
+-				id: ToggleAuxiliaryBarAction.ID,
+-				title: localize('toggleSecondarySideBar', "Toggle Secondary Side Bar"),
+-				toggled: { condition: AuxiliaryBarVisibleContext, icon: auxiliaryBarLeftIcon },
+-				icon: auxiliaryBarLeftOffIcon,
+-			},
+-			when: ContextKeyExpr.and(
+-				IsAuxiliaryWindowContext.negate(),
+-				ContextKeyExpr.or(
+-					ContextKeyExpr.equals('config.workbench.layoutControl.type', 'toggles'),
+-					ContextKeyExpr.equals('config.workbench.layoutControl.type', 'both')),
+-				ContextKeyExpr.equals('config.workbench.sideBar.location', 'right')
+-			),
+-			order: 0
+-		}
+-	}, {
+-		id: MenuId.LayoutControlMenu,
+-		item: {
+-			group: 'navigation',
+-			command: {
+-				id: ToggleAuxiliaryBarAction.ID,
+-				title: localize('toggleSecondarySideBar', "Toggle Secondary Side Bar"),
+-				toggled: { condition: AuxiliaryBarVisibleContext, icon: auxiliaryBarRightIcon },
+-				icon: auxiliaryBarRightOffIcon,
+-			},
+-			when: ContextKeyExpr.and(
+-				IsAuxiliaryWindowContext.negate(),
+-				ContextKeyExpr.or(
+-					ContextKeyExpr.equals('config.workbench.layoutControl.type', 'toggles'),
+-					ContextKeyExpr.equals('config.workbench.layoutControl.type', 'both')),
+-				ContextKeyExpr.equals('config.workbench.sideBar.location', 'left')
+-			),
+-			order: 2
+-		}
+-	}, {
+ 		id: MenuId.ViewContainerTitleContext,
+ 		item: {
+ 			group: '3_workbench_layout_move',
+@@ -188,7 +128,7 @@ registerAction2(class extends SwitchCompositeViewAction {
+ 			id: 'workbench.action.previousAuxiliaryBarView',
+ 			title: localize2('previousAuxiliaryBarView', 'Previous Secondary Side Bar View'),
+ 			category: Categories.View,
+-			f1: true
++			f1: false
+ 		}, ViewContainerLocation.AuxiliaryBar, -1);
+ 	}
+ });
+@@ -199,7 +139,7 @@ registerAction2(class extends SwitchCompositeViewAction {
+ 			id: 'workbench.action.nextAuxiliaryBarView',
+ 			title: localize2('nextAuxiliaryBarView', 'Next Secondary Side Bar View'),
+ 			category: Categories.View,
+-			f1: true
++			f1: false
+ 		}, ViewContainerLocation.AuxiliaryBar, 1);
+ 	}
+ });
+@@ -216,7 +156,7 @@ class MaximizeAuxiliaryBar extends Action2 {
+ 			title: localize2('maximizeAuxiliaryBar', 'Maximize Secondary Side Bar'),
+ 			tooltip: localize('maximizeAuxiliaryBarTooltip', "Maximize Secondary Side Bar"),
+ 			category: Categories.View,
+-			f1: true,
++			f1: false,
+ 			precondition: AuxiliaryBarMaximizedContext.negate(),
+ 		});
+ 	}
+@@ -266,7 +206,7 @@ class ToggleMaximizedAuxiliaryBar extends Action2 {
+ 			id: ToggleMaximizedAuxiliaryBar.ID,
+ 			title: localize2('toggleMaximizedAuxiliaryBar', 'Toggle Maximized Secondary Side Bar'),
+ 			tooltip: localize('maximizeAuxiliaryBarTooltip2', "Maximize Secondary Side Bar"),
+-			f1: true,
++			f1: false,
+ 			category: Categories.View,
+ 			icon: maximizeIcon,
+ 			toggled: {
+diff --git a/src/vs/workbench/browser/parts/editor/editor.contribution.ts b/src/vs/workbench/browser/parts/editor/editor.contribution.ts
+index 5a31ed48c37..c53e49bd9c7 100644
+--- a/src/vs/workbench/browser/parts/editor/editor.contribution.ts
++++ b/src/vs/workbench/browser/parts/editor/editor.contribution.ts
+@@ -3,6 +3,7 @@
+  *  Licensed under the MIT License. See License.txt in the project root for license information.
+  *--------------------------------------------------------------------------------------------*/
+ 
++import './libraryTabGroups.js';
+ import { Registry } from '../../../../platform/registry/common/platform.js';
+ import { localize, localize2 } from '../../../../nls.js';
+ import { IEditorPaneRegistry, EditorPaneDescriptor } from '../../editor.js';
+@@ -1258,3 +1259,9 @@ MenuRegistry.appendMenuItem(MenuId.MenubarGoMenu, {
+ 
+ 
+ registerEditorFontConfigurations(getFontSnippets);
++
++// Library exposes the same pane-local add action in populated and empty groups.
++for (const menu of [MenuId.EditorTitle, MenuId.EmptyEditorGroup]) {
++	MenuRegistry.appendMenuItem(menu, { command: { id: '_library.paneAdd', title: localize('library.paneAdd', "New chat"), icon: Codicon.add }, group: 'navigation', order: 1, when: ContextKeyExpr.has('config.library.layout') });
++	MenuRegistry.appendMenuItem(menu, { command: { id: '_library.paneMore', title: localize('library.paneMore', "Open in this pane"), icon: Codicon.chevronDown }, group: 'navigation', order: 1.5, when: ContextKeyExpr.has('config.library.layout') });
++}
+diff --git a/src/vs/workbench/browser/parts/editor/editorCommands.ts b/src/vs/workbench/browser/parts/editor/editorCommands.ts
+index df8bd3f41d7..fefcc023fba 100644
+--- a/src/vs/workbench/browser/parts/editor/editorCommands.ts
++++ b/src/vs/workbench/browser/parts/editor/editorCommands.ts
+@@ -1,3 +1,4 @@
++import { WebviewInput } from '../../../contrib/webviewPanel/browser/webviewEditorInput.js';
+ /*---------------------------------------------------------------------------------------------
+  *  Copyright (c) Microsoft Corporation. All rights reserved.
+  *  Licensed under the MIT License. See License.txt in the project root for license information.
+@@ -38,7 +39,7 @@ import { EditorGroupLayout, GroupDirection, GroupLocation, GroupsOrder, IEditorG
+ import { mainWindow } from '../../../../base/browser/window.js';
+ import { IEditorResolverService } from '../../../services/editor/common/editorResolverService.js';
+ import { OpenWithEditorPicker } from '../../../services/editor/browser/openWithEditorPicker.js';
+-import { IEditorService, SIDE_GROUP } from '../../../services/editor/common/editorService.js';
++import { ACTIVE_GROUP, IEditorService, SIDE_GROUP } from '../../../services/editor/common/editorService.js';
+ import { IPathService } from '../../../services/path/common/pathService.js';
+ import { ITextFileService } from '../../../services/textfile/common/textfiles.js';
+ import { IUntitledDocumentTelemetryService } from '../../../services/untitled/common/untitledDocumentTelemetry.js';
+@@ -551,8 +552,11 @@ function registerOpenEditorAPICommands(): void {
+ 		const configurationService = accessor.get(IConfigurationService);
+ 
+ 		const [columnArg, optionsArg] = columnAndOptions ?? [];
++		const uri = URI.from(resource, true);
+ 
+-		await editorService.openEditor({ resource: URI.from(resource, true), options: { pinned: true, ...optionsArg, override: id } }, columnToEditorGroup(editorGroupsService, configurationService, columnArg));
++		// Library Code: the Codex extension re-resolves its restored chat tabs without a column; keep each in its own pane.
++		const ownGroup = (columnArg === undefined || columnArg === ACTIVE_GROUP) && uri.scheme === 'openai-codex' ? editorService.findEditors(uri)[0]?.groupId : undefined;
++		await editorService.openEditor({ resource: uri, options: { pinned: true, ...optionsArg, override: id } }, ownGroup ?? columnToEditorGroup(editorGroupsService, configurationService, columnArg));
+ 	});
+ 
+ 	// partial, renderer-side API command to open diff editor only supporting
+@@ -1764,3 +1768,67 @@ export function setup(): void {
+ 	registerFocusEditorGroupWihoutWrapCommands();
+ 	registerModalEditorCommands();
+ }
++
++// Automatic arrangement routes existing inputs through project/provider grouping and keeps the grid.
++CommandsRegistry.registerCommand('_library.arrangeEditors', async (accessor, data: unknown) => {
++ return accessor.get(ICommandService).executeCommand('library.arrangeAutomatically', data);
++});
++
++// The plus starts a new chat in its pane; the caret beside it lists the other things a pane can open.
++// Keep the target group stable while the picker or file dialog has focus.
++function libraryPaneCommand(choices: () => { label: string; command: string }[] | undefined) {
++	return async (accessor: ServicesAccessor, ...args: unknown[]) => {
++		const context = args.find((arg): arg is { groupId: number } => !!arg && typeof arg === 'object' && 'groupId' in arg && typeof arg.groupId === 'number');
++		const groups = accessor.get(IEditorGroupsService);
++		const commands = accessor.get(ICommandService);
++		const group = typeof context?.groupId === 'number' ? groups.getGroup(context.groupId) : groups.activeGroup;
++		if (!group) { return; }
++		const items = choices();
++		const choice = items ? await accessor.get(IQuickInputService).pick(items, { placeHolder: localize('library.paneMore', "Open in this pane") }) : { command: 'library.new' };
++		if (!choice || groups.getGroup(group.id) !== group) { return; }
++		group.focus();
++		await commands.executeCommand(choice.command);
++	};
++}
++CommandsRegistry.registerCommand('_library.paneAdd', libraryPaneCommand(() => undefined));
++CommandsRegistry.registerCommand('_library.paneMore', libraryPaneCommand(() => [
++	{ label: localize('library.openChat', "Open chat…"), command: 'library.openChat' },
++	{ label: localize('library.files', "Files"), command: 'library.openFiles' },
++	{ label: localize('library.openFile', "Open file"), command: 'workbench.action.files.openFile' },
++	{ label: localize('library.openFolder', "Open folder"), command: 'library.addWorkspace' }
++]));
++
++// Restored webviews may not have reached the extension serializer yet.
++CommandsRegistry.registerCommand('_library.revealExisting', async (accessor, candidate: unknown, column?: number) => {
++	const identity = (value: unknown): string | undefined => {
++		if (!value || typeof value !== 'object') { return undefined; }
++		const resource = value as { kind?: unknown; key?: unknown; draftId?: unknown; project_id?: unknown };
++		if (resource.kind === 'chat') {
++			if (typeof resource.key === 'string' && resource.key) { return `chat:${resource.key}`; }
++			if (typeof resource.draftId === 'string' && resource.draftId) { return `draft:${resource.draftId}`; }
++			return undefined;
++		}
++		if (resource.kind === 'project-map' && typeof resource.project_id === 'string' && resource.project_id) { return `project-map:${resource.project_id}`; }
++		return resource.kind === 'settings' || resource.kind === 'accounts' || resource.kind === 'projects' || resource.kind === 'overview' ? resource.kind : undefined;
++	};
++	const requested = identity(candidate);
++	if (!requested) { return false; }
++	const groups = accessor.get(IEditorGroupsService);
++	const editorService = accessor.get(IEditorService);
++	for (const source of groups.groups) {
++		for (const editor of source.getEditors(EditorsOrder.SEQUENTIAL)) {
++			const provider = requested.startsWith('project-map:') ? 'library.projectMap' : 'library.conversation';
++			if (!(editor instanceof WebviewInput) || editor.providerId !== provider) { continue; }
++			let saved: unknown;
++			try { saved = JSON.parse(editor.webview.state ?? '{}').resource; } catch { continue; }
++			const alias = saved && typeof saved === 'object' ? (saved as { kind?: unknown; meta?: { nativeKey?: unknown } }) : undefined;
++			if (identity(saved) !== requested && !(alias?.kind === 'chat' && typeof alias.meta?.nativeKey === 'string' && `chat:${alias.meta.nativeKey}` === requested)) { continue; }
++			let target = typeof column === 'number' && Number.isInteger(column) && column > 0 ? groups.getGroups(GroupsOrder.GRID_APPEARANCE)[column - 1] : source;
++			target ??= source;
++			if (target !== source && !source.moveEditor(editor, target, { pinned: true })) { target = source; }
++			await editorService.openEditor(editor, { pinned: true }, target.id);
++			return true;
++		}
++	}
++	return false;
++});
+diff --git a/src/vs/workbench/browser/parts/editor/editorDropTarget.ts b/src/vs/workbench/browser/parts/editor/editorDropTarget.ts
+index 4e4c281a68e..5b851c96da0 100644
+--- a/src/vs/workbench/browser/parts/editor/editorDropTarget.ts
++++ b/src/vs/workbench/browser/parts/editor/editorDropTarget.ts
+@@ -4,6 +4,7 @@
+  *--------------------------------------------------------------------------------------------*/
+ 
+ import './media/editordroptarget.css';
++import { ICommandService } from '../../../../platform/commands/common/commands.js';
+ import { DataTransfers } from '../../../../base/browser/dnd.js';
+ import { $, addDisposableListener, DragAndDropObserver, EventHelper, EventType, getWindow, isAncestor, isHTMLElement } from '../../../../base/browser/dom.js';
+ import { renderFormattedText } from '../../../../base/browser/formattedTextRenderer.js';
+@@ -14,6 +15,7 @@ import { assertReturnsAllDefined, assertReturnsDefined } from '../../../../base/
+ import { localize } from '../../../../nls.js';
+ import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
+ import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
++import { IProductService } from '../../../../platform/product/common/productService.js';
+ import { Registry } from '../../../../platform/registry/common/platform.js';
+ import { activeContrastBorder } from '../../../../platform/theme/common/colorRegistry.js';
+ import { IThemeService, Themable } from '../../../../platform/theme/common/themeService.js';
+@@ -24,7 +26,7 @@ import { DEFAULT_EDITOR_MIN_DIMENSIONS, GroupTransferKind, IEditorGroupsView, IE
+ import { EditorInputCapabilities, IEditorIdentifier, IUntypedEditorInput } from '../../../common/editor.js';
+ import { EditorInput } from '../../../common/editor/editorInput.js';
+ import { EDITOR_DRAG_AND_DROP_BACKGROUND, EDITOR_DROP_INTO_PROMPT_BACKGROUND, EDITOR_DROP_INTO_PROMPT_BORDER, EDITOR_DROP_INTO_PROMPT_FOREGROUND } from '../../../common/theme.js';
+-import { GroupDirection, IEditorDropTargetDelegate, IEditorGroup, IEditorGroupsService, IMergeGroupOptions, MergeGroupMode } from '../../../services/editor/common/editorGroupsService.js';
++import { GroupsOrder, GroupDirection, IEditorDropTargetDelegate, IEditorGroup, IEditorGroupsService, IMergeGroupOptions, MergeGroupMode } from '../../../services/editor/common/editorGroupsService.js';
+ import { IEditorService } from '../../../services/editor/common/editorService.js';
+ import { ITreeViewsDnDService } from '../../../../editor/common/services/treeViewsDndService.js';
+ import { DraggedTreeItemsIdentifier } from '../../../../editor/common/services/treeViewsDnd.js';
+@@ -102,7 +104,20 @@ function isSplittingEnabled(e: DragEvent, groupView: IEditorGroupView, supportsS
+  * unless the group only splits (`splitsOnly`), when it splits on the side of
+  * the center nearest to the position.
+  */
+-function getSplitDirection(mousePosX: number, mousePosY: number, width: number, height: number, isDraggingGroup: boolean, preferSplitVertically: boolean, splitsOnly = false): GroupDirection | undefined {
++function getSplitDirection(mousePosX: number, mousePosY: number, width: number, height: number, isDraggingGroup: boolean, preferSplitVertically: boolean, splitsOnly = false, generousEdges = false): GroupDirection | undefined {
++	// Library tabs and resources use wider edges, with corners following the
++	// nearest edge. The center continues to merge into the existing group.
++	if (generousEdges && !isDraggingGroup && width > 0 && height > 0) {
++		const sides: [GroupDirection, number][] = [
++			[GroupDirection.LEFT, mousePosX / width],
++			[GroupDirection.RIGHT, (width - mousePosX) / width],
++			[GroupDirection.UP, mousePosY / height],
++			[GroupDirection.DOWN, (height - mousePosY) / height]
++		];
++		const nearest = sides.reduce((best, side) => side[1] < best[1] ? side : best);
++		return nearest[1] <= 0.22 || splitsOnly ? nearest[0] : undefined;
++	}
++
+ 	let edgeWidthThresholdFactor: number;
+ 	if (isDraggingGroup) {
+ 		edgeWidthThresholdFactor = preferSplitVertically ? 0.3 : 0.1; // give larger threshold when dragging group depending on preferred split direction
+@@ -255,7 +270,8 @@ class DropOverlay extends Themable {
+ 		@IEditorGroupsService private readonly editorGroupService: IEditorGroupsService,
+ 		@ITreeViewsDnDService private readonly treeViewsDragAndDropService: ITreeViewsDnDService,
+ 		@IWorkspaceContextService private readonly contextService: IWorkspaceContextService,
+-		@IDialogService private readonly dialogService: IDialogService
++		@IDialogService private readonly dialogService: IDialogService,
++		@IProductService private readonly productService: IProductService
+ 	) {
+ 		super(themeService);
+ 
+@@ -420,7 +436,7 @@ class DropOverlay extends Themable {
+ 
+ 				// An overlay that shows takes its drop, also when no drag moved
+ 				// over it yet, such as when it showed for the drag that created it
+-				if (!this.currentDropOperation) {
++				if (!this.currentDropOperation || this.productService.applicationName.startsWith('library-code')) {
+ 					this.update(e);
+ 				}
+ 
+@@ -508,6 +524,21 @@ class DropOverlay extends Themable {
+ 			return targetGroup;
+ 		};
+ 
++        const libraryPayload = event.dataTransfer?.getData('application/library-resource');
++        if (libraryPayload && libraryPayload.length <= 20000) {
++            let resource: any;
++            try { resource = JSON.parse(libraryPayload); } catch { return; }
++            if (!resource || typeof resource !== 'object') { return; }
++            if ((resource.kind === 'chat' && (typeof resource.key === 'string' || typeof resource.draftId === 'string')) || (resource.kind === 'file' && typeof resource.path === 'string')) {
++                const target = ensureTargetGroup();
++                this.editorGroupService.activateGroup(target);
++                const column = this.editorGroupService.getGroups(GroupsOrder.GRID_APPEARANCE).indexOf(target) + 1;
++                await this.instantiationService.invokeFunction(accessor => accessor.get(ICommandService).executeCommand('library.openResource', resource, column));
++                target.focus();
++            }
++            return;
++        }
++
+ 		// Check for group transfer
+ 		if (this.groupTransfer.hasData(DraggedEditorGroupIdentifier.prototype)) {
+ 			const data = this.groupTransfer.getData(DraggedEditorGroupIdentifier.prototype);
+@@ -694,7 +725,7 @@ class DropOverlay extends Themable {
+ 			return;
+ 		}
+ 
+-		const splitDirection = getSplitDirection(mousePosX, mousePosY, editorControlWidth, editorControlHeight, isDraggingGroup, preferSplitVertically, splitsOnly);
++		const splitDirection = getSplitDirection(mousePosX, mousePosY, editorControlWidth, editorControlHeight, isDraggingGroup, preferSplitVertically, splitsOnly, this.productService.applicationName.startsWith('library-code'));
+ 
+ 		// An even split shows the size the new group gets: half, within the least sizes of the group and of an editor
+ 		const vertically = splitDirection === GroupDirection.UP || splitDirection === GroupDirection.DOWN;
+@@ -879,7 +910,7 @@ export class EditorDropTarget extends Themable {
+ 		) {
+ 			const dndContributions = Registry.as<IDragAndDropContributionRegistry>(DragAndDropExtensions.DragAndDropContribution).getAll();
+ 			const dndContributionKeys = Array.from(dndContributions).map(e => e.dataFormatKey);
+-			if (!containsDragType(event, DataTransfers.FILES, CodeDataTransfers.FILES, DataTransfers.RESOURCES, CodeDataTransfers.EDITORS, ...dndContributionKeys)) { // see https://github.com/microsoft/vscode/issues/25789
++			if (!containsDragType(event, 'application/library-resource', DataTransfers.FILES, CodeDataTransfers.FILES, DataTransfers.RESOURCES, CodeDataTransfers.EDITORS, ...dndContributionKeys)) { // see https://github.com/microsoft/vscode/issues/25789
+ 				event.dataTransfer.dropEffect = 'none';
+ 				return; // unsupported transfer
+ 			}
+diff --git a/src/vs/workbench/browser/parts/editor/editorGroupWatermark.ts b/src/vs/workbench/browser/parts/editor/editorGroupWatermark.ts
+index 97b5592d1ff..ff767104121 100644
+--- a/src/vs/workbench/browser/parts/editor/editorGroupWatermark.ts
++++ b/src/vs/workbench/browser/parts/editor/editorGroupWatermark.ts
+@@ -29,6 +29,7 @@ import { INotificationService } from '../../../../platform/notification/common/n
+ import { IStorageService, StorageScope, StorageTarget, WillSaveStateReason } from '../../../../platform/storage/common/storage.js';
+ import { defaultKeybindingLabelStyles } from '../../../../platform/theme/browser/defaultStyles.js';
+ import { registerIcon } from '../../../../platform/theme/common/iconRegistry.js';
++import { IProductService } from '../../../../platform/product/common/productService.js';
+ import { IWorkspaceContextService, WorkbenchState } from '../../../../platform/workspace/common/workspace.js';
+ 
+ interface WatermarkEntry {
+@@ -95,6 +96,12 @@ const openSettings: WatermarkEntry = {
+ 	icon: registerIcon('watermark-settings', Codicon.settings, localize('watermark.settingsIcon', "Icon for opening settings in the editor watermark."))
+ };
+ 
++const libraryEntries: WatermarkEntry[] = [
++ { text: localize('watermark.libraryChat', "Open chat with agents"), id: 'library.new', icon: Codicon.commentDiscussion },
++ { text: localize('watermark.libraryOpenFile', "Open file"), id: 'workbench.action.files.openFile', icon: Codicon.goToFile },
++ { text: localize('watermark.libraryOpenFolder', "Open folder"), id: 'library.addWorkspace', icon: Codicon.folderOpened },
++];
++
+ const baseEntries: WatermarkEntry[] = [
+ 	openChat,
+ 	showCommands,
+@@ -153,7 +160,8 @@ export class EditorGroupWatermark extends Disposable {
+ 		@IStorageService private readonly storageService: IStorageService,
+ 		@IInstantiationService private readonly instantiationService: IInstantiationService,
+ 		@ICommandService private readonly commandService: ICommandService,
+-		@INotificationService private readonly notificationService: INotificationService
++		@INotificationService private readonly notificationService: INotificationService,
++		@IProductService private readonly productService: IProductService
+ 	) {
+ 		super();
+ 
+@@ -251,7 +259,8 @@ export class EditorGroupWatermark extends Disposable {
+ 			return;
+ 		}
+ 
+-		const entries = this.filterEntries(this.workbenchState !== WorkbenchState.EMPTY ? workspaceEntries : emptyWindowEntries);
++		const library = this.productService.applicationName.startsWith('library-code');
++		const entries = library ? libraryEntries : this.filterEntries(this.workbenchState !== WorkbenchState.EMPTY ? workspaceEntries : emptyWindowEntries);
+ 		if (entries.length < EditorGroupWatermark.MINIMUM_ENTRIES) {
+ 			const additionalEntries = this.filterEntries(otherEntries);
+ 			shuffle(additionalEntries);
+@@ -264,10 +273,10 @@ export class EditorGroupWatermark extends Disposable {
+ 			clearNode(box);
+ 			this.shortcutDisposables.clear();
+ 
+-			const shortcuts = new Map<string, { entry: WatermarkEntry; keybinding: ResolvedKeybinding }>();
++			const shortcuts = new Map<string, { entry: WatermarkEntry; keybinding: ResolvedKeybinding | undefined }>();
+ 			for (const entry of entries) {
+ 				const keybinding = this.keybindingService.lookupKeybinding(entry.id);
+-				if (keybinding) {
++				if (keybinding || library) {
+ 					shortcuts.set(entry.id, { entry, keybinding });
+ 				}
+ 			}
+diff --git a/src/vs/workbench/browser/parts/editor/editorTabsControl.ts b/src/vs/workbench/browser/parts/editor/editorTabsControl.ts
+index c8330623fcb..1d1975ddf1b 100644
+--- a/src/vs/workbench/browser/parts/editor/editorTabsControl.ts
++++ b/src/vs/workbench/browser/parts/editor/editorTabsControl.ts
+@@ -40,7 +40,7 @@ import { IModelService } from '../../../../editor/common/services/model.js';
+ import { IEditorTitleControlDimensions } from './editorTitleControl.js';
+ import { IReadonlyEditorGroupModel } from '../../../common/editor/editorGroupModel.js';
+ import { EDITOR_CORE_NAVIGATION_COMMANDS } from './editorCommands.js';
+-import { IEditorGroup, MergeGroupMode } from '../../../services/editor/common/editorGroupsService.js';
++import { IEditorGroup, IEditorGroupsService, GroupsOrder, MergeGroupMode } from '../../../services/editor/common/editorGroupsService.js';
+ import { isMacintosh } from '../../../../base/common/platform.js';
+ import { IHostService } from '../../../services/host/browser/host.js';
+ import { ServiceCollection } from '../../../../platform/instantiation/common/serviceCollection.js';
+@@ -50,6 +50,13 @@ import { IManagedHoverTooltipMarkdownString } from '../../../../base/browser/ui/
+ import { applyDragImage } from '../../../../base/browser/ui/dnd/dnd.js';
+ import { EditorAddTabControl } from './editorAddTabControl.js';
+ import { EditorTransferTarget, getGroupTransferVeto, IEditorTransferVeto, transferToNewWindow } from './editorTransferVeto.js';
++import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
++import { libraryChatIdentity } from './libraryChatIdentity.js';
++
++CommandsRegistry.registerCommand('_library.chatTabIdentities', accessor => accessor.get(IEditorGroupsService).getGroups(GroupsOrder.GRID_APPEARANCE).flatMap((group, column) => group.editors.flatMap((editor, editorIndex) => {
++	const identity = libraryChatIdentity(editor);
++	return identity.isChat ? [{ ...identity, viewColumn: column + 1, editorIndex }] : [];
++})));
+ 
+ export class EditorCommandsContextActionRunner extends ActionRunner {
+ 
+@@ -600,15 +607,18 @@ export abstract class EditorTabsControl extends Themable implements IEditorTabsC
+ 			anchor = new StandardMouseEvent(getWindow(node), e);
+ 		}
+ 
+-		// Show it
++		const identity = libraryChatIdentity(editor);
++		const context = { groupId: this.groupView.id, editorIndex: this.groupView.getIndexOfEditor(editor), libraryChatKey: identity.key };
++		const menuContext = identity.isChat ? this.contextMenuContextKeyService.createOverlay([['libraryChatTitleMenu', true], ['libraryChatHasIdentity', !!identity.key]]) : this.contextMenuContextKeyService;
++		const copyCommands = ['library.copyChat.reference', 'library.copyChat.sessionId', 'library.copyChat.transcriptPath', 'library.copyChat.resumeCommand'];
+ 		this.contextMenuService.showContextMenu({
+ 			getAnchor: () => anchor,
+-			menuId: MenuId.EditorTitleContext,
++			...(identity.isChat ? { getActions: () => this.menuService.getMenuActions(MenuId.EditorTitleContext, menuContext, { shouldForwardArgs: true, arg: this.resourceContext.get() }).flatMap(([, actions]) => actions).filter(action => copyCommands.includes(action.id)).sort((a, b) => copyCommands.indexOf(a.id) - copyCommands.indexOf(b.id)) } : { menuId: MenuId.EditorTitleContext }),
+ 			menuActionOptions: { shouldForwardArgs: true, arg: this.resourceContext.get() },
+-			contextKeyService: this.contextMenuContextKeyService,
+-			getActionsContext: () => ({ groupId: this.groupView.id, editorIndex: this.groupView.getIndexOfEditor(editor) }),
+-			getKeyBinding: action => this.keybindingService.lookupKeybinding(action.id, this.contextMenuContextKeyService),
+-			onHide: () => this.groupsView.activeGroup.focus() // restore focus to active group
++			contextKeyService: menuContext,
++			getActionsContext: () => context,
++			getKeyBinding: action => this.keybindingService.lookupKeybinding(action.id, menuContext),
++			onHide: () => this.groupsView.activeGroup.focus()
+ 		});
+ 	}
+ 
+diff --git a/src/vs/workbench/browser/parts/editor/media/editorgroupview.css b/src/vs/workbench/browser/parts/editor/media/editorgroupview.css
+index 7be217ea174..2cd2634aea5 100644
+--- a/src/vs/workbench/browser/parts/editor/media/editorgroupview.css
++++ b/src/vs/workbench/browser/parts/editor/media/editorgroupview.css
+@@ -301,3 +301,28 @@
+ 	width: 100%;
+ 	height: 100%;
+ }
++
++/* Library keeps the add action available even in the only empty group. */
++.monaco-workbench .part.editor > .content .editor-group-container.empty > .editor-group-container-toolbar:has(.codicon-add) {
++	display: block;
++}
++
++/* Library shows a resting grip on pane dividers; the native sash only appears on hover. */
++.monaco-workbench .part.editor > .content .monaco-grid-view .monaco-sash:not(.disabled)::after {
++	content: '';
++	position: absolute;
++	top: 50%;
++	left: 50%;
++	width: 3px;
++	height: 24px;
++	transform: translate(-50%, -50%);
++	border-radius: 2px;
++	background: var(--vscode-descriptionForeground);
++	opacity: 0.45;
++	pointer-events: none;
++}
++
++.monaco-workbench .part.editor > .content .monaco-grid-view .monaco-sash.horizontal:not(.disabled)::after {
++	width: 24px;
++	height: 3px;
++}
+diff --git a/src/vs/workbench/browser/parts/editor/media/multieditortabscontrol.css b/src/vs/workbench/browser/parts/editor/media/multieditortabscontrol.css
+index 3d6d8ebfc80..635eecd9ff9 100644
+--- a/src/vs/workbench/browser/parts/editor/media/multieditortabscontrol.css
++++ b/src/vs/workbench/browser/parts/editor/media/multieditortabscontrol.css
+@@ -617,3 +617,10 @@
+ .monaco-workbench .part.editor > .content .editor-group-container > .title .tabs-container > .tab.last-in-row.drop-target-left:not(:last-child)::after {
+ 	right: 0;
+ }
++
++/* Named Library tab groups keep one DOM child per native tab. */
++.monaco-workbench .part.editor .tabs-container > .tab.library-group-hidden { display: none !important; }
++.monaco-workbench .part.editor .tabs-container > .tab.library-group-header-only { width: auto !important; min-width: 0 !important; max-width: none !important; flex: 0 0 auto !important; }
++.monaco-workbench .part.editor .tabs-container > .tab.library-group-header-only > :not(.library-tab-group) { display: none !important; }
++.monaco-workbench .part.editor .tabs-container > .tab > .library-tab-group { position: relative; z-index: 5; flex: 0 0 auto; border: 0; border-radius: 5px; padding: 3px 8px; margin: 0 5px; color: var(--vscode-badge-foreground); background: var(--vscode-badge-background); cursor: pointer; font: inherit; }
++.monaco-workbench .part.editor .tabs-container > .tab > .library-tab-group:focus-visible { outline: 1px solid var(--vscode-focusBorder); }
+diff --git a/src/vs/workbench/browser/parts/editor/multiEditorTabsControl.ts b/src/vs/workbench/browser/parts/editor/multiEditorTabsControl.ts
+index b67d48d0768..14956f088e6 100644
+--- a/src/vs/workbench/browser/parts/editor/multiEditorTabsControl.ts
++++ b/src/vs/workbench/browser/parts/editor/multiEditorTabsControl.ts
+@@ -4,6 +4,8 @@
+  *--------------------------------------------------------------------------------------------*/
+ 
+ import './media/multieditortabscontrol.css';
++import { IStorageService } from '../../../../platform/storage/common/storage.js';
++import { onDidChangeLibraryTabGroups, reconcileTabMove, saveTabGroups, tabGroups, tabIdentity } from './libraryTabGroups.js';
+ import { isLinux, isMacintosh, isWindows } from '../../../../base/common/platform.js';
+ import { shorten } from '../../../../base/common/labels.js';
+ import { EditorResourceAccessor, Verbosity, IEditorPartOptions, SideBySideEditor, DEFAULT_EDITOR_ASSOCIATION, EditorInputCapabilities, IUntypedEditorInput, preventEditorClose, EditorCloseMethod, EditorsOrder, IToolbarActions } from '../../../common/editor.js';
+@@ -174,9 +176,19 @@ export class MultiEditorTabsControl extends EditorTabsControl {
+ 		@IHostService hostService: IHostService,
+ 		@IMenuService menuService: IMenuService,
+ 		@IModelService modelService: IModelService,
++		@IStorageService private readonly libraryStorage: IStorageService,
+ 	) {
+ 		super(parent, editorPartsView, groupsView, groupView, tabsModel, menuIds, breadcrumbsInHeader, useModernUITabs, contextMenuService, instantiationService, contextKeyService, keybindingService, notificationService, quickInputService, themeService, editorResolverService, hostService, menuService, modelService);
+ 
++		this._register(onDidChangeLibraryTabGroups(() => this.redraw()));
++		this._register(groupView.onWillMoveEditor(event => {
++			const key = tabIdentity(event.editor);
++			if (key && event.target !== event.groupId && tabGroups(this.libraryStorage).groupFor(String(event.groupId), key)) {
++				tabGroups(this.libraryStorage).transfer(String(event.groupId), String(event.target), key);
++				saveTabGroups(this.libraryStorage);
++			}
++		}));
++
+ 		// Resolve the correct path library for the OS we are on
+ 		// If we are connected to remote, this accounts for the
+ 		// remote OS.
+@@ -655,6 +667,7 @@ export class MultiEditorTabsControl extends EditorTabsControl {
+ 
+ 	openEditor(editor: EditorInput, options?: IInternalEditorOpenOptions): boolean {
+ 		const changed = this.handleOpenedEditors();
++		reconcileTabMove(this.libraryStorage, this.groupView, editor, false);
+ 
+ 		// Respect option to focus tab control if provided
+ 		if (options?.focusTabControl) {
+@@ -665,7 +678,9 @@ export class MultiEditorTabsControl extends EditorTabsControl {
+ 	}
+ 
+ 	openEditors(editors: EditorInput[]): boolean {
+-		return this.handleOpenedEditors();
++		const changed = this.handleOpenedEditors();
++		for (const editor of editors) { reconcileTabMove(this.libraryStorage, this.groupView, editor, false); }
++		return changed;
+ 	}
+ 
+ 	private handleOpenedEditors(): boolean {
+@@ -810,6 +825,7 @@ export class MultiEditorTabsControl extends EditorTabsControl {
+ 		const editorLabel = this.tabLabels[fromTabIndex];
+ 		this.tabLabels.splice(fromTabIndex, 1);
+ 		this.tabLabels.splice(targetTabIndex, 0, editorLabel);
++		reconcileTabMove(this.libraryStorage, this.groupView, editor);
+ 
+ 		// Redraw tabs in the range of the move
+ 		this.forEachTab((editor, tabIndex, tabContainer, tabLabelWidget, tabLabel, tabActionBar) => {
+@@ -1789,7 +1805,37 @@ export class MultiEditorTabsControl extends EditorTabsControl {
+ 		}
+ 	}
+ 
++	private redrawLibraryTabGroup(editor: EditorInput, index: number, tab: HTMLElement): void {
++		const pane = String(this.groupView.id);
++		const model = tabGroups(this.libraryStorage);
++		const key = tabIdentity(editor);
++		const group = key ? model.groupFor(pane, key) : undefined;
++		const editors = this.tabsModel.getEditors(EditorsOrder.SEQUENTIAL);
++		const previousKey = index > 0 ? tabIdentity(editors[index - 1]) : undefined;
++		const first = !!group && (!previousKey || model.groupFor(pane, previousKey)?.id !== group.id);
++		let header = tab.querySelector<HTMLButtonElement>(':scope > .library-tab-group');
++		if (first && group) {
++			if (!header) {
++				header = document.createElement('button');
++				header.className = 'library-tab-group';
++				header.addEventListener('mousedown', e => e.stopPropagation());
++				header.addEventListener('mouseup', e => e.stopPropagation());
++				header.addEventListener('keydown', e => { if (!e.metaKey && !e.ctrlKey && !e.altKey && (e.key === 'Enter' || e.key === ' ')) { e.stopPropagation(); } });
++				header.addEventListener('click', e => { e.stopPropagation(); const id = header?.dataset.groupId; if (id) { model.toggle(pane, id); saveTabGroups(this.libraryStorage); } });
++				tab.prepend(header);
++			}
++			header.dataset.groupId = group.id;
++			header.textContent = group.name;
++			header.setAttribute('aria-expanded', String(!group.collapsed));
++			header.setAttribute('aria-label', `${group.name}, ${group.collapsed ? 'expand' : 'collapse'} tab group`);
++		} else { header?.remove(); }
++		const hidden = !!group?.collapsed && !this.tabsModel.isActive(editor);
++		tab.classList.toggle('library-group-header-only', hidden && first);
++		tab.classList.toggle('library-group-hidden', hidden && !first);
++	}
++
+ 	private redrawTab(editor: EditorInput, tabIndex: number, tabContainer: HTMLElement, tabLabelWidget: IResourceLabel, tabLabel: IEditorInputLabel, tabActionBar: ActionBar): void {
++		this.redrawLibraryTabGroup(editor, tabIndex, tabContainer);
+ 		const isTabSticky = this.tabsModel.isSticky(tabIndex);
+ 		const options = this.groupsView.partOptions;
+ 
+@@ -1998,7 +2044,7 @@ export class MultiEditorTabsControl extends EditorTabsControl {
+ 		// Inactive: only show "Unlock" and secondary actions
+ 		else {
+ 			return {
+-				primary: this.groupsView.partOptions.alwaysShowEditorActions ? editorActions.primary : editorActions.primary.filter(action => action.id === UNLOCK_GROUP_COMMAND_ID),
++				primary: this.groupsView.partOptions.alwaysShowEditorActions ? editorActions.primary : editorActions.primary.filter(action => action.id === UNLOCK_GROUP_COMMAND_ID || action.id === '_library.paneAdd' || action.id === '_library.paneMore'),
+ 				secondary: editorActions.secondary
+ 			};
+ 		}
+diff --git a/src/vs/workbench/browser/parts/globalCompositeBar.ts b/src/vs/workbench/browser/parts/globalCompositeBar.ts
+index d0f5bd1bd21..81db9fd339e 100644
+--- a/src/vs/workbench/browser/parts/globalCompositeBar.ts
++++ b/src/vs/workbench/browser/parts/globalCompositeBar.ts
+@@ -248,7 +248,7 @@ abstract class AbstractGlobalActivityActionViewItem extends CompositeBarActionVi
+ 		return this.contextMenuActionsProvider();
+ 	}
+ 
+-	private async run(): Promise<void> {
++	protected async run(): Promise<void> {
+ 		const disposables = new DisposableStore();
+ 		const menu = disposables.add(this.menuService.createMenu(this.menuId, this.contextKeyService));
+ 		const actions = await this.resolveMainMenuActions(menu, disposables);
+@@ -312,12 +312,20 @@ export class AccountsActivityActionViewItem extends AbstractGlobalActivityAction
+ 			name: localize('accounts', "Accounts"),
+ 			classNames: ThemeIcon.asClassNameArray(GlobalCompositeBar.ACCOUNTS_ICON)
+ 		});
+-		super(MenuId.AccountsContext, action, options, contextMenuActionsProvider, contextMenuAlignmentOptions, themeService, hoverService, menuService, contextMenuService, contextKeyService, configurationService, keybindingService, activityService);
++		super(MenuId.AccountsContext, action, { ...options, hasPopup: !productService.applicationName.startsWith('library-code') }, contextMenuActionsProvider, contextMenuAlignmentOptions, themeService, hoverService, menuService, contextMenuService, contextKeyService, configurationService, keybindingService, activityService);
+ 		this._register(action);
+ 		this.registerListeners();
+ 		this.initialize();
+ 	}
+ 
++	protected override async run(): Promise<void> {
++		if (this.productService.applicationName.startsWith('library-code')) {
++			await this.commandService.executeCommand('library.accounts');
++			return;
++		}
++		await super.run();
++	}
++
+ 	private registerListeners(): void {
+ 		this._register(this.authenticationService.onDidRegisterAuthenticationProvider(async (e) => {
+ 			await this.addAccountsFromProvider(e.id);
+@@ -611,6 +619,15 @@ export class AccountsActivityActionViewItem extends AbstractGlobalActivityAction
+ 
+ 		appendCommandGroups(remainingCommandGroups);
+ 
++		if (this.productService.applicationName.startsWith('library-code')) {
++			return [toAction({
++				id: 'library.settings',
++				label: localize('libraryAccounts', "Claude and Codex Accounts…"),
++				enabled: true,
++				run: () => this.commandService.executeCommand('library.settings')
++			}), new SubmenuAction('library.extensionAccounts', localize('extensionAccounts', "Extension Accounts"), menus)];
++		}
++
+ 		return menus;
+ 	}
+ 
+@@ -716,13 +733,15 @@ export class GlobalActivityActionViewItem extends AbstractGlobalActivityActionVi
+ 		@IKeybindingService keybindingService: IKeybindingService,
+ 		@IInstantiationService instantiationService: IInstantiationService,
+ 		@IActivityService activityService: IActivityService,
++		@IProductService private readonly productService: IProductService,
++		@ICommandService private readonly commandService: ICommandService,
+ 	) {
+ 		const action = instantiationService.createInstance(CompositeBarAction, {
+ 			id: GLOBAL_ACTIVITY_ID,
+-			name: localize('manage', "Manage"),
++			name: productService.applicationName.startsWith('library-code') ? localize('librarySettings', "Settings") : localize('manage', "Manage"),
+ 			classNames: ThemeIcon.asClassNameArray(userDataProfileService.currentProfile.icon ? ThemeIcon.fromId(userDataProfileService.currentProfile.icon) : DEFAULT_ICON)
+ 		});
+-		super(MenuId.GlobalActivity, action, options, contextMenuActionsProvider, contextMenuAlignmentOptions, themeService, hoverService, menuService, contextMenuService, contextKeyService, configurationService, keybindingService, activityService);
++		super(MenuId.GlobalActivity, action, { ...options, hasPopup: !productService.applicationName.startsWith('library-code') }, contextMenuActionsProvider, contextMenuAlignmentOptions, themeService, hoverService, menuService, contextMenuService, contextKeyService, configurationService, keybindingService, activityService);
+ 		this._register(action);
+ 		this._register(this.userDataProfileService.onDidChangeCurrentProfile(e => {
+ 			action.compositeBarActionItem = {
+@@ -740,6 +759,14 @@ export class GlobalActivityActionViewItem extends AbstractGlobalActivityActionVi
+ 		this.updateProfileBadge();
+ 	}
+ 
++	protected override async run(): Promise<void> {
++		if (this.productService.applicationName.startsWith('library-code')) {
++			await this.commandService.executeCommand('library.settings');
++			return;
++		}
++		await super.run();
++	}
++
+ 	private updateProfileBadge(): void {
+ 		if (!this.profileBadge || !this.profileBadgeContent) {
+ 			return;
+@@ -771,7 +798,7 @@ export class GlobalActivityActionViewItem extends AbstractGlobalActivityActionVi
+ 	}
+ 
+ 	protected override computeTitle(): string {
+-		return this.userDataProfileService.currentProfile.isDefault ? super.computeTitle() : localize('manage profile', "Manage {0} (Profile)", this.userDataProfileService.currentProfile.name);
++		return this.productService.applicationName.startsWith('library-code') ? localize('librarySettings', "Settings") : this.userDataProfileService.currentProfile.isDefault ? super.computeTitle() : localize('manage profile', "Manage {0} (Profile)", this.userDataProfileService.currentProfile.name);
+ 	}
+ }
+ 
+@@ -829,7 +856,9 @@ export class SimpleGlobalActivityActionViewItem extends GlobalActivityActionView
+ 		@IKeybindingService keybindingService: IKeybindingService,
+ 		@IInstantiationService instantiationService: IInstantiationService,
+ 		@IActivityService activityService: IActivityService,
+-		@IStorageService storageService: IStorageService
++		@IStorageService storageService: IStorageService,
++		@IProductService productService: IProductService,
++		@ICommandService commandService: ICommandService
+ 	) {
+ 		super(() => simpleActivityContextMenuActions(storageService, false),
+ 			{
+@@ -840,7 +869,7 @@ export class SimpleGlobalActivityActionViewItem extends GlobalActivityActionView
+ 				}),
+ 				hoverOptions,
+ 				compact: true,
+-			}, () => undefined, userDataProfileService, themeService, hoverService, menuService, contextMenuService, contextKeyService, configurationService, environmentService, keybindingService, instantiationService, activityService);
++			}, () => undefined, userDataProfileService, themeService, hoverService, menuService, contextMenuService, contextKeyService, configurationService, environmentService, keybindingService, instantiationService, activityService, productService, commandService);
+ 	}
+ }
+ 
+diff --git a/src/vs/workbench/browser/parts/notifications/media/notificationsToasts.css b/src/vs/workbench/browser/parts/notifications/media/notificationsToasts.css
+index d9185ce03f9..a829a268928 100644
+--- a/src/vs/workbench/browser/parts/notifications/media/notificationsToasts.css
++++ b/src/vs/workbench/browser/parts/notifications/media/notificationsToasts.css
+@@ -82,3 +82,11 @@
+ .monaco-workbench > .notifications-toasts .codicon.codicon-info {
+ 	color: var(--vscode-notificationsInfoIcon-foreground) !important;
+ }
++
++
++.monaco-workbench .library-account-notice .action-label.codicon-notifications-clear {
++	box-sizing: border-box;
++	width: 30px;
++	min-height: 24px;
++	justify-content: center;
++}
+diff --git a/src/vs/workbench/browser/parts/notifications/notificationsCommands.ts b/src/vs/workbench/browser/parts/notifications/notificationsCommands.ts
+index 70b99a4bbb0..3efc1fcf249 100644
+--- a/src/vs/workbench/browser/parts/notifications/notificationsCommands.ts
++++ b/src/vs/workbench/browser/parts/notifications/notificationsCommands.ts
+@@ -3,20 +3,21 @@
+  *  Licensed under the MIT License. See License.txt in the project root for license information.
+  *--------------------------------------------------------------------------------------------*/
+ 
+-import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
++import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
+ import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
+ import { KeybindingsRegistry, KeybindingWeight } from '../../../../platform/keybinding/common/keybindingsRegistry.js';
+ import { KeyChord, KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
+-import { INotificationViewItem, isNotificationViewItem, NotificationsModel, NotificationsPosition, NotificationsSettings } from '../../../common/notifications.js';
++import { ChoiceAction, INotificationViewItem, isNotificationViewItem, NotificationsModel, NotificationsPosition, NotificationsSettings } from '../../../common/notifications.js';
+ import { Action2, MenuRegistry, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
+ import { localize, localize2 } from '../../../../nls.js';
+ import { IListService, WorkbenchList } from '../../../../platform/list/browser/listService.js';
+ import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
+ import { NotificationFocusedContext, NotificationsCenterVisibleContext, NotificationsToastsVisibleContext } from '../../../common/contextkeys.js';
+-import { INotificationService, INotificationSourceFilter, NotificationsFilter } from '../../../../platform/notification/common/notification.js';
++import { INotificationService, INotificationSourceFilter, NotificationsFilter, Severity } from '../../../../platform/notification/common/notification.js';
+ import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
+ import { ActionRunner, IAction, WorkbenchActionExecutedEvent, WorkbenchActionExecutedClassification } from '../../../../base/common/actions.js';
+ import { IQuickInputService, IQuickPickItem } from '../../../../platform/quickinput/common/quickInput.js';
++import { Event } from '../../../../base/common/event.js';
+ import { DisposableStore, IDisposable } from '../../../../base/common/lifecycle.js';
+ import { AccessibilitySignal, IAccessibilitySignalService } from '../../../../platform/accessibilitySignal/browser/accessibilitySignalService.js';
+ import { Codicon } from '../../../../base/common/codicons.js';
+@@ -112,6 +113,50 @@ function getFocusedNotificationSurface(listService: IListService, context?: unkn
+ export function registerNotificationCommands(center: INotificationsCenterController, toasts: INotificationsToastController, model: NotificationsModel): IDisposable {
+ 	const registrations = new DisposableStore();
+ 
++	// Official provider webviews use a workbench-hosted notice with the same timing as Library panes.
++	registrations.add(CommandsRegistry.registerCommand('_library.showAccountNotice', (accessor, input: {
++		id: string; message: string; seconds: number; callback: string; actions: string[];
++	}) => {
++		if (!input?.callback?.startsWith('_library.accountNotice.') || !Number.isInteger(input.seconds)
++			|| input.seconds < 0 || input.seconds > 60) {
++			throw new Error('Invalid Library account notice');
++		}
++		const commands = accessor.get(ICommandService);
++		const notifications = accessor.get(INotificationService);
++		let acting = false;
++		const actions = input.actions.map((label, index) => new ChoiceAction('library.accountNotice.' + index, {
++			label,
++			keepOpen: true,
++			run: async () => {
++				if (acting) {
++					return;
++				}
++				acting = true;
++				try {
++					if (await commands.executeCommand<boolean>(input.callback, index)) {
++						handle.close();
++					}
++				} catch (error) {
++					notifications.error(error);
++				} finally {
++					acting = false;
++				}
++			}
++		}));
++		const handle = notifications.notify({
++			id: input.id,
++			message: input.message,
++			severity: Severity.Info,
++			source: { id: 'library-code', label: 'Library' },
++			actions: { primary: actions },
++			toastTimeout: { milliseconds: input.seconds * 1000, isPaused: () => acting }
++		});
++		Event.once(handle.onDidClose)(() => {
++			actions.forEach(action => action.dispose());
++			void commands.executeCommand(input.callback, -1).catch(() => {});
++		});
++	}));
++
+ 	// Show Notifications Cneter
+ 	registrations.add(KeybindingsRegistry.registerCommandAndKeybindingRule({
+ 		id: SHOW_NOTIFICATIONS_CENTER,
+@@ -194,7 +239,9 @@ export function registerNotificationCommands(center: INotificationsCenterControl
+ 			}
+ 			const actionRunner = accessor.get(IInstantiationService).createInstance(NotificationActionRunner, getFocusedNotificationSurface(accessor.get(IListService)));
+ 			actionRunner.run(primaryAction, notification);
+-			notification.close();
++			if (!notification.toastTimeout) {
++				notification.close();
++			}
+ 			actionRunner.dispose();
+ 		}
+ 	}));
+diff --git a/src/vs/workbench/browser/parts/notifications/notificationsToasts.ts b/src/vs/workbench/browser/parts/notifications/notificationsToasts.ts
+index 0b62b5801da..396bad6ed6a 100644
+--- a/src/vs/workbench/browser/parts/notifications/notificationsToasts.ts
++++ b/src/vs/workbench/browser/parts/notifications/notificationsToasts.ts
+@@ -266,6 +266,7 @@ export class NotificationsToasts extends Themable implements INotificationsToast
+ 
+ 		// Container
+ 		const notificationToastContainer = $('.notification-toast-container');
++		notificationToastContainer.classList.toggle('library-account-notice', Boolean(item.toastTimeout));
+ 
+ 		const firstToast = notificationsToastsContainer.firstChild;
+ 		if (firstToast) {
+@@ -370,6 +371,29 @@ export class NotificationsToasts extends Themable implements INotificationsToast
+ 	}
+ 
+ 	private purgeNotification(item: INotificationViewItem, notificationToastContainer: HTMLElement, notificationList: NotificationsList, disposables: DisposableStore): void {
++		if (item.toastTimeout) {
++			const timeout = item.toastTimeout;
++			if (!timeout.milliseconds) {
++				return;
++			}
++			let remaining = timeout.milliseconds;
++			const clock = getWindow(notificationToastContainer).performance;
++			let previous = clock.now();
++			const timer = setInterval(() => {
++				const current = clock.now();
++				if (this.hostService.hasFocus && !notificationList.hasFocus()
++					&& !notificationToastContainer.matches(':hover') && !timeout.isPaused()) {
++					remaining -= current - previous;
++				}
++				previous = current;
++				if (remaining <= 0) {
++					this.removeToast(item);
++				}
++			}, 50);
++			disposables.add(toDisposable(() => clearInterval(timer)));
++			return;
++		}
++
+ 
+ 		// Track mouse over item
+ 		let isMouseOverToast = false;
+diff --git a/src/vs/workbench/browser/parts/paneCompositeBar.ts b/src/vs/workbench/browser/parts/paneCompositeBar.ts
+index 83595a02372..f2724a17058 100644
+--- a/src/vs/workbench/browser/parts/paneCompositeBar.ts
++++ b/src/vs/workbench/browser/parts/paneCompositeBar.ts
+@@ -3,6 +3,7 @@
+  *  Licensed under the MIT License. See License.txt in the project root for license information.
+  *--------------------------------------------------------------------------------------------*/
+ 
++import { IProductService } from '../../../platform/product/common/productService.js';
+ import { localize } from '../../../nls.js';
+ import { ActionsOrientation } from '../../../base/browser/ui/actionbar/actionbar.js';
+ import { IActivityService } from '../../services/activity/common/activity.js';
+@@ -96,6 +97,7 @@ export class PaneCompositeBar extends Disposable {
+ 	readonly dndHandler: ICompositeDragAndDrop;
+ 	private readonly compositeActions = this._register(new DisposableMap<string, { activityAction: ViewContainerActivityAction; pinnedAction: ToggleCompositePinnedAction; badgeAction: ToggleCompositeBadgeAction; dispose: () => void }>());
+ 
++	private readonly libraryProductService = this.instantiationService.invokeFunction(accessor => accessor.get(IProductService));
+ 	private hasExtensionsRegistered: boolean = false;
+ 	private dimension: Dimension | undefined;
+ 	private needsSizeRecompute = false;
+@@ -185,7 +187,7 @@ export class PaneCompositeBar extends Disposable {
+ 
+ 		// Move View Container
+ 		const moveActions = [];
+-		for (const location of [ViewContainerLocation.Sidebar, ViewContainerLocation.AuxiliaryBar, ViewContainerLocation.Panel]) {
++		for (const location of [ViewContainerLocation.Sidebar, ViewContainerLocation.Panel]) { // Library Code has no secondary side bar
+ 			if (currentLocation !== location) {
+ 				moveActions.push(this.createMoveAction(viewContainer, location, defaultLocation));
+ 			}
+@@ -367,6 +369,13 @@ export class PaneCompositeBar extends Disposable {
+ 				this.compositeBar.pin(viewContainer.id);
+ 			}
+ 
++            const quietTools = ['workbench.view.scm', 'workbench.view.debug', 'workbench.view.extensions', 'workbench.panel.chat', 'workbench.panel.comments'];
++            const migration = 'library.quietRail.' + viewContainer.id;
++            if (this.libraryProductService.applicationName.startsWith('library-code') && this.location === ViewContainerLocation.Sidebar && quietTools.includes(viewContainer.id) && !this.storageService.getBoolean(migration, StorageScope.PROFILE, false)) {
++                this.compositeBar.unpin(viewContainer.id);
++                this.storageService.store(migration, true, StorageScope.PROFILE, StorageTarget.USER);
++            }
++
+ 			// Active
+ 			const visibleViewContainer = this.paneCompositePart.getActivePaneComposite();
+ 			if (visibleViewContainer?.getId() === viewContainer.id) {
+diff --git a/src/vs/workbench/browser/parts/paneCompositePartService.ts b/src/vs/workbench/browser/parts/paneCompositePartService.ts
+index e10cad54ce5..d0df3ba0d7d 100644
+--- a/src/vs/workbench/browser/parts/paneCompositePartService.ts
++++ b/src/vs/workbench/browser/parts/paneCompositePartService.ts
+@@ -7,6 +7,7 @@ import { Event } from '../../../base/common/event.js';
+ import { assertReturnsDefined } from '../../../base/common/types.js';
+ import { InstantiationType, registerSingleton } from '../../../platform/instantiation/common/extensions.js';
+ import { IInstantiationService } from '../../../platform/instantiation/common/instantiation.js';
++import { ICommandService } from '../../../platform/commands/common/commands.js';
+ import { IProgressIndicator } from '../../../platform/progress/common/progress.js';
+ import { PaneCompositeDescriptor } from '../panecomposite.js';
+ import { AuxiliaryBarPart } from './auxiliarybar/auxiliaryBarPart.js';
+@@ -30,6 +31,7 @@ export class PaneCompositePartService extends Disposable implements IPaneComposi
+ 
+ 	constructor(
+ 		@IInstantiationService instantiationService: IInstantiationService,
++		@ICommandService private readonly commandService: ICommandService,
+ 	) {
+ 		super();
+ 
+@@ -57,6 +59,13 @@ export class PaneCompositePartService extends Disposable implements IPaneComposi
+ 	}
+ 
+ 	openPaneComposite(id: string | undefined, viewContainerLocation: ViewContainerLocation, focus?: boolean): Promise<IPaneComposite | undefined> {
++		if (viewContainerLocation === ViewContainerLocation.AuxiliaryBar) {
++			// Library Code has no secondary side bar: the Library extension opens agent chats as editor tabs instead.
++			if (id) {
++				this.commandService.executeCommand('_library.openAgentChat', id).catch(() => { });
++			}
++			return Promise.resolve(undefined);
++		}
+ 		return this.getPartByLocation(viewContainerLocation).openPaneComposite(id, focus);
+ 	}
+ 
+diff --git a/src/vs/workbench/browser/parts/panel/panelActions.ts b/src/vs/workbench/browser/parts/panel/panelActions.ts
+index ee78e266ea3..b3ab3c61f51 100644
+--- a/src/vs/workbench/browser/parts/panel/panelActions.ts
++++ b/src/vs/workbench/browser/parts/panel/panelActions.ts
+@@ -391,7 +391,7 @@ export class MovePanelToSecondarySideBarAction extends MoveViewsBetweenPanelsAct
+ 			id: MovePanelToSecondarySideBarAction.ID,
+ 			title: localize2('movePanelToSecondarySideBar', "Move Panel Views To Secondary Side Bar"),
+ 			category: Categories.View,
+-			f1: true
++			f1: false
+ 		});
+ 	}
+ }
+@@ -422,7 +422,7 @@ export class MoveSecondarySideBarToPanelAction extends MoveViewsBetweenPanelsAct
+ 			id: MoveSecondarySideBarToPanelAction.ID,
+ 			title: localize2('moveSidePanelToPanel', "Move Secondary Side Bar Views To Panel"),
+ 			category: Categories.View,
+-			f1: true
++			f1: false
+ 		});
+ 	}
+ }
+diff --git a/src/vs/workbench/browser/parts/sidebar/sidebarPart.ts b/src/vs/workbench/browser/parts/sidebar/sidebarPart.ts
+index cd93a447d1c..f875687e753 100644
+--- a/src/vs/workbench/browser/parts/sidebar/sidebarPart.ts
++++ b/src/vs/workbench/browser/parts/sidebar/sidebarPart.ts
+@@ -39,6 +39,10 @@ import { Extensions } from '../../panecomposite.js';
+ 
+ const PRIMARY_SIDE_BAR_SASH_CLASS = 'primary-sidebar-sash';
+ 
++function hideLibrarySidebarTitle(layout: string | undefined, compositeId: string | undefined): boolean {
++	return layout === 'library' && (compositeId === 'workbench.view.extension.library' || compositeId === 'workbench.view.explorer');
++}
++
+ export class SidebarPart extends AbstractPaneCompositePart {
+ 
+ 	static readonly activeViewletSettingsKey = 'workbench.sidebar.activeviewletid';
+@@ -71,6 +75,7 @@ export class SidebarPart extends AbstractPaneCompositePart {
+ 	private readonly activityBarPart = this._register(this.instantiationService.createInstance(ActivitybarPart, this.location, this));
+ 	private readonly visibleViewContainersTracker: VisibleViewContainersTracker;
+ 	private readonly primarySideBarSashClassDisposable = this._register(new MutableDisposable());
++	private libraryTitleHidden = false;
+ 
+ 	//#endregion
+ 
+@@ -91,7 +96,7 @@ export class SidebarPart extends AbstractPaneCompositePart {
+ 	) {
+ 		super(
+ 			Parts.SIDEBAR_PART,
+-			{ hasTitle: true, trailingSeparator: false, borderWidth: () => (this.getColor(SIDE_BAR_BORDER) || this.getColor(contrastBorder)) ? 1 : 0 },
++			{ hasTitle: true, trailingSeparator: false, titleHeight: () => this.libraryTitleHidden ? 0 : undefined, borderWidth: () => (this.getColor(SIDE_BAR_BORDER) || this.getColor(contrastBorder)) ? 1 : 0 },
+ 			SidebarPart.activeViewletSettingsKey,
+ 			ActiveViewletContext.bindTo(contextKeyService),
+ 			SidebarFocusContext.bindTo(contextKeyService),
+@@ -117,12 +122,17 @@ export class SidebarPart extends AbstractPaneCompositePart {
+ 			configurationService,
+ 		);
+ 
++		this._register(this.onDidPaneCompositeOpen(() => this.updateLibrarySidebarTitle()));
++
+ 		// Track visible view containers for auto-hide
+ 		this.visibleViewContainersTracker = this._register(instantiationService.createInstance(VisibleViewContainersTracker, ViewContainerLocation.Sidebar));
+ 		this._register(this.visibleViewContainersTracker.onDidChange((e) => this.onDidChangeAutoHideViewContainers(e)));
+ 
+ 		this.rememberActivityBarVisiblePosition();
+ 		this._register(configurationService.onDidChangeConfiguration(e => {
++			if (e.affectsConfiguration('library.layout')) {
++				this.updateLibrarySidebarTitle();
++			}
+ 			if (e.affectsConfiguration(LayoutSettings.ACTIVITY_BAR_LOCATION)) {
+ 				this.onDidChangeActivityBarLocation();
+ 			}
+@@ -134,6 +144,22 @@ export class SidebarPart extends AbstractPaneCompositePart {
+ 		this.registerActions();
+ 	}
+ 
++	private updateLibrarySidebarTitle(): void {
++		const hidden = hideLibrarySidebarTitle(this.configurationService.getValue<string>('library.layout'), this.getActivePaneComposite()?.getId());
++		if (hidden === this.libraryTitleHidden) {
++			return;
++		}
++		this.libraryTitleHidden = hidden;
++		if (this.titleArea) {
++			this.titleArea.style.display = hidden ? 'none' : '';
++		}
++		const dimension = this.getRelayoutDimension();
++		const position = this.contentPosition;
++		if (dimension && position) {
++			this.layout(dimension.width, dimension.height, position.top, position.left);
++		}
++	}
++
+ 	private onDidChangeAutoHideViewContainers(e: { before: number; after: number }): void {
+ 		// Only update if auto-hide is enabled and composite bar position is top/bottom
+ 		const activityBarPosition = this.configurationService.getValue<ActivityBarPosition>(LayoutSettings.ACTIVITY_BAR_LOCATION);
+diff --git a/src/vs/workbench/common/notifications.ts b/src/vs/workbench/common/notifications.ts
+index d46ad101a73..d7760ba8824 100644
+--- a/src/vs/workbench/common/notifications.ts
++++ b/src/vs/workbench/common/notifications.ts
+@@ -311,6 +311,7 @@ export class NotificationsModel extends Disposable implements INotificationsMode
+ }
+ 
+ export interface INotificationViewItem {
++	readonly toastTimeout?: INotification['toastTimeout'];
+ 	readonly id: string | undefined;
+ 	readonly telemetry: INotificationTelemetrySource;
+ 	readonly severity: Severity;
+@@ -518,7 +519,7 @@ export class NotificationViewItem extends Disposable implements INotificationVie
+ 			}
+ 		}
+ 
+-		return new NotificationViewItem(notification.id, getNotificationTelemetrySource(notification.telemetry), severity, notification.sticky, priority, message, parseLegacyLinks, notification.source, notification.progress, actions);
++		return new NotificationViewItem(notification.id, getNotificationTelemetrySource(notification.telemetry), severity, notification.sticky, priority, message, parseLegacyLinks, notification.source, notification.progress, actions, notification.toastTimeout);
+ 	}
+ 
+ 	private static parseNotificationMessage(input: NotificationMessage, parseLegacyLinks = false): INotificationMessage | undefined {
+@@ -589,7 +590,8 @@ export class NotificationViewItem extends Disposable implements INotificationVie
+ 		private readonly parseLegacyLinks: boolean,
+ 		private _source: string | INotificationSource | undefined,
+ 		progress: INotificationProgressProperties | undefined,
+-		actions?: INotificationActions
++		actions?: INotificationActions,
++		readonly toastTimeout?: INotification['toastTimeout']
+ 	) {
+ 		super();
+ 
+diff --git a/src/vs/workbench/contrib/chat/browser/chat.shared.contribution.ts b/src/vs/workbench/contrib/chat/browser/chat.shared.contribution.ts
+index 92ede7c4b5a..91c43b7d820 100644
+--- a/src/vs/workbench/contrib/chat/browser/chat.shared.contribution.ts
++++ b/src/vs/workbench/contrib/chat/browser/chat.shared.contribution.ts
+@@ -2401,7 +2401,9 @@ configurationRegistry.registerConfiguration({
+ 		[ChatAIDisabledSettingId]: {
+ 			type: 'boolean',
+ 			description: nls.localize('chat.disableAIFeatures', "Disable and hide built-in AI features provided by GitHub Copilot, including chat and inline suggestions."),
+-			default: false,
++			// Library owns agent execution. Set this before extension defaults load,
++			// so the upstream Copilot prewarmer does not start an unused runtime.
++			default: true,
+ 			scope: ConfigurationScope.WINDOW,
+ 		},
+ 		[ChatConfiguration.CopilotCliCommandEnabled]: {
+diff --git a/src/vs/workbench/contrib/files/browser/explorerViewlet.ts b/src/vs/workbench/contrib/files/browser/explorerViewlet.ts
+index 565fb42cb18..bb80ce96972 100644
+--- a/src/vs/workbench/contrib/files/browser/explorerViewlet.ts
++++ b/src/vs/workbench/contrib/files/browser/explorerViewlet.ts
+@@ -12,7 +12,7 @@ import { IConfigurationService } from '../../../../platform/configuration/common
+ import { ExplorerView } from './views/explorerView.js';
+ import { EmptyView } from './views/emptyView.js';
+ import { OpenEditorsView } from './views/openEditorsView.js';
+-import { IStorageService } from '../../../../platform/storage/common/storage.js';
++import { IStorageService, StorageScope } from '../../../../platform/storage/common/storage.js';
+ import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
+ import { IExtensionService } from '../../../services/extensions/common/extensions.js';
+ import { IWorkspaceContextService, WorkbenchState } from '../../../../platform/workspace/common/workspace.js';
+@@ -36,6 +36,9 @@ import { AddRootFolderAction, OpenFolderAction, OpenFolderViaWorkspaceAction } f
+ import { OpenRecentAction } from '../../../browser/actions/windowActions.js';
+ import { Codicon } from '../../../../base/common/codicons.js';
+ import { registerIcon } from '../../../../platform/theme/common/iconRegistry.js';
++import { IProductService } from '../../../../platform/product/common/productService.js';
++import { ICommandService } from '../../../../platform/commands/common/commands.js';
++import { Dimension } from '../../../../base/browser/dom.js';
+ import { isMouseEvent } from '../../../../base/browser/dom.js';
+ import { ILogService } from '../../../../platform/log/common/log.js';
+ 
+@@ -156,6 +159,7 @@ export class ExplorerViewletViewsContribution extends Disposable implements IWor
+ export class ExplorerViewPaneContainer extends ViewPaneContainer {
+ 
+ 	private viewletVisibleContextKey: IContextKey<boolean>;
++	private workspaceStrip: HTMLElement | undefined;
+ 
+ 	constructor(
+ 		@IWorkbenchLayoutService layoutService: IWorkbenchLayoutService,
+@@ -170,6 +174,8 @@ export class ExplorerViewPaneContainer extends ViewPaneContainer {
+ 		@IExtensionService extensionService: IExtensionService,
+ 		@IViewDescriptorService viewDescriptorService: IViewDescriptorService,
+ 		@ILogService logService: ILogService,
++		@IProductService private readonly libraryProductService: IProductService,
++		@ICommandService private readonly libraryCommandService: ICommandService,
+ 	) {
+ 
+ 		super(VIEWLET_ID, { mergeViewWithContainerWhenSingleView: true }, instantiationService, configurationService, layoutService, contextMenuService, telemetryService, extensionService, themeService, storageService, contextService, viewDescriptorService, logService);
+@@ -181,8 +187,73 @@ export class ExplorerViewPaneContainer extends ViewPaneContainer {
+ 	override create(parent: HTMLElement): void {
+ 		super.create(parent);
+ 		parent.classList.add('explorer-viewlet');
++  if (this.libraryProductService.applicationName.startsWith('library-code')) {
++   this.workspaceStrip = document.createElement('div');
++   this.workspaceStrip.className = 'library-workspace-strip';
++   this.workspaceStrip.setAttribute('role', 'group');
++   this.workspaceStrip.setAttribute('aria-label', 'Workspaces');
++   parent.prepend(this.workspaceStrip);
++   this.renderWorkspaceStrip();
++   this._register(this.contextService.onDidChangeWorkspaceFolders(() => this.renderWorkspaceStrip()));
++  }
+ 	}
+ 
++ private renderWorkspaceStrip(): void {
++  const strip = this.workspaceStrip;
++  if (!strip) { return; }
++  strip.replaceChildren();
++  const folders = this.contextService.getWorkspace().folders;
++  const stored = this.storageService.get('library.explorer.root', StorageScope.WORKSPACE, '');
++  const selected = folders.some(folder => folder.uri.toString() === stored) ? stored : '';
++  const tabs = document.createElement('div'); tabs.className = 'library-workspace-tabs';
++  tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', 'Open workspaces'); strip.append(tabs);
++  for (const folder of folders) {
++   const item = document.createElement('div'); item.className = 'library-workspace-tab';
++   const value = folder.uri.toString();
++   item.classList.toggle('selected', value === selected || (!selected && folders.length === 1));
++   const button = document.createElement('button');
++   button.textContent = folder.name; button.title = folder.uri.scheme === 'file' ? folder.uri.fsPath : folder.name + ' · Remote · Read-only';
++   button.setAttribute('role', 'tab'); button.setAttribute('aria-selected', String(item.classList.contains('selected')));
++   button.onclick = () => { void this.getExplorerView()?.setLibraryWorkspace(value).then(() => { this.renderWorkspaceStrip(); this.updateTitleArea(); }); };
++   let spring: ReturnType<typeof setTimeout> | undefined;
++   button.ondragover = event => {
++    event.preventDefault();
++    if (value !== selected && spring === undefined) { spring = setTimeout(() => { spring = undefined; void this.getExplorerView()?.setLibraryWorkspace(value).then(() => { this.renderWorkspaceStrip(); this.updateTitleArea(); }); }, 600); }
++   };
++   button.ondragleave = () => { clearTimeout(spring); spring = undefined; };
++   button.ondrop = () => { clearTimeout(spring); spring = undefined; };
++   item.append(button);
++   const close = document.createElement('button'); close.className = 'workspace-close codicon codicon-close'; close.title = 'Close ' + folder.name;
++   close.setAttribute('aria-label', close.title);
++   close.onclick = async () => {
++    if (value === selected) { await this.getExplorerView()?.setLibraryWorkspace(folders.find(other => other !== folder)?.uri.toString() ?? ''); }
++    await this.libraryCommandService.executeCommand('library.removeWorkspace', value);
++   };
++   item.append(close); tabs.append(item);
++  }
++  if (folders.length > 1) {
++   const all = document.createElement('button'); all.className = 'workspace-all codicon codicon-list-tree'; all.title = 'Show all folders'; all.setAttribute('aria-label', all.title); all.setAttribute('aria-pressed', String(!selected));
++   all.onclick = () => { void this.getExplorerView()?.setLibraryWorkspace('').then(() => { this.renderWorkspaceStrip(); this.updateTitleArea(); }); }; strip.append(all);
++  }
++  for (const [title, icon, command] of [['New File', 'new-file', 'library.newFile'], ['New Folder', 'new-folder', 'library.newFolder']]) {
++   const create = document.createElement('button'); create.className = 'workspace-add codicon codicon-' + icon; create.title = title; create.setAttribute('aria-label', title);
++   create.onclick = () => {
++    const context = this.getExplorerView()?.getContext(false)[0];
++    const root = folders.find(folder => folder.uri.toString() === selected) || (folders.length === 1 ? folders[0] : undefined);
++    const contextUri = context?.resource.toString();
++    const target = context && (!root || contextUri === root.uri.toString() || contextUri?.startsWith(root.uri.toString().replace(/\/$/, '') + '/')) ? context.resource : root?.uri;
++    void this.libraryCommandService.executeCommand(command, target);
++   }; strip.append(create);
++  }
++  const add = document.createElement('button'); add.className = 'workspace-add codicon codicon-add'; add.title = 'Add local or cluster workspace'; add.setAttribute('aria-label', add.title);
++  add.onclick = () => { void this.libraryCommandService.executeCommand('library.addWorkspace'); }; strip.append(add);
++  tabs.querySelector<HTMLElement>('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
++ }
++
++ override layout(dimension: Dimension): void {
++  super.layout(this.workspaceStrip ? new Dimension(dimension.width, Math.max(0, dimension.height - 38)) : dimension);
++ }
++
+ 	protected override createView(viewDescriptor: IViewDescriptor, options: IViewletViewOptions): ViewPane {
+ 		if (viewDescriptor.id === VIEW_ID) {
+ 			return this.instantiationService.createInstance(ExplorerView, {
+diff --git a/src/vs/workbench/contrib/files/browser/fileActions.ts b/src/vs/workbench/contrib/files/browser/fileActions.ts
+index dbd681cca83..1218c458628 100644
+--- a/src/vs/workbench/contrib/files/browser/fileActions.ts
++++ b/src/vs/workbench/contrib/files/browser/fileActions.ts
+@@ -1,3 +1,4 @@
++import { IStorageService, StorageScope } from '../../../../platform/storage/common/storage.js';
+ /*---------------------------------------------------------------------------------------------
+  *  Copyright (c) Microsoft Corporation. All rights reserved.
+  *  Licensed under the MIT License. See License.txt in the project root for license information.
+@@ -927,13 +928,15 @@ async function openExplorerAndCreate(accessor: ServicesAccessor, isFolder: boole
+ 		return commandService.executeCommand(NEW_UNTITLED_FILE_COMMAND_ID);
+ 	}
+ 
++	const selectedRoot = accessor.get(IStorageService).get('library.explorer.root', StorageScope.WORKSPACE, '');
++	const fallbackRoot = explorerService.roots.find(root => root.resource.toString() === selectedRoot) || explorerService.roots[0];
+ 	const stats = explorerService.getContext(false);
+ 	const stat = stats.length > 0 ? stats[0] : undefined;
+ 	let folder: ExplorerItem;
+ 	if (stat) {
+-		folder = stat.isDirectory ? stat : (stat.parent || explorerService.roots[0]);
++		folder = stat.isDirectory ? stat : (stat.parent || fallbackRoot);
+ 	} else {
+-		folder = explorerService.roots[0];
++		folder = fallbackRoot;
+ 	}
+ 
+ 	if (folder.isReadonly) {
+diff --git a/src/vs/workbench/contrib/files/browser/media/explorerviewlet.css b/src/vs/workbench/contrib/files/browser/media/explorerviewlet.css
+index c6cae5ccaef..f6c875e487a 100644
+--- a/src/vs/workbench/contrib/files/browser/media/explorerviewlet.css
++++ b/src/vs/workbench/contrib/files/browser/media/explorerviewlet.css
+@@ -118,3 +118,15 @@
+ .monaco-workbench.context-menu-visible .explorer-folders-view.highlight .monaco-list-row {
+ 	outline: none !important;
+ }
++
++.library-workspace-strip { display:flex; align-items:center; gap:4px; height:38px; padding:4px 10px; box-sizing:border-box; }
++.library-workspace-tabs { display:flex; align-items:center; gap:3px; overflow-x:auto; scrollbar-width:none; flex:1; min-width:0; }
++.library-workspace-tabs::-webkit-scrollbar { display:none; }
++.library-workspace-tab { display:flex; flex:1 1 0; min-width:85px; align-items:center; border-radius:5px; max-width:180px; }
++.library-workspace-strip button { font:inherit; font-size:12px; line-height:22px; border:0; border-radius:5px; padding:2px 7px; color:var(--vscode-foreground); background:transparent; cursor:pointer; white-space:nowrap; }
++.library-workspace-tab > button:first-child { flex:1; text-align:left; overflow:hidden; text-overflow:ellipsis; min-width:0; }
++.library-workspace-tab.selected, .library-workspace-strip button:hover { background:var(--vscode-list-inactiveSelectionBackground); }
++.library-workspace-strip button.codicon { font-family:codicon; font-size:14px; flex-shrink:0; padding:2px 4px; }
++.library-workspace-strip .workspace-close { opacity:0.45; }
++.library-workspace-tab:hover .workspace-close, .workspace-close:focus-visible { opacity:1; }
++.library-workspace-strip button:focus-visible { outline:1px solid var(--vscode-focusBorder); outline-offset:-1px; }
+diff --git a/src/vs/workbench/contrib/files/browser/views/explorerView.ts b/src/vs/workbench/contrib/files/browser/views/explorerView.ts
+index 46239023018..b1261b7df0f 100644
+--- a/src/vs/workbench/contrib/files/browser/views/explorerView.ts
++++ b/src/vs/workbench/contrib/files/browser/views/explorerView.ts
+@@ -3,6 +3,7 @@
+  *  Licensed under the MIT License. See License.txt in the project root for license information.
+  *--------------------------------------------------------------------------------------------*/
+ 
++import { IProductService } from '../../../../../platform/product/common/productService.js';
+ import * as nls from '../../../../../nls.js';
+ import { URI } from '../../../../../base/common/uri.js';
+ import { Sequencer } from '../../../../../base/common/async.js';
+@@ -242,7 +243,8 @@ export class ExplorerView extends ViewPane implements IExplorerView {
+ 		@ICommandService protected readonly commandService: ICommandService,
+ 		@IOpenerService openerService: IOpenerService,
+ 		@IAccessibilityService private readonly accessibilityService: IAccessibilityService,
+-		@IEnvironmentService private readonly environmentService: IEnvironmentService
++		@IEnvironmentService private readonly environmentService: IEnvironmentService,
++		@IProductService private readonly libraryProductService: IProductService,
+ 	) {
+ 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
+ 
+@@ -274,7 +276,14 @@ export class ExplorerView extends ViewPane implements IExplorerView {
+ 		this._autoReveal = autoReveal;
+ 	}
+ 
++	private libraryHeaderUpdate: (() => void) | undefined;
++
+ 	get name(): string {
++		if (this.libraryProductService?.applicationName?.startsWith('library-code')) {
++			const folders = this.contextService.getWorkspace().folders;
++			const selected = this.storageService.get('library.explorer.root', StorageScope.WORKSPACE, '');
++			return folders.find(folder => folder.uri.toString() === selected)?.name ?? (folders.length === 1 ? folders[0].name : nls.localize('libraryFolders', 'Folders'));
++		}
+ 		return this.labelService.getWorkspaceLabel(this.contextService.getWorkspace(), { withLocation: true });
+ 	}
+ 
+@@ -287,11 +296,11 @@ export class ExplorerView extends ViewPane implements IExplorerView {
+ 	}
+ 
+ 	override get headerVisible(): boolean {
+-		return super.headerVisible;
++		return this.libraryProductService?.applicationName?.startsWith('library-code') ? false : super.headerVisible;
+ 	}
+ 
+ 	override set headerVisible(visible: boolean) {
+-		super.headerVisible = visible;
++		super.headerVisible = this.libraryProductService?.applicationName?.startsWith('library-code') ? false : visible;
+ 		this.updateWorkspaceTitleCase();
+ 	}
+ 
+@@ -331,6 +340,8 @@ export class ExplorerView extends ViewPane implements IExplorerView {
+ 			titleElement.setAttribute('aria-label', this.ariaHeaderLabel);
+ 		};
+ 
++		this.libraryHeaderUpdate = setHeader;
++		this._register(this.contextService.onDidChangeWorkspaceFolders(setHeader));
+ 		this._register(this.contextService.onDidChangeWorkspaceName(() => {
+ 			setHeader();
+ 			this.updateWorkspaceTitleCase();
+@@ -836,6 +847,17 @@ export class ExplorerView extends ViewPane implements IExplorerView {
+ 		return DOM.getLargestChildWidth(parentNode, childNodes);
+ 	}
+ 
++ setLibraryWorkspace(uri: string): Promise<void> {
++  const current = this.storageService.get('library.explorer.root', StorageScope.WORKSPACE, '');
++  if (this.tree?.getInput()) {
++   this.storageService.store('library.explorer.tree.' + current, JSON.stringify(this.tree.getViewState()), StorageScope.WORKSPACE, StorageTarget.MACHINE);
++  }
++  this.storageService.store('library.explorer.root', uri, StorageScope.WORKSPACE, StorageTarget.MACHINE);
++  this.libraryHeaderUpdate?.();
++  this.updateTitle(this.name);
++  return this.setTreeInput();
++ }
++
+ 	setTreeInput(): Promise<void> {
+ 		return this.setTreeInputSequencer.queue(() => this.doSetTreeInput());
+ 	}
+@@ -849,15 +871,21 @@ export class ExplorerView extends ViewPane implements IExplorerView {
+ 		if (initialInputSetup) {
+ 			perf.mark('code/willResolveExplorer');
+ 		}
+-		const roots = this.explorerService.roots;
++		const allRoots = this.explorerService.roots;
++  const selectedRoot = this.storageService.get('library.explorer.root', StorageScope.WORKSPACE, '');
++  const chosen = allRoots.find(root => root.resource.toString() === selectedRoot);
++  const roots = chosen ? [chosen] : allRoots;
++  if (!roots.length) { return; }
+ 		let input: ExplorerItem | ExplorerItem[] = roots[0];
+-		if (this.contextService.getWorkbenchState() !== WorkbenchState.FOLDER || roots[0].error) {
++		if (!chosen && roots.length > 1 && (this.contextService.getWorkbenchState() !== WorkbenchState.FOLDER || roots[0].error)) {
+ 			// Display roots only when multi folder workspace
+ 			input = roots;
+ 		}
+ 
+ 		let viewState: IAsyncDataTreeViewState | undefined;
+-		if (this.tree?.getInput()) {
++  const libraryState = this.storageService.get('library.explorer.tree.' + selectedRoot, StorageScope.WORKSPACE);
++  if (libraryState) { viewState = JSON.parse(libraryState); }
++		else if (this.tree?.getInput()) {
+ 			viewState = this.tree.getViewState();
+ 		} else {
+ 			const rawViewState = this.storageService.get(ExplorerView.TREE_VIEW_STATE_STORAGE_KEY, StorageScope.WORKSPACE);
+diff --git a/src/vs/workbench/contrib/files/browser/views/explorerViewer.ts b/src/vs/workbench/contrib/files/browser/views/explorerViewer.ts
+index 2089f219aaf..7346798de3d 100644
+--- a/src/vs/workbench/contrib/files/browser/views/explorerViewer.ts
++++ b/src/vs/workbench/contrib/files/browser/views/explorerViewer.ts
+@@ -10,6 +10,10 @@ import { IListVirtualDelegate, ListDragOverEffectPosition, ListDragOverEffectTyp
+ import { IProgressService, ProgressLocation, } from '../../../../../platform/progress/common/progress.js';
+ import { INotificationService } from '../../../../../platform/notification/common/notification.js';
+ import { IFileService, FileKind, FileOperationError, FileOperationResult, FileChangeType, FileSystemProviderCapabilities } from '../../../../../platform/files/common/files.js';
++import { ICommandService } from '../../../../../platform/commands/common/commands.js';
++import { generateUuid } from '../../../../../base/common/uuid.js';
++import { IStorageService, StorageScope } from '../../../../../platform/storage/common/storage.js';
++import { libraryEmptyDropTarget } from '../../common/libraryDropTarget.js';
+ import { IWorkbenchLayoutService } from '../../../../services/layout/browser/layoutService.js';
+ import { isTemporaryWorkspace, IWorkspaceContextService, WorkbenchState } from '../../../../../platform/workspace/common/workspace.js';
+ import { IDisposable, Disposable, dispose, toDisposable, DisposableStore } from '../../../../../base/common/lifecycle.js';
+@@ -19,7 +23,7 @@ import { ITreeNode, ITreeFilter, TreeVisibility, IAsyncDataSource, ITreeSorter,
+ import { IThemeService } from '../../../../../platform/theme/common/themeService.js';
+ import { IConfigurationChangeEvent, IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
+ import { ExplorerFindProviderActive, IFilesConfiguration, UndoConfirmLevel } from '../../common/files.js';
+-import { dirname, joinPath, distinctParents, relativePath } from '../../../../../base/common/resources.js';
++import { basename, dirname, joinPath, distinctParents, relativePath } from '../../../../../base/common/resources.js';
+ import { localize } from '../../../../../nls.js';
+ import { IKeyboardEvent } from '../../../../../base/browser/keyboardEvent.js';
+ import { equals, deepClone } from '../../../../../base/common/objects.js';
+@@ -38,7 +42,10 @@ import { IWorkspaceEditingService } from '../../../../services/workspaces/common
+ import { URI } from '../../../../../base/common/uri.js';
+ import { IEditorService } from '../../../../services/editor/common/editorService.js';
+ import { IWorkspaceFolderCreationData } from '../../../../../platform/workspaces/common/workspaces.js';
+-import { findValidPasteFileTarget } from '../fileActions.js';
++import { findValidPasteFileTarget, incrementFileName } from '../fileActions.js';
++import { UNDO_REDO_SOURCE } from '../explorerService.js';
++import { IUndoRedoService } from '../../../../../platform/undoRedo/common/undoRedo.js';
++import Severity from '../../../../../base/common/severity.js';
+ import { FuzzyScore, createMatches } from '../../../../../base/common/filters.js';
+ import { Emitter, Event, EventMultiplexer } from '../../../../../base/common/event.js';
+ import { IAsyncDataTreeViewState, IAsyncFindProvider, IAsyncFindResult, IAsyncFindToggles, ITreeCompressionDelegate } from '../../../../../base/browser/ui/tree/asyncDataTree.js';
+@@ -1550,6 +1557,8 @@ export class FileSorter implements ITreeSorter<ExplorerItem> {
+ 
+ export class FileDragAndDrop implements ITreeDragAndDrop<ExplorerItem> {
+ 	private static readonly CONFIRM_DND_SETTING_KEY = 'explorer.confirmDragAndDrop';
++	private static readonly LIBRARY_FILES = 'application/vnd.library.files';
++	private static libraryDrag: { token: string; resources: string[]; schemes: string[] } | undefined;
+ 
+ 	private compressedDragOverElement: HTMLElement | undefined;
+ 	private compressedDropTargetDisposable: IDisposable = Disposable.None;
+@@ -1567,7 +1576,11 @@ export class FileDragAndDrop implements ITreeDragAndDrop<ExplorerItem> {
+ 		@IConfigurationService private configurationService: IConfigurationService,
+ 		@IInstantiationService private instantiationService: IInstantiationService,
+ 		@IWorkspaceEditingService private workspaceEditingService: IWorkspaceEditingService,
+-		@IUriIdentityService private readonly uriIdentityService: IUriIdentityService
++		@IUriIdentityService private readonly uriIdentityService: IUriIdentityService,
++		@INotificationService private readonly notificationService: INotificationService,
++		@IUndoRedoService private readonly undoRedoService: IUndoRedoService,
++		@ICommandService private readonly libraryCommandService: ICommandService,
++		@IStorageService private readonly libraryStorageService: IStorageService
+ 	) {
+ 		const updateDropEnablement = (e: IConfigurationChangeEvent | undefined) => {
+ 			if (!e || e.affectsConfiguration('explorer.enableDragAndDrop')) {
+@@ -1624,6 +1637,13 @@ export class FileDragAndDrop implements ITreeDragAndDrop<ExplorerItem> {
+ 		const effectType = (isNative || isCopy) ? ListDragOverEffectType.Copy : ListDragOverEffectType.Move;
+ 		const effect = { type: effectType, position: ListDragOverEffectPosition.Over };
+ 
++		// A spring-loaded workspace rebuilds the list. Its trusted, same-window URI receipt survives that rebuild.
++		const pending = FileDragAndDrop.libraryDrag;
++		const libraryTarget = target || this.libraryDropRoot();
++		if (pending && libraryTarget && containsDragType(originalEvent, FileDragAndDrop.LIBRARY_FILES) && pending.schemes.some(scheme => this.isLibraryPair(scheme, libraryTarget.resource.scheme))) {
++			return { accept: true, bubble: TreeDragOverBubble.Down, effect, autoExpand: false };
++		}
++
+ 		// Native DND
+ 		if (isNative) {
+ 			if (!containsDragType(originalEvent, DataTransfers.FILES, CodeDataTransfers.FILES, DataTransfers.RESOURCES)) {
+@@ -1660,6 +1680,10 @@ export class FileDragAndDrop implements ITreeDragAndDrop<ExplorerItem> {
+ 				return false;
+ 			}
+ 
++			if (this.isLibraryTransfer(items, target)) {
++				return { accept: true, bubble: TreeDragOverBubble.Down, effect, autoExpand: false };
++			}
++
+ 			if (!isCopy && items.every((source) => source.isReadonly)) {
+ 				return false; // Cannot move readonly items unless we copy
+ 			}
+@@ -1748,6 +1772,12 @@ export class FileDragAndDrop implements ITreeDragAndDrop<ExplorerItem> {
+ 	onDragStart(data: IDragAndDropData, originalEvent: DragEvent): void {
+ 		const items = FileDragAndDrop.getStatsFromDragAndDropData(data as ElementsDragAndDropData<ExplorerItem, ExplorerItem[]>, originalEvent);
+ 		if (items.length && originalEvent.dataTransfer) {
++			if (items.every(item => !item.isRoot && (item.resource.scheme === Schemas.file || item.resource.scheme === 'library-file'))) {
++				const resources = items.map(item => item.resource.toString());
++				const token = generateUuid();
++				FileDragAndDrop.libraryDrag = { token, resources, schemes: items.map(item => item.resource.scheme) };
++				originalEvent.dataTransfer.setData(FileDragAndDrop.LIBRARY_FILES, JSON.stringify({ token, resources }));
++			}
+ 			// Apply some datatransfer types to allow for dragging the element outside of the application
+ 			this.instantiationService.invokeFunction(accessor => fillEditorsDragData(accessor, items, originalEvent));
+ 
+@@ -1774,13 +1804,29 @@ export class FileDragAndDrop implements ITreeDragAndDrop<ExplorerItem> {
+ 
+ 		// Find parent to add to
+ 		if (!target) {
+-			target = this.explorerService.roots[this.explorerService.roots.length - 1];
++			const internal = this.libraryDragResources(originalEvent);
++			target = internal ? this.libraryDropRoot() : this.explorerService.roots[this.explorerService.roots.length - 1];
++			if (!target) {
++				this.dialogService.error('Drop onto a destination folder, or select its workspace tab first.');
++				return;
++			}
+ 			targetSector = ListViewTargetSector.BOTTOM;
+ 		}
+ 		if (!target.isDirectory && target.parent) {
+ 			target = target.parent;
+ 		}
+-		if (target.isReadonly) {
++		const libraryResources = this.libraryDragResources(originalEvent);
++		if (libraryResources?.some(resource => this.isLibraryPair(URI.parse(resource).scheme, target.resource.scheme))) {
++			if (!libraryResources.every(resource => this.isLibraryPair(URI.parse(resource).scheme, target.resource.scheme))) {
++				this.dialogService.error('Transfer one direction at a time between this Mac and one remote host.');
++				return;
++			}
++			const isCopy = (originalEvent.ctrlKey && !isMacintosh) || (originalEvent.altKey && isMacintosh);
++			await this.libraryCommandService.executeCommand('library.transferFiles', { items: libraryResources, target: target.resource.toString(), copy: isCopy });
++			await this.explorerService.refresh();
++			return;
++		}
++		if (target.isReadonly && !(data instanceof ElementsDragAndDropData && target.resource.scheme === 'library-file')) {
+ 			return;
+ 		}
+ 		const resolvedTarget = target;
+@@ -1833,13 +1879,21 @@ export class FileDragAndDrop implements ITreeDragAndDrop<ExplorerItem> {
+ 		const items = distinctParents([...distinctItems.keys()], s => s.resource);
+ 		const isCopy = (originalEvent.ctrlKey && !isMacintosh) || (originalEvent.altKey && isMacintosh);
+ 
+-		// Handle confirm setting
+-		const confirmDragAndDrop = !isCopy && this.configurationService.getValue<boolean>(FileDragAndDrop.CONFIRM_DND_SETTING_KEY);
++		if (this.isLibraryTransfer(items, target)) {
++			await this.libraryCommandService.executeCommand('library.transferFiles', { items: items.map(item => item.resource.toString()), target: target.resource.toString(), copy: isCopy });
++			await this.explorerService.refresh();
++			return;
++		}
++
++		// Handle confirm setting: only folders, more than 5 items or root reorders need a confirmation
++		const confirmDragAndDrop = !isCopy && this.configurationService.getValue<boolean>(FileDragAndDrop.CONFIRM_DND_SETTING_KEY)
++			&& (items.length > 5 || items.some(s => s.isDirectory));
+ 		if (confirmDragAndDrop) {
++			const from = items[0].parent?.name ?? '';
+ 			const message = items.length > 1 && items.every(s => s.isRoot) ? localize('confirmRootsMove', "Are you sure you want to change the order of multiple root folders in your workspace?")
+-				: items.length > 1 ? localize('confirmMultiMove', "Are you sure you want to move the following {0} files into '{1}'?", items.length, target.name)
++				: items.length > 1 ? localize('libraryConfirmMultiMove', "Move {0} items from '{1}' to '{2}'?", items.length, from, target.name)
+ 					: items[0].isRoot ? localize('confirmRootMove', "Are you sure you want to change the order of root folder '{0}' in your workspace?", items[0].name)
+-						: localize('confirmMove', "Are you sure you want to move '{0}' into '{1}'?", items[0].name, target.name);
++						: localize('libraryConfirmMove', "Move '{0}' from '{1}' to '{2}'?", items[0].name, from, target.name);
+ 			const detail = items.length > 1 && !items.every(s => s.isRoot) ? getFileNamesMessage(items.map(i => i.resource)) : undefined;
+ 
+ 			const confirmation = await this.dialogService.confirm({
+@@ -1968,8 +2022,51 @@ export class FileDragAndDrop implements ITreeDragAndDrop<ExplorerItem> {
+ 	private async doHandleExplorerDropOnMove(sources: ExplorerItem[], target: ExplorerItem): Promise<void> {
+ 
+ 		// Do not allow moving readonly items
+-		const resourceFileEdits = sources.filter(source => !source.isReadonly).map(source => new ResourceFileEdit(source.resource, joinPath(target.resource, source.name)));
++		let resourceFileEdits = sources.filter(source => !source.isReadonly).map(source => new ResourceFileEdit(source.resource, joinPath(target.resource, source.name)));
+ 		const labelSuffix = getFileOrFolderLabelSuffix(sources);
++
++		// Never replace silently: ask Replace, Keep both or Cancel before anything moves
++		const conflicts: URI[] = [];
++		for (const edit of resourceFileEdits) {
++			if (edit.newResource && await this.fileService.exists(edit.newResource)) {
++				conflicts.push(edit.newResource);
++			}
++		}
++		if (conflicts.length) {
++			const confirm = getMultipleFilesOverwriteConfirm(conflicts);
++			const { result } = await this.dialogService.prompt<'replace' | 'keep'>({
++				type: 'warning',
++				message: confirm.message,
++				detail: confirm.detail,
++				buttons: [
++					{ label: localize({ key: 'libraryKeepBoth', comment: ['&& denotes a mnemonic'] }, "&&Keep Both"), run: () => 'keep' },
++					{ label: localize({ key: 'replaceButtonLabel', comment: ['&& denotes a mnemonic'] }, "&&Replace"), run: () => 'replace' }
++				],
++				cancelButton: true
++			});
++			if (!result) {
++				return;
++			}
++			const naming = this.configurationService.getValue<IFilesConfiguration>().explorer.incrementalNaming;
++			const edits: ResourceFileEdit[] = [];
++			for (const edit of resourceFileEdits) {
++				let newResource = edit.newResource!;
++				if (!conflicts.some(conflict => this.uriIdentityService.extUri.isEqual(conflict, newResource))) {
++					edits.push(edit);
++				} else if (result === 'replace') {
++					edits.push(new ResourceFileEdit(edit.oldResource, newResource, { overwrite: true }));
++				} else {
++					const isDirectory = !!this.explorerService.findClosest(edit.oldResource!)?.isDirectory;
++					let name = basename(newResource);
++					while (await this.fileService.exists(newResource)) {
++						name = incrementFileName(name, isDirectory, naming === 'disabled' ? 'simple' : naming);
++						newResource = joinPath(target.resource, name);
++					}
++					edits.push(new ResourceFileEdit(edit.oldResource, newResource));
++				}
++			}
++			resourceFileEdits = edits;
++		}
+ 		const options = {
+ 			confirmBeforeUndo: this.configurationService.getValue<IFilesConfiguration>().explorer.confirmUndo === UndoConfirmLevel.Verbose,
+ 			undoLabel: localize('move', "Move {0}", labelSuffix),
+@@ -1978,6 +2075,7 @@ export class FileDragAndDrop implements ITreeDragAndDrop<ExplorerItem> {
+ 
+ 		try {
+ 			await this.explorerService.applyBulkEdit(resourceFileEdits, options);
++			this.notifyMoved(resourceFileEdits.length, target);
+ 		} catch (error) {
+ 
+ 			// Conflict
+@@ -1995,6 +2093,7 @@ export class FileDragAndDrop implements ITreeDragAndDrop<ExplorerItem> {
+ 				const { confirmed } = await this.dialogService.confirm(confirm);
+ 				if (confirmed) {
+ 					await this.explorerService.applyBulkEdit(resourceFileEdits.map(re => new ResourceFileEdit(re.oldResource, re.newResource, { overwrite: true })), options);
++					this.notifyMoved(resourceFileEdits.length, target);
+ 				}
+ 			}
+ 
+@@ -2005,6 +2104,37 @@ export class FileDragAndDrop implements ITreeDragAndDrop<ExplorerItem> {
+ 		}
+ 	}
+ 
++	private notifyMoved(count: number, target: ExplorerItem): void {
++		if (!count) {
++			return;
++		}
++		const message = count === 1 ? localize('libraryMovedOne', "Moved 1 item to '{0}'", target.name) : localize('libraryMovedMany', "Moved {0} items to '{1}'", count, target.name);
++		this.notificationService.prompt(Severity.Info, message, [{ label: localize('libraryUndoMove', "Undo"), run: () => this.undoRedoService.undo(UNDO_REDO_SOURCE) }]);
++	}
++
++	private libraryDropRoot(): ExplorerItem | undefined {
++		return libraryEmptyDropTarget(this.explorerService.roots, this.libraryStorageService.get('library.explorer.root', StorageScope.WORKSPACE, ''), item => item.resource.toString());
++	}
++
++	private isLibraryPair(source: string, target: string): boolean {
++		return (source === Schemas.file && target === 'library-file') || (source === 'library-file' && target === Schemas.file);
++	}
++
++	private libraryDragResources(event: DragEvent): string[] | undefined {
++		const pending = FileDragAndDrop.libraryDrag;
++		if (!pending) { return; }
++		try {
++			const payload = JSON.parse(event.dataTransfer?.getData(FileDragAndDrop.LIBRARY_FILES) || 'null');
++			if (payload?.token === pending.token && Array.isArray(payload.resources) && payload.resources.length <= 500 && JSON.stringify(payload.resources) === JSON.stringify(pending.resources)) { return pending.resources; }
++		} catch { /* Other applications cannot supply a same-window Explorer receipt. */ }
++		return;
++	}
++
++	/** Library cross-provider drops use a verified transfer through the enrolled data-transfer node. */
++	private isLibraryTransfer(items: ExplorerItem[], target: ExplorerItem): boolean {
++		return items.some(item => !item.isRoot && this.isLibraryPair(item.resource.scheme, target.resource.scheme));
++	}
++
+ 	private static getStatsFromDragAndDropData(data: ElementsDragAndDropData<ExplorerItem, ExplorerItem[]>, dragStartEvent?: DragEvent): ExplorerItem[] {
+ 		if (data.context) {
+ 			return data.context;
+@@ -2039,6 +2169,7 @@ export class FileDragAndDrop implements ITreeDragAndDrop<ExplorerItem> {
+ 	}
+ 
+ 	onDragEnd(): void {
++		FileDragAndDrop.libraryDrag = undefined;
+ 		this.compressedDropTargetDisposable.dispose();
+ 	}
+ 
+diff --git a/src/vs/workbench/contrib/search/browser/media/searchview.css b/src/vs/workbench/contrib/search/browser/media/searchview.css
+index fafe257fcf6..385a6f40bfc 100644
+--- a/src/vs/workbench/contrib/search/browser/media/searchview.css
++++ b/src/vs/workbench/contrib/search/browser/media/searchview.css
+@@ -446,3 +446,8 @@
+ 	user-select: none;
+ 	-webkit-user-select: none;
+ }
++
++.library-search-modes { display:flex; gap:3px; padding:3px; margin-bottom:10px; background:var(--vscode-editor-background); border-radius:7px; }
++.library-search-modes button { flex:1; border:0; border-radius:5px; padding:6px 8px; background:transparent; color:var(--vscode-foreground); font:inherit; font-size:12px; cursor:pointer; }
++.library-search-modes button[aria-pressed="true"], .library-search-modes button:hover { background:var(--vscode-list-inactiveSelectionBackground); }
++.library-search-modes button:focus-visible { outline:1px solid var(--vscode-focusBorder); }
+diff --git a/src/vs/workbench/contrib/search/browser/searchView.ts b/src/vs/workbench/contrib/search/browser/searchView.ts
+index 164d061b346..bfa60b78638 100644
+--- a/src/vs/workbench/contrib/search/browser/searchView.ts
++++ b/src/vs/workbench/contrib/search/browser/searchView.ts
+@@ -27,6 +27,7 @@ import { Selection } from '../../../../editor/common/core/selection.js';
+ import { IEditor } from '../../../../editor/common/editorCommon.js';
+ import { CommonFindController } from '../../../../editor/contrib/find/browser/findController.js';
+ import { MultiCursorSelectionController } from '../../../../editor/contrib/multicursor/browser/multicursor.js';
++import { IProductService } from '../../../../platform/product/common/productService.js';
+ import * as nls from '../../../../nls.js';
+ import { IAccessibilityService } from '../../../../platform/accessibility/common/accessibility.js';
+ import { MenuId } from '../../../../platform/actions/common/actions.js';
+@@ -239,6 +240,7 @@ export class SearchView extends ViewPane {
+ 		@IAccessibilitySignalService private readonly accessibilitySignalService: IAccessibilitySignalService,
+ 		@ITelemetryService private readonly telemetryService: ITelemetryService,
+ 		@ISCMService private readonly scmService: ISCMService,
++		@IProductService private readonly libraryProductService: IProductService,
+ 	) {
+ 
+ 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
+@@ -487,6 +489,13 @@ export class SearchView extends ViewPane {
+ 		this.container = dom.append(parent, dom.$('.search-view'));
+ 
+ 		this.searchWidgetsContainerElement = dom.append(this.container, $('.search-widgets-container'));
++        if (this.libraryProductService.applicationName.startsWith('library-code')) {
++            const modes = dom.append(this.searchWidgetsContainerElement, dom.$('.library-search-modes'));
++            const filenames = dom.append(modes, dom.$('button', { type: 'button', title: 'Find a file by name (⌘P)' }, 'File names…'));
++            const contents = dom.append(modes, dom.$('button', { type: 'button', 'aria-pressed': 'true' }, 'File contents'));
++            this._register(dom.addDisposableListener(filenames, 'click', () => { void this.commandService.executeCommand('workbench.action.quickOpen'); }));
++            this._register(dom.addDisposableListener(contents, 'click', () => { this.searchWidget.focus(); }));
++        }
+ 		this.createSearchWidget(this.searchWidgetsContainerElement);
+ 
+ 		const history = this.searchHistoryService.load();
+diff --git a/src/vs/workbench/contrib/webview/browser/overlayWebview.ts b/src/vs/workbench/contrib/webview/browser/overlayWebview.ts
+index ecc9222dc6d..0ff9e2651b5 100644
+--- a/src/vs/workbench/contrib/webview/browser/overlayWebview.ts
++++ b/src/vs/workbench/contrib/webview/browser/overlayWebview.ts
+@@ -59,6 +59,7 @@ export class OverlayWebview extends Disposable implements IOverlayWebview {
+ 	public origin: string;
+ 
+ 	private _overlayLayout: OverlayLayoutElement | undefined;
++	private _dragPointerEvents: string | undefined;
+ 
+ 	private _anchorState: { readonly anchorElement: HTMLElement; readonly clippingContainer?: HTMLElement } | undefined;
+ 	private _outerEdgePart: Element | undefined;
+@@ -447,11 +448,23 @@ export class OverlayWebview extends Disposable implements IOverlayWebview {
+ 		}
+ 	}
+ 
+-	windowDidDragStart() {
+-		this._webview.value?.windowDidDragStart();
++	windowDidDragStart(librarySource?: HTMLElement) {
++		if (librarySource && this._overlayLayout?.content.contains(librarySource)) {
++			this.windowDidDragEnd();
++			return;
++		}
++		if (this._overlayLayout && this._dragPointerEvents === undefined) {
++			this._dragPointerEvents = this._overlayLayout.content.style.pointerEvents;
++			this._overlayLayout.content.style.pointerEvents = 'none';
++		}
++		this._webview.value?.windowDidDragStart(librarySource);
+ 	}
+ 
+ 	windowDidDragEnd() {
++		if (this._overlayLayout && this._dragPointerEvents !== undefined) {
++			this._overlayLayout.content.style.pointerEvents = this._dragPointerEvents;
++			this._dragPointerEvents = undefined;
++		}
+ 		this._webview.value?.windowDidDragEnd();
+ 	}
+ 
+diff --git a/src/vs/workbench/contrib/webview/browser/pre/index.html b/src/vs/workbench/contrib/webview/browser/pre/index.html
+index ab1372198da..d148d7a2b1b 100644
+--- a/src/vs/workbench/contrib/webview/browser/pre/index.html
++++ b/src/vs/workbench/contrib/webview/browser/pre/index.html
+@@ -5,7 +5,7 @@
+ 	<meta charset="UTF-8">
+ 
+ 	<meta http-equiv="Content-Security-Policy"
+-		content="default-src 'none'; script-src 'sha256-VY65u6y1DZWK8Cb4MlVpSVlMYcM338BRDVhygiwXLLg=' 'self'; frame-src 'self'; style-src 'unsafe-inline';">
++		content="default-src 'none'; script-src 'sha256-To5kxvLfCZgolC7zSeNzaWlwzjYA55nUQIlyczdl9ks=' 'self'; frame-src 'self'; style-src 'unsafe-inline';">
+ 
+ 	<!-- Disable pinch zooming -->
+ 	<meta name="viewport"
+@@ -552,6 +552,7 @@
+ 		 * @param {MouseEvent} event
+ 		 */
+ 		const handleInnerClick = (event) => {
++			if (event.defaultPrevented) { return; }
+ 			if (!event.isTrusted || !event?.view?.document) {
+ 				return;
+ 			}
+@@ -758,7 +759,11 @@
+ 					return;
+ 				}
+ 				lastPosition = { x: event.screenX, y: event.screenY };
+-				pendingEvent = { screenX: event.screenX, screenY: event.screenY };
++				const source = event.view || window;
++				const frame = source === window ? undefined : getActiveFrame()?.getBoundingClientRect();
++				pendingEvent = { screenX: event.screenX, screenY: event.screenY,
++					clientX: event.clientX + (frame?.left || 0), clientY: event.clientY + (frame?.top || 0),
++					timestamp: (source?.performance.timeOrigin || performance.timeOrigin) + event.timeStamp };
+ 				if (scheduled) {
+ 					return;
+ 				}
+@@ -770,10 +775,7 @@
+ 					if (!event) {
+ 						return;
+ 					}
+-					hostMessaging.postMessage('did-mouse-move', {
+-						screenX: event.screenX,
+-						screenY: event.screenY,
+-					});
++					hostMessaging.postMessage('did-mouse-move', event);
+ 				});
+ 			};
+ 		})();
+@@ -829,6 +831,7 @@
+ 			});
+ 		};
+ 
++		let activeLibraryDrag = false;
+ 		function handleInnerDragStartEvent(/** @type {DragEvent} */ e) {
+ 			if (e.defaultPrevented) {
+ 				// Extension code has already handled this event
+@@ -840,12 +843,23 @@
+ 			}
+ 
+ 			// Only handle drags from outside editor for now
+-			if (e.dataTransfer.items.length && Array.prototype.every.call(e.dataTransfer.items, item => item.kind === 'file')) {
+-				hostMessaging.postMessage('drag-start', undefined);
++			if (Array.from(e.dataTransfer.types).includes('application/library-resource') || (e.dataTransfer.items.length && Array.prototype.every.call(e.dataTransfer.items, item => item.kind === 'file'))) {
++				if (e.type === 'dragstart' && e.isTrusted && Array.from(e.dataTransfer.types).includes('application/library-resource')) { activeLibraryDrag = true; }
++				hostMessaging.postMessage('drag-start', {
++					library: Array.from(e.dataTransfer.types).includes('application/library-resource'),
++					source: e.type === 'dragstart' && e.isTrusted && Array.from(e.dataTransfer.types).includes('application/library-resource'),
++					at: (e.view?.performance?.timeOrigin ?? performance.timeOrigin) + e.timeStamp
++				});
+ 			}
+ 		}
+ 
+ 
++		function handleInnerDragEndEvent(/** @type {DragEvent} */ e) {
++			if (!activeLibraryDrag || !e.isTrusted) { return; }
++			activeLibraryDrag = false;
++			hostMessaging.postMessage('drag-end', { at: (e.view?.performance?.timeOrigin ?? performance.timeOrigin) + e.timeStamp });
++		}
++
+ 		function handleInnerDragEvent(/** @type {DragEvent} */ e) {
+ 			/**
+ 			 * To ensure that the drop event always fires as expected, you should always include a preventDefault() call in the part of your code which handles the dragover event.
+@@ -859,9 +873,11 @@
+ 
+ 
+ 			// Only handle drags from outside editor for now
+-			if (e.dataTransfer.items.length && Array.prototype.every.call(e.dataTransfer.items, item => item.kind === 'file')) {
++			if (Array.from(e.dataTransfer.types).includes('application/library-resource') || (e.dataTransfer.items.length && Array.prototype.every.call(e.dataTransfer.items, item => item.kind === 'file'))) {
+ 				hostMessaging.postMessage('drag', {
+-					shiftKey: e.shiftKey
++					shiftKey: e.shiftKey,
++					library: Array.from(e.dataTransfer.types).includes('application/library-resource'),
++					at: (e.view?.performance?.timeOrigin ?? performance.timeOrigin) + e.timeStamp
+ 				});
+ 			}
+ 
+@@ -1283,6 +1299,8 @@
+ 						});
+ 					});
+ 
++					contentWindow.addEventListener('dragstart', handleInnerDragStartEvent);
++					contentWindow.addEventListener('dragend', handleInnerDragEndEvent);
+ 					contentWindow.addEventListener('dragenter', handleInnerDragStartEvent);
+ 					contentWindow.addEventListener('dragover', handleInnerDragEvent);
+ 					contentWindow.addEventListener('drag', handleInnerDragEvent);
+diff --git a/src/vs/workbench/contrib/webview/browser/webview.ts b/src/vs/workbench/contrib/webview/browser/webview.ts
+index 268ea1ea4a0..c7eca891018 100644
+--- a/src/vs/workbench/contrib/webview/browser/webview.ts
++++ b/src/vs/workbench/contrib/webview/browser/webview.ts
+@@ -286,7 +286,7 @@ export interface IWebview extends IDisposable {
+ 	undo(): void;
+ 	redo(): void;
+ 
+-	windowDidDragStart(): void;
++	windowDidDragStart(librarySource?: HTMLElement): void;
+ 	windowDidDragEnd(): void;
+ 
+ 	setContextKeyService(scopedContextKeyService: IContextKeyService): void;
+diff --git a/src/vs/workbench/contrib/webview/browser/webviewElement.ts b/src/vs/workbench/contrib/webview/browser/webviewElement.ts
+index dbb9b44fb1d..fa03599b9af 100644
+--- a/src/vs/workbench/contrib/webview/browser/webviewElement.ts
++++ b/src/vs/workbench/contrib/webview/browser/webviewElement.ts
+@@ -40,6 +40,7 @@ import { WebviewThemeDataProvider } from './themeing.js';
+ import { areWebviewContentOptionsEqual, IWebviewElement, WebviewContentOptions, WebviewExtensionDescription, WebviewInitInfo, WebviewMessageReceivedEvent, WebviewOptions } from './webview.js';
+ import { WebviewFindDelegate, WebviewFindWidget } from './webviewFindWidget.js';
+ import { FromWebviewMessage, KeyEvent, ToWebviewMessage, WebViewDragEvent } from './webviewMessages.js';
++import { libraryDragSourceFor } from './libraryDragSource.js';
+ 
+ interface WebviewContent {
+ 	readonly html: string;
+@@ -246,8 +247,15 @@ export class WebviewElement extends Disposable implements IWebviewElement, Webvi
+ 			this._onDidWheel.fire(event);
+ 		}));
+ 
+-		this._register(this.on('did-mouse-move', ({ screenX, screenY }) => {
+-			this.window?.dispatchEvent(new CustomEvent(webviewMouseActivityEvent, { detail: { screenX, screenY } }));
++		this._register(this.on('did-mouse-move', ({ screenX, screenY, clientX, clientY, timestamp }) => {
++			const frame = this.element;
++			const rect = frame?.getBoundingClientRect();
++			// Frame-local CSS pixels must become workbench-window CSS pixels, including transforms.
++			const point = rect && frame && typeof clientX === 'number' && typeof clientY === 'number'
++				? { clientX: rect.left + clientX * rect.width / (frame.clientWidth || rect.width),
++					clientY: rect.top + clientY * rect.height / (frame.clientHeight || rect.height), timestamp }
++				: {};
++			this.window?.dispatchEvent(new CustomEvent(webviewMouseActivityEvent, { detail: { screenX, screenY, ...point } }));
+ 		}));
+ 
+ 		this._register(this.on('did-find', ({ didFind }) => {
+@@ -334,11 +342,26 @@ export class WebviewElement extends Disposable implements IWebviewElement, Webvi
+ 			}
+ 		}));
+ 
+-		this._register(this.on('drag-start', () => {
+-			this._startBlockingIframeDragEvents();
++		this._register(this.on('drag-start', event => {
++			if (event?.library) {
++				if (!this.window || !this.element || typeof event.source !== 'boolean' || !Number.isFinite(event.at)) { return; }
++				const tracker = libraryDragSourceFor(this.window);
++				if (event.source ? !tracker.begin(this.element, event.at) : !tracker.accept(event.at)) { return; }
++				if (!event.source) { this._startBlockingIframeDragEvents(); }
++			} else {
++				this._startBlockingIframeDragEvents();
++			}
++			// A source iframe's dragstart cannot bubble to the host window.
++			this.handleDragEvent('drag', { shiftKey: false });
++		}));
++
++		this._register(this.on('drag-end', event => {
++			if (!this.window || !Number.isFinite(event?.at)) { return; }
++			this.window.dispatchEvent(new CustomEvent('library-webview-drag-end', { detail: event.at }));
+ 		}));
+ 
+-		this._register(this.on('drag', (event) => {
++		this._register(this.on('drag', event => {
++			if (event.library && (!this.window || !libraryDragSourceFor(this.window).accept(event.at!))) { return; }
+ 			this.handleDragEvent('drag', event);
+ 		}));
+ 
+@@ -804,7 +827,11 @@ export class WebviewElement extends Disposable implements IWebviewElement, Webvi
+ 		this.window?.dispatchEvent(emulatedDragEvent);
+ 	}
+ 
+-	windowDidDragStart(): void {
++	windowDidDragStart(librarySource?: HTMLElement): void {
++		if (librarySource && this.element === librarySource) {
++			this._stopBlockingIframeDragEvents();
++			return;
++		}
+ 		// Webview break drag and dropping around the main window (no events are generated when you are over them)
+ 		// Work around this by disabling pointer events during the drag.
+ 		// https://github.com/electron/electron/issues/18226
+@@ -886,7 +913,9 @@ export class WebviewElement extends Disposable implements IWebviewElement, Webvi
+ 					const rangeHeader = range
+ 						? `bytes ${range.start}-${rangeEnd}/${result.size}`
+ 						: undefined;
+-					if (WebviewElement._supportsTransferableStreams.value) {
++					// Electron 43 duplicates buffered chunks on this transferable-stream path.
++					// Use the existing owned-buffer message transport on desktop.
++					if (WebviewElement._supportsTransferableStreams.value && this.platform !== 'electron') {
+ 						let controller: ReadableStreamDefaultController<Uint8Array<ArrayBuffer>> | undefined;
+ 						let closed = false;
+ 						const close = () => {
+diff --git a/src/vs/workbench/contrib/webview/browser/webviewMessages.d.ts b/src/vs/workbench/contrib/webview/browser/webviewMessages.d.ts
+index f4e0901e636..04628b79bde 100644
+--- a/src/vs/workbench/contrib/webview/browser/webviewMessages.d.ts
++++ b/src/vs/workbench/contrib/webview/browser/webviewMessages.d.ts
+@@ -22,8 +22,12 @@ type KeyEvent = {
+ 
+ type WebViewDragEvent = {
+ 	readonly shiftKey: boolean;
++	readonly library?: boolean;
++	readonly at?: number;
+ }
+ 
++type WebViewDragStartEvent = { readonly library: boolean; readonly source: boolean; readonly at: number };
++
+ export type FromWebviewMessage = {
+ 	'onmessage': { message: any; transfer?: ArrayBuffer[] };
+ 	'did-click-link': { uri: string };
+@@ -43,7 +47,8 @@ export type FromWebviewMessage = {
+ 	'did-keydown': KeyEvent;
+ 	'did-keyup': KeyEvent;
+ 	'did-context-menu': { clientX: number; clientY: number; context: { [key: string]: unknown } };
+-	'drag-start': void;
++	'drag-start': WebViewDragStartEvent;
++	'drag-end': { readonly at: number };
+ 	'drag': WebViewDragEvent;
+ 	'updated-intrinsic-content-size': { width: number; height: number };
+ };
+diff --git a/src/vs/workbench/contrib/webview/browser/webviewWindowDragMonitor.ts b/src/vs/workbench/contrib/webview/browser/webviewWindowDragMonitor.ts
+index 923f49b2ffd..b3341962ea4 100644
+--- a/src/vs/workbench/contrib/webview/browser/webviewWindowDragMonitor.ts
++++ b/src/vs/workbench/contrib/webview/browser/webviewWindowDragMonitor.ts
+@@ -7,6 +7,7 @@ import * as DOM from '../../../../base/browser/dom.js';
+ import { CodeWindow } from '../../../../base/browser/window.js';
+ import { Disposable } from '../../../../base/common/lifecycle.js';
+ import { IWebview } from './webview.js';
++import { libraryDragSourceFor } from './libraryDragSource.js';
+ 
+ /**
+  * Allows webviews to monitor when an element in the VS Code editor is being dragged/dropped.
+@@ -18,29 +19,37 @@ export class WebviewWindowDragMonitor extends Disposable {
+ 	constructor(targetWindow: CodeWindow, getWebview: () => IWebview | undefined) {
+ 		super();
+ 
++		const tracker = libraryDragSourceFor(targetWindow);
+ 		const onDragStart = () => {
+-			getWebview()?.windowDidDragStart();
++			getWebview()?.windowDidDragStart(tracker.source);
+ 		};
+ 
+-		const onDragEnd = () => {
+-			getWebview()?.windowDidDragEnd();
++		const restore = () => getWebview()?.windowDidDragEnd();
++		const onDragEnd = (event: Event) => {
++			if (tracker.end(targetWindow.performance.timeOrigin + event.timeStamp)) { restore(); }
+ 		};
+ 
+ 		this._register(DOM.addDisposableListener(targetWindow, DOM.EventType.DRAG_START, () => {
+ 			onDragStart();
+ 		}));
+ 
++		this._register(DOM.addDisposableListener(targetWindow, 'library-webview-drag-end', event => {
++			const at = (event as CustomEvent<number>).detail;
++			if (tracker.end(at)) { restore(); }
++		}));
+ 		this._register(DOM.addDisposableListener(targetWindow, DOM.EventType.DRAG_END, onDragEnd));
++		// Editor drop handlers may stop bubbling, so restore webviews during capture.
++		this._register(DOM.addDisposableListener(targetWindow, DOM.EventType.DROP, onDragEnd, true));
+ 
+ 		this._register(DOM.addDisposableListener(targetWindow, DOM.EventType.MOUSE_MOVE, currentEvent => {
+ 			if (currentEvent.buttons === 0) {
+-				onDragEnd();
++				onDragEnd(currentEvent);
+ 			}
+ 		}));
+ 
+ 		this._register(DOM.addDisposableListener(targetWindow, DOM.EventType.DRAG, (event) => {
+ 			if (event.shiftKey) {
+-				onDragEnd();
++				restore();
+ 			} else {
+ 				onDragStart();
+ 			}
+@@ -48,7 +57,7 @@ export class WebviewWindowDragMonitor extends Disposable {
+ 
+ 		this._register(DOM.addDisposableListener(targetWindow, DOM.EventType.DRAG_OVER, (event) => {
+ 			if (event.shiftKey) {
+-				onDragEnd();
++				restore();
+ 			} else {
+ 				onDragStart();
+ 			}
+diff --git a/src/vs/workbench/contrib/webview/common/webview.ts b/src/vs/workbench/contrib/webview/common/webview.ts
+index 6740d6b6d72..a4c7cd124f2 100644
+--- a/src/vs/workbench/contrib/webview/common/webview.ts
++++ b/src/vs/workbench/contrib/webview/common/webview.ts
+@@ -18,6 +18,9 @@ export const webviewMouseActivityEvent = 'vscode-webview-mouse-activity';
+ export interface WebviewMouseActivity {
+ 	readonly screenX: number;
+ 	readonly screenY: number;
++	readonly clientX?: number;
++	readonly clientY?: number;
++	readonly timestamp?: number;
+ }
+ 
+ /**
+diff --git a/src/vs/workbench/services/commands/common/commandService.ts b/src/vs/workbench/services/commands/common/commandService.ts
+index 9e38f1ff9d2..950f8d7011a 100644
+--- a/src/vs/workbench/services/commands/common/commandService.ts
++++ b/src/vs/workbench/services/commands/common/commandService.ts
+@@ -12,6 +12,17 @@ import { IInstantiationService } from '../../../../platform/instantiation/common
+ import { ILogService } from '../../../../platform/log/common/log.js';
+ import { IExtensionService } from '../../extensions/common/extensions.js';
+ 
++const libraryAgentCommands = new Map<string, string>([
++	['chatgpt.openSidebar', 'codex'],
++	['chatgpt.newCodexPanel', 'codex'],
++	['chatgpt.newChat', 'codex'],
++	['claude-vscode.editor.open', 'claude'],
++	['claude-vscode.editor.openLast', 'claude'],
++	['claude-vscode.terminal.open', 'claude'],
++	['claude-vscode.sidebar.open', 'claude'],
++	['claude-vscode.primaryEditor.open', 'claude'],
++]);
++
+ export class CommandService extends Disposable implements ICommandService {
+ 
+ 	declare readonly _serviceBrand: undefined;
+@@ -52,6 +63,13 @@ export class CommandService extends Disposable implements ICommandService {
+ 	async executeCommand<T>(id: string, ...args: unknown[]): Promise<T> {
+ 		this._logService.trace('CommandService#executeCommand', id);
+ 
++		// Library Code: Codex and Claude buttons, keys and palette entries open the chat in the current pane.
++		// Calls between extensions stay in the extension host and never reach this point.
++		const agent = libraryAgentCommands.get(id);
++		if (agent && typeof args[0] !== 'string') {
++			return this.executeCommand<T>('_library.openAgentChat', agent);
++		}
++
+ 		const activationEvent = `onCommand:${id}`;
+ 		const commandIsRegistered = !!CommandsRegistry.getCommand(id);
+ 
+diff --git a/src/vs/workbench/services/commands/test/common/commandService.test.ts b/src/vs/workbench/services/commands/test/common/commandService.test.ts
+index 69ec6fc2aae..a22ff6bc7cd 100644
+--- a/src/vs/workbench/services/commands/test/common/commandService.test.ts
++++ b/src/vs/workbench/services/commands/test/common/commandService.test.ts
+@@ -19,6 +19,17 @@ suite('CommandService', function () {
+ 		store.add(CommandsRegistry.registerCommand('foo', function () { }));
+ 	});
+ 
++	test('provider title commands route to Library while explicit session IDs pass through', async () => {
++		const calls: unknown[][] = [];
++		store.add(CommandsRegistry.registerCommand('_library.openAgentChat', (_accessor, ...args) => calls.push(args)));
++		store.add(CommandsRegistry.registerCommand('claude-vscode.editor.open', (_accessor, ...args) => calls.push(['session', ...args])));
++		const service = store.add(new CommandService(new InstantiationService(), new NullExtensionService(), new NullLogService()));
++		await service.executeCommand('chatgpt.openSidebar');
++		await service.executeCommand('claude-vscode.editor.openLast', { resource: 'editor-title-context' });
++		await service.executeCommand('claude-vscode.editor.open', 'existing-session', undefined, 2);
++		assert.deepStrictEqual(calls, [['codex'], ['claude'], ['session', 'existing-session', undefined, 2]]);
++	});
++
+ 	test('activateOnCommand', () => {
+ 
+ 		let lastEvent: string;
+diff --git a/src/vs/workbench/services/views/browser/viewDescriptorService.ts b/src/vs/workbench/services/views/browser/viewDescriptorService.ts
+index 4ea78aecb09..60c3badc217 100644
+--- a/src/vs/workbench/services/views/browser/viewDescriptorService.ts
++++ b/src/vs/workbench/services/views/browser/viewDescriptorService.ts
+@@ -355,6 +355,7 @@ export class ViewDescriptorService extends Disposable implements IViewDescriptor
+ 		if (!this.canMoveViews()) {
+ 			return;
+ 		}
++		location = location === ViewContainerLocation.AuxiliaryBar ? ViewContainerLocation.Sidebar : location; // Library Code has no secondary side bar
+ 		this.logger.value.trace(`moveViewContainerToLocation: viewContainer:${viewContainer.id} location:${location} reason:${reason}`);
+ 		this.moveViewContainerToLocationWithoutSaving(viewContainer, location, requestedIndex);
+ 		this.saveViewCustomizations();
+@@ -373,6 +374,7 @@ export class ViewDescriptorService extends Disposable implements IViewDescriptor
+ 		if (!this.canMoveViews()) {
+ 			return;
+ 		}
++		location = location === ViewContainerLocation.AuxiliaryBar ? ViewContainerLocation.Sidebar : location; // Library Code has no secondary side bar
+ 		this.logger.value.trace(`moveViewToLocation: view:${view.id} location:${location} reason:${reason}`);
+ 		const container = this.registerGeneratedViewContainer(location);
+ 		this.moveViewsToContainer([view], container);
+diff --git a/src/vs/workbench/test/browser/notificationsToasts.test.ts b/src/vs/workbench/test/browser/notificationsToasts.test.ts
+index 7f631d59801..93e7826ae9b 100644
+--- a/src/vs/workbench/test/browser/notificationsToasts.test.ts
++++ b/src/vs/workbench/test/browser/notificationsToasts.test.ts
+@@ -5,9 +5,12 @@
+ 
+ import assert from 'assert';
+ import { Dimension, getWindow } from '../../../base/browser/dom.js';
++import { timeout } from '../../../base/common/async.js';
+ import { Event } from '../../../base/common/event.js';
+ import { DisposableStore, toDisposable } from '../../../base/common/lifecycle.js';
+ import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../base/test/common/utils.js';
++import { CommandsRegistry, ICommandService } from '../../../platform/commands/common/commands.js';
++import { INotificationsCenterController, registerNotificationCommands } from '../../browser/parts/notifications/notificationsCommands.js';
+ import { Severity } from '../../../platform/notification/common/notification.js';
+ import { NotificationsToasts } from '../../browser/parts/notifications/notificationsToasts.js';
+ import { NotificationsModel } from '../../common/notifications.js';
+@@ -44,6 +47,14 @@ suite('NotificationsToasts', () => {
+ 		testDisposables.add(toDisposable(() => container.remove()));
+ 
+ 		const instantiationService = workbenchInstantiationService(undefined, testDisposables);
++		instantiationService.stub(ICommandService, {
++			executeCommand: async (id: string, ...args: unknown[]) => {
++				const command = CommandsRegistry.getCommand(id);
++				if (command) {
++					return instantiationService.invokeFunction(command.handler, ...args);
++				}
++			}
++		} as ICommandService);
+ 		const model = testDisposables.add(new NotificationsModel());
+ 		testDisposables.add(toDisposable(() => {
+ 			for (const notification of [...model.notifications]) {
+@@ -64,6 +75,45 @@ suite('NotificationsToasts', () => {
+ 		};
+ 	}
+ 
++	test('Library account toast waits during an action and then expires into notification history', async () => {
++		const { model, toasts } = await createToasts();
++		const visible = Event.toPromise(toasts.onDidChangeVisibility);
++		let acting = true;
++		model.addNotification({
++			severity: Severity.Info,
++			message: 'Synthetic account notice',
++			toastTimeout: { milliseconds: 100, isPaused: () => acting }
++		});
++		await visible;
++		await timeout(250);
++		assert.strictEqual(toasts.isVisible, true);
++		const hidden = Event.toPromise(toasts.onDidChangeVisibility);
++		acting = false;
++		await hidden;
++		assert.strictEqual(toasts.isVisible, false);
++		assert.strictEqual(model.notifications.length, 1);
++	});
++
++	test('Library keep-open account toast can be cleared with its accessible close action', async () => {
++		const { container, model, toasts } = await createToasts();
++		disposables.add(registerNotificationCommands({} as INotificationsCenterController, toasts, model));
++		const visible = Event.toPromise(toasts.onDidChangeVisibility);
++		const handle = model.addNotification({
++			severity: Severity.Info,
++			message: 'Synthetic keep-open account notice',
++			toastTimeout: { milliseconds: 0, isPaused: () => false }
++		});
++		await visible;
++		await timeout(250);
++		assert.strictEqual(toasts.isVisible, true);
++		const close = container.querySelector<HTMLElement>('.library-account-notice .action-label[aria-label^="Clear Notification"]');
++		assert.ok(close);
++		const closed = Event.toPromise(handle.onDidClose);
++		close.click();
++		await closed;
++		assert.strictEqual(model.notifications.length, 0);
++	});
++
+ 	test('shows one toast for rapidly added duplicate notifications', async () => {
+ 		const { container, model, toasts } = await createToasts();
+ 		const toastVisible = Event.toPromise(toasts.onDidChangeVisibility);
+diff --git a/src/vs/workbench/test/browser/parts/editor/editorDropTarget.test.ts b/src/vs/workbench/test/browser/parts/editor/editorDropTarget.test.ts
+index 90785b6ffbe..4a682a63cb0 100644
+--- a/src/vs/workbench/test/browser/parts/editor/editorDropTarget.test.ts
++++ b/src/vs/workbench/test/browser/parts/editor/editorDropTarget.test.ts
+@@ -16,6 +16,7 @@ import { IDialogService } from '../../../../../platform/dialogs/common/dialogs.j
+ import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
+ import { LocalSelectionTransfer } from '../../../../../platform/dnd/browser/dnd.js';
+ import { TestInstantiationService } from '../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
++import { IProductService } from '../../../../../platform/product/common/productService.js';
+ import { IThemeService } from '../../../../../platform/theme/common/themeService.js';
+ import { TestThemeService } from '../../../../../platform/theme/test/common/testThemeService.js';
+ import { IWorkspaceContextService } from '../../../../../platform/workspace/common/workspace.js';
+@@ -42,7 +43,7 @@ suite('EditorDropTarget', () => {
+ 		readonly transferKinds: GroupTransferKind[];
+ 	}
+ 
+-	function setup(options?: { readonly contentCoversGroup?: boolean; readonly inputAtBottomEdge?: boolean; readonly dragEditor?: boolean; readonly groupWidth?: number; readonly groupMinimumWidth?: number; readonly fromOtherPart?: boolean; readonly moveVeto?: string; readonly closeEmptyGroups?: boolean; readonly sourceCount?: number; readonly dragGroup?: boolean; readonly addsGroupsToSourcePart?: boolean; readonly inputAccepts?: boolean; readonly dropIntoEditor?: boolean; readonly inputArea?: boolean }): ITestSetup {
++	function setup(options?: { readonly library?: boolean; readonly contentCoversGroup?: boolean; readonly inputAtBottomEdge?: boolean; readonly dragEditor?: boolean; readonly groupWidth?: number; readonly groupMinimumWidth?: number; readonly fromOtherPart?: boolean; readonly moveVeto?: string; readonly closeEmptyGroups?: boolean; readonly sourceCount?: number; readonly dragGroup?: boolean; readonly addsGroupsToSourcePart?: boolean; readonly inputAccepts?: boolean; readonly dropIntoEditor?: boolean; readonly inputArea?: boolean }): ITestSetup {
+ 		const operations: string[] = [];
+ 		const transferKinds: GroupTransferKind[] = [];
+ 
+@@ -132,6 +133,7 @@ suite('EditorDropTarget', () => {
+ 
+ 		const instantiation = store.add(new TestInstantiationService());
+ 		instantiation.stub(IThemeService, new TestThemeService());
++		instantiation.stub(IProductService, { applicationName: options?.library ? 'library-code' : 'code-oss' });
+ 		instantiation.stub(IConfigurationService, new TestConfigurationService({ 'editor.dropIntoEditor.enabled': !!options?.dropIntoEditor }));
+ 		instantiation.stub(IEditorGroupsService, new class extends mock<IEditorGroupsService>() {
+ 			override readonly groups = [groupView];
+@@ -276,6 +278,44 @@ suite('EditorDropTarget', () => {
+ 		});
+ 	});
+ 
++	for (const { name, x, y, direction } of [
++		{ name: 'right', x: 245, y: 150, direction: GroupDirection.RIGHT },
++		{ name: 'bottom', x: 150, y: 255, direction: GroupDirection.DOWN },
++		{ name: 'left', x: 55, y: 150, direction: GroupDirection.LEFT },
++		{ name: 'top', x: 150, y: 55, direction: GroupDirection.UP },
++		{ name: 'bottom corner nearest bottom', x: 245, y: 280, direction: GroupDirection.DOWN },
++		{ name: 'bottom corner nearest right', x: 280, y: 255, direction: GroupDirection.RIGHT },
++		{ name: 'center', x: 150, y: 100, direction: undefined },
++	]) {
++		test(`Library editor drop uses a generous ${name} target`, () => {
++			const { groupElement, operations } = setup({ library: true, inputAccepts: false });
++			dispatch(groupElement, 'dragenter', x, y);
++			dispatch(getOverlay(groupElement)!, 'drop', x, y);
++			dispatch(groupElement, 'dragend', x, y);
++			assert.deepStrictEqual(operations, direction === undefined
++				? ['move 1 editor(s) to target group']
++				: [`split ${direction}`, 'move 1 editor(s) to new group']);
++		});
++	}
++
++	test('Library drop uses the release position when it moves beyond the last dragover', () => {
++		const { groupElement, operations } = setup({ library: true, inputAccepts: false });
++		dispatch(groupElement, 'dragenter', 245, 150);
++		const overlay = getOverlay(groupElement)!;
++		dispatch(overlay, 'dragover', 245, 150);
++		dispatch(overlay, 'drop', 150, 255);
++		dispatch(groupElement, 'dragend', 150, 255);
++		assert.deepStrictEqual(operations, [`split ${GroupDirection.DOWN}`, 'move 1 editor(s) to new group']);
++	});
++
++	test('upstream editor drops preserve the narrower edge threshold', () => {
++		const { groupElement, operations } = setup({ inputAccepts: false });
++		dispatch(groupElement, 'dragenter', 245, 150);
++		dispatch(getOverlay(groupElement)!, 'drop', 245, 150);
++		dispatch(groupElement, 'dragend', 245, 150);
++		assert.deepStrictEqual(operations, ['move 1 editor(s) to target group']);
++	});
++
+ 	test('an editor dropped on an edge of a group of another part, which it cannot go to, adds no group and moves nothing', () => {
+ 		const { groupElement, operations } = setup({ fromOtherPart: true, moveVeto: 'Cannot leave' });
+ 
