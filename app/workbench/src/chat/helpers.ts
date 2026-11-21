@@ -13,7 +13,12 @@ export function conversationOutputs(chat:any,events:any[],text:string,host_id:st
 
 /** Broker profile IDs and native provider identity UUIDs are separate namespaces. */
 export const nativeAccount=(meta:any)=>meta?.account_id||meta?.account||'';
-export const accountLabel=(account:any)=>`${account.email||account.label||account.id}${account.plan?' ('+account.plan+')':''}`;
+// Profiles can share one login email; then the profile label tells them apart.
+export function accountLabel(account:any,accounts:any[]=[]){
+ const email=account.email||'',label=account.label&&account.label!==email?account.label:'',peers=accounts.filter(a=>a.id!==account.id&&(a.tool||a.provider)===(account.tool||account.provider));
+ const name=email&&!peers.some(a=>a.email===email)?email:label&&email?label+' · '+email:label||email||account.id;
+ return name+(account.plan?' ('+account.plan+')':'');
+}
 export function executionDefaults(state:any,defaults:any){
  const changes:any={...(defaults.nativeAccount?{nativeAccount:defaults.nativeAccount}:{}),...(defaults.selectedAccount?{selectedAccount:defaults.selectedAccount}:{})};
  for(const key of ['provider','model','effort','account','host_id','cwd'])if(defaults[key]!==undefined&&!state.executionOverrides?.[key])changes[key]=defaults[key];

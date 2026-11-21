@@ -1,19 +1,23 @@
 import {describe,it,expect} from 'vitest';
-import {composerModels,currentClaudeModels} from './modelCatalog';
-describe('current Claude model choices',()=>{
- it('shows exact current versions even while an older broker remains running',()=>{
-  const models=composerModels('claude',[{id:'',name:'Default'},{id:'opus',name:'Opus 5'},{id:'custom-model',name:'Custom'}]);
-  expect(models.slice(1,5).map(m=>m.id)).toEqual(currentClaudeModels.map(m=>m.id));
-  expect(models.find(m=>m.id==='opus')?.label).toBe('Opus (CLI alias)');
-  expect(models.some(m=>m.id==='custom-model')).toBe(true);
+import {readFileSync} from 'node:fs';
+import {composerModels} from './modelCatalog';
+// Shape of the server list: exact versions from the tiers file, then the CLI aliases.
+const claude=[{id:'claude-fable-9-1',name:'Fable 9.1'},{id:'claude-opus-9-5',name:'Opus 9.5'},{id:'claude-sonnet-9-5',name:'Sonnet 9.5'},{id:'',name:'Session default'},
+ {id:'opus',name:'Opus (CLI alias)'},{id:'opus[1m]',name:'Opus (1M context)'},{id:'sonnet',name:'Sonnet (CLI alias)'},{id:'sonnet[1m]',name:'Sonnet (1M context)'},{id:'haiku',name:'Haiku (CLI alias)'},{id:'fable',name:'Fable (CLI alias)'}];
+const labels=(models:any[])=>models.filter(m=>m.id).map(m=>m.label);
+describe('composer model choices',()=>{
+ it('shows each model once and puts the 1M variant after its base',()=>{
+  expect(labels(composerModels('claude',claude))).toEqual(['Fable 9.1','Opus 9.5','Opus 9.5 (1M context)','Sonnet 9.5','Sonnet 9.5 (1M context)','Haiku (CLI alias)']);
  });
- it('preserves native metadata and avoids duplicate explicit choices',()=>{
-  const models=composerModels('claude',[{id:'claude-opus-5-5',name:'Old label',efforts:['high']}]);
-  expect(models.filter(m=>m.id==='claude-opus-5-5')).toHaveLength(1);
-  expect(models[0].name).toBe('Opus 5.5');
-  expect(models[0].efforts).toEqual(['high']);
+ it('keeps a saved alias as the selected value instead of adding a duplicate row',()=>{
+  const models=composerModels('claude',claude,'opus');
+  expect(models.filter(m=>m.label==='Opus 9.5').map(m=>m.id)).toEqual(['opus']);
+  expect(new Set(labels(models)).size).toBe(labels(models).length);
  });
- it('keeps the advertised Codex catalog unchanged',()=>{
-  const models=[{id:'codex-test',name:'Test'}];expect(composerModels('codex',models)).toBe(models);
+ it('keeps distinct Codex models unchanged in order',()=>{
+  expect(composerModels('codex',[{id:'',name:'Session default'},{id:'codex-a',name:'A'},{id:'codex-b',name:'B'}]).map(m=>m.id)).toEqual(['','codex-a','codex-b']);
+ });
+ it('hard-codes no model id',()=>{
+  expect(readFileSync(new URL('./modelCatalog.ts',import.meta.url),'utf8')).not.toMatch(/claude-[a-z]+-\d/);
  });
 });

@@ -1,17 +1,17 @@
-// Verified against https://platform.claude.com/docs/en/models/overview,
-// 2026-11-15. Explicit IDs avoid changing the chosen version behind an alias.
-// Provider/account restrictions are still enforced by the native CLI.
-export const currentClaudeModels=[
- {id:'claude-opus-5-5',name:'Opus 5.5'},
- {id:'claude-sonnet-5-5',name:'Sonnet 5.5'},
- {id:'claude-fable-5-2',name:'Fable 5.2'},
- {id:'claude-haiku-5-5',name:'Haiku 5.5'},
-];
-export function composerModels(provider:string,advertised:any[]=[]){
- if(provider!=='claude')return advertised;
- const currentIds=new Set(currentClaudeModels.map(m=>m.id));
- const aliases=advertised.filter(m=>!currentIds.has(m.id)).map(model=>/^(?:opus|sonnet|haiku|fable)(?:\[1m\])?$/.test(model.id)?{...model,label:model.id.replace(/\[1m\]$/,'').replace(/^./,(c:string)=>c.toUpperCase())+(model.id.endsWith('[1m]')?' (1M context)':'')+' (CLI alias)'}:model);
- const versions=currentClaudeModels.map(model=>({...advertised.find(m=>m.id===model.id),...model}));
- const defaults=aliases.filter(m=>!m.id),others=aliases.filter(m=>m.id);
- return [...defaults,...versions,...others];
+import {modelDisplay} from './modelDisplay';
+// The server builds the list: Claude versions from the tiers file named by config models_file,
+// Codex from ~/.codex/models_cache.json. Nothing is hard-coded here.
+// Aliases such as opus resolve to an exact version that is also listed, so each model is shown
+// once: the selected id wins (a saved alias stays selected) and a 1M-context variant follows its base.
+export function composerModels(provider:string,advertised:any[]=[],selected='',catalog:any[]=advertised){
+ const out:any[]=[],first=new Map<string,number>();
+ for(const model of advertised){
+  if(!model.id){out.push(model);continue}
+  const label=modelDisplay(model,catalog)+(/\[1m\]$/i.test(model.id)?' (1M context)':'');
+  const at=first.get(label);
+  if(at===undefined){first.set(label,out.length);out.push({...model,label});}
+  else if(model.id===selected)out[at]={...model,label};
+ }
+ const rank=(m:any,i:number)=>m.id?2*(first.get(String(m.label).replace(/ \(1M context\)$/,''))??i)+(String(m.label).endsWith(' (1M context)')?1:0):2*i;
+ return out.map((m,i)=>[rank(m,i),m] as const).sort((a,b)=>a[0]-b[0]).map(([,m])=>m);
 }
