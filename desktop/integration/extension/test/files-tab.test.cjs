@@ -77,3 +77,25 @@ test('creation refuses traversal, symlink escapes, remote writes and invalid typ
   await assert.rejects(t.tab.request('/api/files/create',{root_id:'r1',path:'no.txt',type:'file'}),e=>e.data.code==='read_only');
  }finally{nodeFs.rmSync(path.dirname(t.a),{recursive:true,force:true});}
 });
+
+test('renames through a workspace edit, moves items to the Trash, writes dropped files and removes a folder from the workspace',async()=>{
+ const t=setup(),trashed=[];
+ t.vscode.workspace.fs.delete=async(u,o)=>{assert.equal(o.useTrash,true);trashed.push(u.fsPath);nodeFs.rmSync(u.fsPath,{recursive:true});};
+ t.vscode.workspace.fs.writeFile=async(u,b)=>nodeFs.writeFileSync(u.fsPath,b,{flag:'wx'});
+ assert.equal((await t.tab.request('/api/files/rename',{root_id:t.ra,path:'note.md',name:'renamed.md'})).path,'renamed.md');
+ assert.equal(nodeFs.readFileSync(path.join(t.a,'renamed.md'),'utf8'),'a');assert.equal(t.vscode.renames.length,1);
+ await assert.rejects(t.tab.request('/api/files/rename',{root_id:t.ra,path:'renamed.md',name:'docs'}),e=>e.data.code==='destination_exists');
+ await assert.rejects(t.tab.request('/api/files/rename',{root_id:t.ra,path:'renamed.md',name:'a/b'}),e=>e.data.code==='invalid_name');
+ const tab=(p,isDirty=false)=>({input:{uri:Uri.file(p)},isDirty}),closed=[];
+ const open=[tab(path.join(t.a,'docs','inner','deep.txt')),tab(path.join(t.a,'docs','draft.md'),true),tab(path.join(t.a,'docs2.md')),{input:{original:Uri.file(path.join(t.a,'docs','x')),modified:Uri.file(path.join(t.a,'docs','x'))},isDirty:false}];
+ t.vscode.window={tabGroups:{all:[{tabs:open}],close:async list=>{closed.push(...list);return true;}}};
+ await t.tab.request('/api/files/trash',{root_id:t.ra,paths:['docs']});
+ assert.deepEqual(trashed,[path.join(t.a,'docs')]);
+ assert.deepEqual(closed,[open[0],open[3]],'tabs inside the deleted folder close; the dirty tab and a sibling stay');
+ assert.equal((await t.tab.request('/api/files/upload',{root_id:t.rb,dir:'',name:'note.md',data:Buffer.from('dropped').toString('base64')})).path,'note copy.md');
+ assert.equal(nodeFs.readFileSync(path.join(t.b,'note copy.md'),'utf8'),'dropped');assert.equal(nodeFs.readFileSync(path.join(t.b,'note.md'),'utf8'),'b');
+ const removed=[];t.vscode.workspace.updateWorkspaceFolders=(i,n)=>{removed.push([i,n]);return true;};
+ await t.tab.request('/api/files/roots/remove',{root_id:t.rb});assert.deepEqual(removed,[[1,1]]);assert.ok(nodeFs.existsSync(path.join(t.b,'note.md')));
+ t.vscode.workspace.workspaceFolders.push({uri:new Uri('/','library-file','r1'),name:'proj · Cluster',index:2});
+ await assert.rejects(t.tab.request('/api/files/trash',{root_id:'r1',paths:['x']}),e=>e.data.code==='read_only');
+});

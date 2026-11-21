@@ -1,5 +1,5 @@
 import {describe,expect,it} from 'vitest';
-import {refusal,moving,confirmation,followMove} from './fileMoves';
+import {refusal,moving,confirmation,followMove,deletedBy} from './fileMoves';
 import {resourceId} from '../open/links';
 
 const item=(path:string,type='file',rid='a',host='mac')=>({rid,path,name:path.split('/').at(-1)!,type,host});
@@ -19,6 +19,14 @@ describe('file moves',()=>{
   const moved=[{from:'/same/file.md',to:'/dest/file.md',root_id:'remote',from_host:'mac',to_host:'cluster'}];
   expect(followMove({kind:'file',host_id:'mac',path:'/same/file.md'},moved)).toEqual({path:'/dest/file.md',root_id:'remote',host_id:'cluster'});
   expect(followMove({kind:'file',host_id:'cluster',path:'/same/file.md'},moved)).toBeUndefined();
+ });
+ it('matches tabs of a deleted file or of files inside a deleted folder on the same host',()=>{
+  const deleted=[{path:'/ws/docs',host:'mac'},{path:'/ws/note.md'}];
+  expect(deletedBy({kind:'file',path:'/ws/note.md'},deleted)).toBe(true);
+  expect(deletedBy({kind:'file',host_id:'mac',path:'/ws/docs/inner/deep.txt'},deleted)).toBe(true);
+  expect(deletedBy({kind:'file',path:'/ws/docs2/x.md'},deleted)).toBe(false);
+  expect(deletedBy({kind:'file',host_id:'cluster',path:'/ws/note.md'},deleted)).toBe(false);
+  expect(deletedBy({kind:'chat',path:'/ws/note.md'},deleted)).toBe(false);
  });
  it('skips items already in the destination unless copying',()=>{
   expect(moving([item('docs/x.md')],target('docs','a'),false)).toEqual([]);

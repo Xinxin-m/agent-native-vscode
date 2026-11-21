@@ -170,6 +170,7 @@ class FileService:
         self.lock = threading.RLock()
         self.refs = {}
         self.moves = {}
+        self.default_root = default_root
         self.roots = read_json(self.data / 'workbench-roots.json', {})
         if default_root and os.path.isdir(default_root):
             root = self._root(default_root, 'write')
@@ -521,6 +522,72 @@ class FileService:
                     raise FileError('destination_exists', 'A file or folder with this name already exists', 409)
         return {'ok':True, 'root_id':rid, 'path':'/'.join(components), 'type':kind}
 
+    def _writable(self, rid, path):
+        root = self.get_root(rid)
+        if root.get('host_id', 'mac') != 'mac' or root['access'] != 'write':
+            raise FileError('read_only', 'This workspace is read-only', 403)
+        components = parts(path)
+        if not components:
+            raise FileError('invalid_path', 'A workspace root cannot be changed here')
+        return root, components
+
+    def rename(self, rid, path, name):
+        if not isinstance(name, str) or name in ('', '.', '..') or '/' in name or '\0' in name:
+            raise FileError('invalid_name', 'Enter a name without slashes')
+        with self.lock:
+            root, components = self._writable(rid, path)
+            with self.directory(root, components[:-1]) as parent:
+                os.stat(components[-1], dir_fd=parent, follow_symlinks=False)
+                # A case-only rename is allowed on a case-insensitive disk.
+                if name.lower() != components[-1].lower() and name in os.listdir(parent):
+                    raise FileError('destination_exists', name + ' already exists here', 409)
+                os.rename(components[-1], name, src_dir_fd=parent, dst_dir_fd=parent)
+        return {'ok':True, 'root_id':rid, 'path':'/'.join(components[:-1] + [name])}
+
+    def trash(self, rid, paths):
+        """Move items to the macOS Trash (recoverable); never unlink."""
+        if not isinstance(paths, list) or not 0 < len(paths) <= 500:
+            raise FileError('invalid_request', 'Choose files or folders to delete')
+        trash = os.path.join(os.path.expanduser('~'), '.Trash')
+        moved = []
+        with self.lock:
+            for path in paths:
+                root, components = self._writable(rid, path)
+                with self.directory(root, components[:-1]) as parent:
+                    os.stat(components[-1], dir_fd=parent, follow_symlinks=False)
+                    name = free_name(trash, components[-1], os.path.isdir(os.path.join(root['path'], *components)))
+                    # A rename into ~/.Trash works without the Full Disk Access that listing it needs.
+                    os.rename(components[-1], os.path.join(trash, name), src_dir_fd=parent)
+                moved.append({'path':'/'.join(components), 'trash':os.path.join(trash, name)})
+        return {'ok':True, 'root_id':rid, 'trashed':moved}
+
+    def upload(self, rid, directory, name, data):
+        """Write a dropped file (base64) into a folder, keeping both on a name clash."""
+        if not isinstance(name, str) or name in ('', '.', '..') or '/' in name or '\0' in name:
+            raise FileError('invalid_name', 'The dropped file has no usable name')
+        raw = base64.b64decode(data or '', validate=True)
+        with self.lock:
+            root = self.get_root(rid)
+            if root.get('host_id', 'mac') != 'mac' or root['access'] != 'write':
+                raise FileError('read_only', 'This workspace is read-only', 403)
+            components = parts(directory)
+            with self.directory(root, components) as parent:
+                name = free_name(os.path.join(root['path'], *components), name)
+                fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=parent)
+                with os.fdopen(fd, 'wb') as handle:
+                    handle.write(raw)
+        return {'ok':True, 'root_id':rid, 'path':'/'.join(components + [name])}
+
+    def unregister(self, rid):
+        """Remove a workspace from the list. Its files are untouched."""
+        with self.lock:
+            root = self.get_root(rid)
+            if self.default_root and root['path'] == os.path.realpath(self.default_root) and root.get('host_id') == 'mac':
+                raise FileError('default_root', "The Library's own folder is always listed", 409)
+            self.roots.pop(root['id'])
+            atomic_json(self.data / 'workbench-roots.json', self.roots)
+        return {'ok':True, 'removed':root['id']}
+
     def _local_path(self, root, components, write=True):
         if root.get('host_id', 'mac') != 'mac':
             raise FileError('read_only', 'Remote files are read-only', 403)
@@ -747,6 +814,26 @@ def move(req, query, body):
 
 
 @guarded
+def rename(req, query, body):
+    return instance().rename(body.get('root_id'), body.get('path'), body.get('name'))
+
+
+@guarded
+def trash(req, query, body):
+    return instance().trash(body.get('root_id'), body.get('paths'))
+
+
+@guarded
+def upload(req, query, body):
+    return instance().upload(body.get('root_id'), body.get('dir', ''), body.get('name'), body.get('data'))
+
+
+@guarded
+def remove_root(req, query, body):
+    return instance().unregister(body.get('root_id'))
+
+
+@guarded
 def undo_move(req, query, body):
     return instance().undo_move(body.get('token'))
 
@@ -841,5 +928,7 @@ ROUTES = {('GET','/api/files/roots'):roots,('POST','/api/files/roots'):roots,
           ('GET','/api/files/diff'):diff,
           ('GET','/api/files/content'):content,('HEAD','/api/files/content'):content,
           ('POST','/api/files/reference'):reference,('POST','/api/files/save'):save,
-          ('POST','/api/files/create'):create,('POST','/api/files/copy'):copy,('POST','/api/files/move'):move,('POST','/api/files/move/undo'):undo_move}
+          ('POST','/api/files/create'):create,('POST','/api/files/copy'):copy,('POST','/api/files/move'):move,('POST','/api/files/move/undo'):undo_move,
+          ('POST','/api/files/rename'):rename,('POST','/api/files/trash'):trash,('POST','/api/files/upload'):upload,
+          ('POST','/api/files/roots/remove'):remove_root}
 BACKGROUND = []

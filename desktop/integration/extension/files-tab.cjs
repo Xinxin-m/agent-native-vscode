@@ -103,6 +103,43 @@ function create(vscode,{api,backups}){
   catch(error){if(error.code==='EEXIST')throw fail('destination_exists','A file or folder with this name already exists',409);throw error;}
   return {ok:true,root_id,path:names.join('/'),type};
  }
+ const local=root=>{if(root.host_id!=='mac'||root.uri.scheme!=='file'||root.access!=='write')throw fail('read_only','This workspace is read-only',403);return root;};
+ const validName=name=>{if(typeof name!=='string'||!name||name==='.'||name==='..'||/[\\/\0]/.test(name))throw fail('invalid_name','Enter a name without slashes');return name;};
+ // Rename through a WorkspaceEdit so open editors follow; never replace an existing item.
+ async function renameItem({root_id,path,name}={}){
+  const root=local(find(await roots(),root_id)),names=parts(path);validName(name);
+  if(!names.length)throw fail('invalid_path','A workspace root cannot be changed here');
+  const from=at(root,path),to=vscode.Uri.joinPath(from,'..',name);
+  if(name.toLowerCase()!==names.at(-1).toLowerCase()&&await exists(to))throw fail('destination_exists',name+' already exists here',409);
+  await rename(from,to);return {ok:true,root_id,path:[...names.slice(0,-1),name].join('/')};
+ }
+ async function trashItems({root_id,paths}={}){
+  if(!Array.isArray(paths)||!paths.length||paths.length>500)throw fail('invalid_request','Choose files or folders to delete');
+  const root=local(find(await roots(),root_id)),trashed=[];
+  const gone=[];
+  for(const path of paths){if(!parts(path).length)throw fail('invalid_path','A workspace root cannot be changed here');await fs.delete(at(root,path),{recursive:true,useTrash:true});gone.push(at(root,path).fsPath);trashed.push({path:parts(path).join('/')});}
+  await closeTabs(gone).catch(()=>{});
+  return {ok:true,root_id,trashed};
+ }
+ // Close the editor tabs of deleted files; a tab with unsaved edits stays open, marked deleted by the editor.
+ async function closeTabs(paths){
+  const inside=uri=>uri?.scheme==='file'&&paths.some(p=>uri.fsPath===p||uri.fsPath.startsWith(p+'/'));
+  const tabs=(vscode.window?.tabGroups?.all||[]).flatMap(g=>g.tabs).filter(t=>!t.isDirty&&(inside(t.input?.uri)||inside(t.input?.modified)));
+  if(tabs.length)await vscode.window.tabGroups.close(tabs);
+ }
+ async function upload({root_id,dir='',name,data}={}){
+  const root=local(find(await roots(),root_id)),folder=at(root,dir);validName(name);
+  const free=freeName(new Set((await fs.readDirectory(folder)).map(([n])=>n)),name,false);
+  await fs.writeFile(vscode.Uri.joinPath(folder,free),Buffer.from(String(data||''),'base64'));
+  return {ok:true,root_id,path:[...parts(dir),free].join('/')};
+ }
+ // Removes the folder from this window's workspace; its files are untouched.
+ async function removeRoot({root_id}={}){
+  const index=(vscode.workspace.workspaceFolders||[]).findIndex(f=>rootId(f.uri)===root_id);
+  if(index<0)throw fail('not_found','This workspace is no longer open',404);
+  if(!vscode.workspace.updateWorkspaceFolders(index,1))throw fail('remove_failed','The folder was not removed',500);
+  return {ok:true,removed:root_id};
+ }
  async function request(path,body){
   const [route,search]=String(path).split('?'),query=Object.fromEntries(new URLSearchParams(search||''));
   if(route==='/api/files/roots'&&body===undefined)return {ok:true,roots:(await roots()).map(({uri,...root})=>root)};
@@ -110,6 +147,10 @@ function create(vscode,{api,backups}){
   if(route==='/api/files/create'&&body!==undefined)return createItem(body);
   if(route==='/api/files/move'&&body!==undefined)return move(body);
   if(route==='/api/files/move/undo'&&body!==undefined)return undo(body);
+  if(route==='/api/files/rename'&&body!==undefined)return renameItem(body);
+  if(route==='/api/files/trash'&&body!==undefined)return trashItems(body);
+  if(route==='/api/files/upload'&&body!==undefined)return upload(body);
+  if(route==='/api/files/roots/remove'&&body!==undefined)return removeRoot(body);
   throw fail('unsupported','The Files tab does not support this request',404);
  }
  // The Files tab's id for a workspace folder: its URI on this Mac, the Library root id for a remote one.

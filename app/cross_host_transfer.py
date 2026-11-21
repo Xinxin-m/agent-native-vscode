@@ -188,10 +188,27 @@ def rename_exclusive(source_fd, source, dest_fd, dest):
     elif hasattr(libc, 'renameatx_np'):
         result = libc.renameatx_np(source_fd, os.fsencode(source), dest_fd, os.fsencode(dest), 0x4)
     else:
-        raise OSError('This filesystem does not support atomic no-replace transfers')
+        return claim_and_rename(source_fd, source, dest_fd, dest)
     if result:
         code = ctypes.get_errno()
-        raise OSError(code, os.strerror(code))
+        if code not in (errno.EINVAL, errno.ENOSYS, errno.ENOTSUP, errno.EOPNOTSUPP):
+            raise OSError(code, os.strerror(code))
+        claim_and_rename(source_fd, source, dest_fd, dest)
+
+
+def claim_and_rename(source_fd, source, dest_fd, dest):
+    """No-replace rename for filesystems without the flag (NFS answers EINVAL). A file is hard-linked
+    (fails if dest exists), then unlinked; a folder first claims dest as an empty folder, which rename may replace."""
+    if stat.S_ISDIR(os.stat(source, dir_fd=source_fd, follow_symlinks=False).st_mode):
+        os.mkdir(dest, 0o700, dir_fd=dest_fd)
+        try:
+            os.rename(source, dest, src_dir_fd=source_fd, dst_dir_fd=dest_fd)
+        except BaseException:
+            os.rmdir(dest, dir_fd=dest_fd)
+            raise
+    else:
+        os.link(source, dest, src_dir_fd=source_fd, dst_dir_fd=dest_fd, follow_symlinks=False)
+        os.unlink(source, dir_fd=source_fd)
 
 
 def perform(request):
@@ -265,9 +282,13 @@ def perform(request):
         if parts(name) != [name]:
             raise ValueError('Invalid trash name')
         info_path = None
-        with directory(root, '/'.join(names[:-1])) as sourcefd, directory(trash) as trashfd:
-            if os.fstat(sourcefd).st_dev != os.fstat(trashfd).st_dev:
-                return {'ok':True, 'path':os.path.join(root,backup), 'kind':'staging', 'warning':'Trash is on another filesystem; source recovery data was retained in place'}
+        with directory(root, '/'.join(names[:-1])) as sourcefd:
+            if os.fstat(sourcefd).st_dev != os.stat(trash).st_dev:
+                if mac:
+                    return {'ok':True, 'path':os.path.join(root,backup), 'kind':'staging', 'warning':'Trash is on another filesystem; source recovery data was retained in place'}
+                # Freedesktop per-volume trash, kept inside the workspace (a cluster home can be NFS while the login home is AFS).
+                trash = os.path.join(root, '.Trash-%d' % os.getuid(), 'files')
+                os.makedirs(trash, mode=0o700, exist_ok=True)
             if not mac:
                 info = os.path.join(os.path.dirname(trash),'info')
                 os.makedirs(info,mode=0o700,exist_ok=True)
@@ -275,7 +296,18 @@ def perform(request):
                 with open(info_path,'x',encoding='utf-8') as file:
                     file.write('[Trash Info]\nPath='+quote(os.path.join(root,request['original']))+'\nDeletionDate='+time.strftime('%Y-%m-%dT%H:%M:%S')+'\n')
             try:
-                rename_exclusive(sourcefd,names[-1],trashfd,name)
+                try:
+                    trashfd = os.open(trash, os.O_RDONLY | os.O_DIRECTORY)
+                except PermissionError:
+                    # macOS privacy rules refuse opening ~/.Trash without Full Disk Access but allow a rename into it.
+                    if not mac or os.path.lexists(os.path.join(trash, name)):
+                        raise
+                    os.rename(names[-1], os.path.join(trash, name), src_dir_fd=sourcefd)
+                else:
+                    try:
+                        rename_exclusive(sourcefd,names[-1],trashfd,name)
+                    finally:
+                        os.close(trashfd)
             except BaseException:
                 if info_path:
                     os.unlink(info_path)

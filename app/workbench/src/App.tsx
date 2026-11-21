@@ -17,7 +17,7 @@ import {Projects} from './navigation/Projects';
 import {Recent} from './navigation/Recent';
 import {FileViewer} from './viewers/FileViewer';
 import {FilesTab} from './navigation/FileTree';
-import {followMove} from './navigation/fileMoves';
+import {followMove,deletedBy} from './navigation/fileMoves';
 import {reuseSnapshot,peerRoster} from './state/pollingSnapshots';
 import {documentKey,snapshot,resolveFile,acceptTransferredDraft,useFileDocument,moveDocument} from './viewers/documents';
 import {windowIdentity,viewIdentity,filePreviewGroup,createPaneNavigation,createWindowTransfers,createNarrowPaneController,dropWorkspaceResource,findOpenChat,mergePaneInto,conversationTransferSnapshot,acceptTransferredConversation} from './state/workspace';
@@ -144,7 +144,9 @@ export default function App(){
  const [addState,setAdd]=useState<{x:number,y:number,groupId:string,destination?:Destination,pick?:boolean}|null>(null);
  const addMenu=(e:any,groupId:string)=>{const rect=e.currentTarget.getBoundingClientRect();setAdd({x:Math.max(12,Math.min(rect.left,innerWidth-252)),y:rect.bottom+4,groupId});};
  // An open file follows a move or rename; unsaved text moves with it.
- useEffect(()=>{const follow=(e:any)=>{for(const p of dock.current?.panels||[]){const r=p.params.resource,next=followMove(r,e.detail.moves);if(!next)continue;const title=next.path.split('/').at(-1)||next.path,moved={...r,...next,file_id:undefined,title};moveDocument(r,moved);p.api.updateParameters({...p.params,resource:moved});p.api.setTitle(r.mode==='diff'?title+' · Changes':title);}};window.addEventListener('library-files-moved',follow);return()=>window.removeEventListener('library-files-moved',follow);},[]);
+ useEffect(()=>{const follow=(e:any)=>{for(const p of dock.current?.panels||[]){const r=p.params.resource,next=followMove(r,e.detail.moves);if(!next)continue;const title=next.path.split('/').at(-1)||next.path,moved={...r,...next,file_id:undefined,title};moveDocument(r,moved);p.api.updateParameters({...p.params,resource:moved});p.api.setTitle(r.mode==='diff'?title+' · Changes':title);}
+  // Tabs of deleted files close; one with unsaved edits stays open and shows that its file is gone.
+  for(const p of [...(dock.current?.panels||[])])if(deletedBy(p.params.resource,e.detail.deleted||[])&&!snapshot(documentKey(p.params.resource)).dirty)p.api.close();};window.addEventListener('library-files-moved',follow);return()=>window.removeEventListener('library-files-moved',follow);},[]);
  const showMenu=(e:any,resource:Resource,panelId?:string,actions?:{label:string,disabled?:boolean,run:()=>void}[])=>{e.preventDefault?.();e.stopPropagation?.();const rect=e.currentTarget?.getBoundingClientRect();setMenu({x:Math.min(e.clientX||rect?.left||100,innerWidth-255),y:Math.min(e.clientY||rect?.bottom||80,innerHeight-470),resource,panelId,actions});};
  const showHistory=(groupId?:string,panelId?:string)=>{setHistory({groupId,panelId});setHistoryQuery('');};
  // Load the picked chat into the tab that asked; keep that tab if it holds a draft or a running turn.

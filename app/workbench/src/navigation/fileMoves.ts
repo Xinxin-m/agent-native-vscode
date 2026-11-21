@@ -31,3 +31,8 @@ export function followMove(r:{kind:string,host_id?:string,path?:string},moves:Mo
  if(r.kind!=='file'||!r.path)return;
  for(const m of moves)if((r.host_id||'mac')===(m.from_host||'mac')&&(r.path===m.from||r.path.startsWith(m.from+'/')))return {path:m.to+r.path.slice(m.from.length),root_id:m.root_id,...(m.to_host?{host_id:m.to_host}:{})};
 }
+
+// A deleted file or folder in absolute paths; tabs showing it or anything inside it close.
+export type Deleted={path:string,host?:string};
+export const deletedBy=(r:{kind:string,host_id?:string,path?:string},deleted:Deleted[])=>
+ r.kind==='file'&&!!r.path&&deleted.some(d=>(r.host_id||'mac')===(d.host||'mac')&&(r.path===d.path||r.path!.startsWith(d.path+'/')));

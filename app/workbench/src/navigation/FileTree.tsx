@@ -5,7 +5,7 @@ import {api,query,ApiError} from '../api/client';
 import {coveringRoot} from '../viewers/helpers';
 import {relativeFilePath} from '../state/workspace';
 import {parseFileLink} from '../open/links';
-import {refusal,moving,confirmation,parentPath,place,type DragItem,type Target,type Moved} from './fileMoves';
+import {refusal,moving,confirmation,parentPath,place,type DragItem,type Target,type Moved,type Deleted} from './fileMoves';
 import type {Resource} from '../state/types';
 import {creationLocation,initialWorkspace} from './fileCreation';
 import {dismissPopover} from './dismissPopover';
@@ -18,7 +18,7 @@ type Ask={message:string,buttons:string[],resolve:(choice:string)=>void};
 type Tab={root:string,path?:string,host?:string,storageKey:string,choose:(root:string,title:string)=>void};
 // Shared by the side menu and every Files tab, so a drag can end in another tree.
 const dragging:{current:DragItem[]|null}={current:null};
-const announce=(moves:Moved[],touched:string[])=>window.dispatchEvent(new CustomEvent('library-files-moved',{detail:{moves,touched}}));
+const announce=(moves:Moved[],touched:string[],deleted:Deleted[]=[])=>window.dispatchEvent(new CustomEvent('library-files-moved',{detail:{moves,touched,deleted}}));
 
 // All workspace roots in one tree. Drag moves files and folders within and across roots and trees; Alt copies.
 export function FileTree({onContext,tab}:{onContext?:any,tab?:Tab}){
@@ -35,10 +35,14 @@ export function FileTree({onContext,tab}:{onContext?:any,tab?:Tab}){
  const [contextFolder,setContextFolder]=useState<{rid:string,path:string}|null>(null);
  const [rowMenu,setRowMenu]=useState<{x:number,y:number,path:string,items:{label:string,disabled:boolean,run:()=>void}[]}|null>(null),rowMenuRef=useRef<HTMLDivElement>(null);
  useEffect(()=>rowMenu?dismissPopover(()=>rowMenuRef.current,()=>setRowMenu(null)):undefined,[rowMenu]);
- const [creating,setCreating]=useState<{type:'file'|'directory',rid:string,path:string}|null>(null),[newName,setNewName]=useState(''),[createError,setCreateError]=useState(''),[creatingBusy,setCreatingBusy]=useState(false);
+ const [creating,setCreating]=useState<{type:'file'|'directory'|'rename',rid:string,path:string}|null>(null),[newName,setNewName]=useState(''),[createError,setCreateError]=useState(''),[creatingBusy,setCreatingBusy]=useState(false);
+ // The name field is disabled while the request runs; give it focus back after a refusal so Escape and retyping work.
+ useEffect(()=>{if(!creatingBusy&&createError)document.getElementById(createNameId)?.focus();},[creatingBusy,createError]);
  const rootOf=(rid:string)=>roots.find(r=>(r.id||r.root_id)===rid);
  const hostLabel=(id:string)=>hosts.find((h:any)=>h.id===id)?.label||id;
  const rootLabel=(rid:string)=>rootOf(rid)?.label||'workspace';
+ const abs=(rid:string,path:string)=>(rootOf(rid)?.path||'').replace(/\/$/,'')+(path?'/'+path:'');
+ const writable=(rid:string)=>!locating&&rootOf(rid)?.host_id==='mac'&&rootOf(rid)?.access==='write';
 
  async function load(key:string,cursor=''){const [rid,path]=key.split('\n');setChildren(c=>({...c,[key]:{entries:cursor?c[key]?.entries||[]:c[key]?.entries||[],next:'',error:'',busy:true}}));
   try{const d=await api(query('/api/files/list',{root_id:rid,path,cursor}));const items=Array.isArray(d.entries)?d.entries:[];setChildren(c=>({...c,[key]:{entries:cursor?[...(c[key]?.entries||[]),...items]:items,next:d.next_cursor??'',error:'',busy:false}}));}
@@ -93,7 +97,6 @@ export function FileTree({onContext,tab}:{onContext?:any,tab?:Tab}){
    catch(e){if(e?.code!=='destination_exists')throw e;const names:string[]=e.data?.names||[];
     const choice=await choose(`${names.length===1?`"${names[0]}" already exists`:`${names.length} items already exist`} in ${place(target.label,target.path)}.`,cross?['Keep both','Cancel']:['Keep both','Replace','Cancel']);
     if(choice==='Cancel')return;result=await api('/api/files/move',{...body,conflict:choice==='Replace'?'replace':'keep_both'});}
-   const abs=(rid:string,path:string)=>(rootOf(rid)?.path||'').replace(/\/$/,'')+(path?'/'+path:'');
    const moves:Moved[]=copy?[]:result.moved.map((m:any)=>({from:abs(m.root_id,m.path),to:abs(m.dest_root_id,m.dest_path),root_id:m.dest_root_id,from_host:m.host_id||rootOf(m.root_id)?.host_id||'mac',to_host:m.dest_host_id||rootOf(m.dest_root_id)?.host_id||'mac'}));
    announce(moves,touched);toggle(keyOf(target.rid,target.path),true);setSelected(result.moved.map((m:any)=>keyOf(m.dest_root_id,m.dest_path)));
    const what=list.length===1?`"${list[0].name}"`:list.length+' items';
@@ -114,27 +117,53 @@ export function FileTree({onContext,tab}:{onContext?:any,tab?:Tab}){
  const foreign=(e:React.DragEvent)=>!dragging.current&&['application/library-files','codefiles'].some(t=>[...e.dataTransfer.types].map(x=>x.toLowerCase()).includes(t));
  function transferred(e:React.DragEvent):DragItem[]{try{const raw=e.dataTransfer.getData('application/library-files');if(raw)return JSON.parse(raw);
   return (JSON.parse(e.dataTransfer.getData('CodeFiles')||'[]') as string[]).flatMap(p=>{const r=coveringRoot(roots.filter(r=>r.host_id==='mac'),'mac',p);return r?[{rid:r.id||r.root_id,path:relativeFilePath(p,r.path),name:p.split('/').at(-1)||p,type:'file',host:'mac'}]:[];});}catch{return [];}}
- function dragOver(e:React.DragEvent,row:Row){if(!dragging.current&&!foreign(e))return;e.preventDefault();e.stopPropagation();
-  const target=folderOf(row),key=keyOf(target.rid,target.path);e.dataTransfer.dropEffect=e.altKey?'copy':'move';setDropKey(key);setDropBad(!!dragging.current&&!!refusal(dragging.current,target,hostLabel));
+ // Files dragged from Finder arrive as File objects without paths; their bytes are written into the folder.
+ const external=(e:React.DragEvent)=>!dragging.current&&!foreign(e)&&[...e.dataTransfer.types].includes('Files');
+ function dragOver(e:React.DragEvent,row:Row){if(!dragging.current&&!foreign(e)&&!external(e))return;e.preventDefault();e.stopPropagation();
+  const target=folderOf(row),key=keyOf(target.rid,target.path);e.dataTransfer.dropEffect=external(e)||e.altKey?'copy':'move';setDropKey(key);setDropBad(external(e)?!writable(target.rid):!!dragging.current&&!!refusal(dragging.current,target,hostLabel));
   if((row.type==='directory'||row.type==='root')&&!expanded.has(row.key)&&spring.current?.key!==row.key){clearTimeout(spring.current?.timer);spring.current={key:row.key,timer:setTimeout(()=>toggle(row.key,true),600)};}}
  function dragEnd(){dragging.current=null;setDropKey('');clearTimeout(spring.current?.timer);spring.current=null;}
- function dropOn(e:React.DragEvent,row:Row){if(!dragging.current&&!foreign(e))return;e.preventDefault();e.stopPropagation();const items=dragging.current||transferred(e);dragEnd();if(items.length)void drop(items,folderOf(row),e.altKey);}
+ function dropOn(e:React.DragEvent,row:Row){if(!dragging.current&&!foreign(e)&&!external(e))return;e.preventDefault();e.stopPropagation();
+  if(external(e)){const files=[...e.dataTransfer.items].filter(i=>i.kind==='file').map(i=>({file:i.getAsFile(),folder:!!i.webkitGetAsEntry?.()?.isDirectory}));dragEnd();void upload(files,folderOf(row));return;}
+  const items=dragging.current||transferred(e);dragEnd();if(items.length)void drop(items,folderOf(row),e.altKey);}
+ async function upload(files:{file:File|null,folder:boolean}[],target:Target){
+  if(!writable(target.rid)){say('Drop files into a writable workspace on this Mac.');return;}
+  const plain=files.filter(f=>f.file&&!f.folder),skipped=files.length-plain.length,added:string[]=[];
+  for(const {file} of plain){if(file!.size>20*1024*1024){say(`"${file!.name}" is larger than 20 MB; copy it in Finder instead.`);continue;}
+   const bytes=new Uint8Array(await file!.arrayBuffer());let text='';for(let i=0;i<bytes.length;i+=32768)text+=String.fromCharCode(...bytes.subarray(i,i+32768));
+   try{added.push((await api('/api/files/upload',{root_id:target.rid,dir:target.path,name:file!.name,data:btoa(text)})).path);}catch(e){say(e.message);return;}}
+  announce([],[keyOf(target.rid,target.path)]);toggle(keyOf(target.rid,target.path),true);setSelected(added.map(p=>keyOf(target.rid,p)));
+  if(added.length||skipped)say((added.length?`Added ${added.length===1?'"'+added[0].split('/').at(-1)+'"':added.length+' files'} to ${place(target.label,target.path)}.`:'')+(skipped?' Folders from Finder are not copied; drop their files.':''));}
 
  const createAt=creationLocation(roots,contextFolder?[...rows,{key:'initial-folder',...contextFolder,type:'directory'}]:rows,selected.length?selected:contextFolder?['initial-folder']:[],single,focusRoot);
  const beginCreate=(type:'file'|'directory')=>{if(locating||!createAt?.writable)return;setCreating({type,rid:createAt.rid,path:createAt.path});setNewName('');setCreateError('');};
  async function createItem(e:React.FormEvent){e.preventDefault();if(!creating||creatingBusy)return;const name=newName.trim();if(!name||name==='.'||name==='..'||/[\\/\0]/.test(name)){setCreateError('Enter a name without slashes.');return;}setCreatingBusy(true);setCreateError('');
-  try{const path=[creating.path,name].filter(Boolean).join('/');await api('/api/files/create',{root_id:creating.rid,path,type:creating.type});const row={key:keyOf(creating.rid,path),rid:creating.rid,path,name,type:creating.type,depth:0};announce([],[keyOf(creating.rid,creating.path)]);toggle(keyOf(creating.rid,creating.path),true);setSelected([row.key]);setAnchor(row.key);setFocusRoot(row.rid);setFileSearch('');setCreating(null);if(row.type==='file')open(resource(row),'tab');else toggle(row.key,true);}
-  catch(e){setCreateError(e?.status===404&&!e.code?'Creating files needs a restart of the Library server.':e.message);}finally{setCreatingBusy(false);}}
+  try{if(creating.type==='rename'){const {path}=await api('/api/files/rename',{root_id:creating.rid,path:creating.path,name});announce([{from:abs(creating.rid,creating.path),to:abs(creating.rid,path),root_id:creating.rid,from_host:'mac',to_host:'mac'}],[keyOf(creating.rid,parentPath(creating.path))]);setSelected([keyOf(creating.rid,path)]);setAnchor(keyOf(creating.rid,path));setCreating(null);return;}
+   const path=[creating.path,name].filter(Boolean).join('/');await api('/api/files/create',{root_id:creating.rid,path,type:creating.type});const row={key:keyOf(creating.rid,path),rid:creating.rid,path,name,type:creating.type,depth:0};announce([],[keyOf(creating.rid,creating.path)]);toggle(keyOf(creating.rid,creating.path),true);setSelected([row.key]);setAnchor(row.key);setFocusRoot(row.rid);setFileSearch('');setCreating(null);if(row.type==='file')open(resource(row),'tab');else toggle(row.key,true);}
+  catch(e){setCreateError(e?.status===404&&!e.code?'This action needs a restart of the Library server.':e.message);}finally{setCreatingBusy(false);}}
 
  // Right-click a row: New File / New Folder beside a file or inside a folder, as in VS Code.
  function rowContext(ev:React.MouseEvent,row:Row){
   if(!selected.includes(row.key)){setSelected([row.key]);setAnchor(row.key);}
   const at=creationLocation(roots,rows,[row.key],single,focusRoot),why=locating||!at?.writable;
   const items=(['file','directory'] as const).map(type=>({label:type==='file'?'New File…':'New Folder…',disabled:why,run:()=>{if(!at)return;setCreating({type,rid:at.rid,path:at.path});setNewName('');setCreateError('');}}));
+  const can=writable(row.rid);
+  if(row.type==='root')items.push(...(onContext?[{label:'Copy Path',disabled:false,run:()=>void navigator.clipboard.writeText(rootOf(row.rid)?.path||'').catch(()=>{})}]:[]),{label:'Remove Folder from Workspace',disabled:false,run:()=>void removeRoot(row.rid)});
+  else items.push({label:'Rename…',disabled:!can,run:()=>{setCreating({type:'rename',rid:row.rid,path:row.path});setNewName(row.name.split('/').at(-1)||'');setCreateError('');}},{label:'Delete',disabled:!can,run:()=>void trashItems(row)});
   const target=row.type==='root'?{kind:'files',root_id:row.rid,title:row.name}:resource(row);
   if(onContext)return onContext(ev,target,undefined,items);
   ev.preventDefault();ev.stopPropagation();setRowMenu({x:Math.max(8,Math.min(ev.clientX,innerWidth-200)),y:Math.max(8,Math.min(ev.clientY,innerHeight-120)),path:row.type==='root'?rootOf(row.rid)?.path||'':(target as any).path,items});
  }
+
+ async function trashItems(row:Row){
+  const picked=selected.includes(row.key)?rows.filter(r=>selected.includes(r.key)&&r.type!=='root'&&r.rid===row.rid):[row],what=picked.length===1?`"${picked[0].name.split('/').at(-1)}"`:picked.length+' items';
+  if(await choose(`Delete ${what}? You can restore ${picked.length===1?'it':'them'} from the Trash.`,['Move to Trash','Cancel'])!=='Move to Trash')return;
+  try{await api('/api/files/trash',{root_id:row.rid,paths:picked.map(r=>r.path)});setSelected([]);announce([],[...new Set(picked.map(r=>keyOf(r.rid,parentPath(r.path))))],picked.map(r=>({path:abs(r.rid,r.path),host:rootOf(r.rid)?.host_id||'mac'})));say(`Moved ${what} to the Trash.`);}
+  catch(e){say(e?.status===404&&!e.code?'This action needs a restart of the Library server.':e.message);}}
+ // Removes the folder from the list only; its files stay where they are.
+ async function removeRoot(rid:string){const label=rootLabel(rid);
+  try{await api('/api/files/roots/remove',{root_id:rid});setRoots(v=>v.filter(r=>(r.id||r.root_id)!==rid));setSelected([]);if(focusRoot===rid)setFocusRoot('');if(localStorage.getItem('library.files.workspace')===rid)localStorage.removeItem('library.files.workspace');if(tab?.root===rid)tab.choose('all','Files');say(`Removed "${label}" from the workspace. Its files are unchanged.`);}
+  catch(e){say(e?.status===404&&!e.code?'This action needs a restart of the Library server.':e.message);}}
 
  async function openPath(e:any){e.preventDefault();if(!input.trim())return;const focus=rootOf(focusRoot),candidate=parseFileLink(input.trim(),focus?.path||'',host);if(!candidate?.path){setError('Choose a file or folder path.');return;}setError('');const match=coveringRoot(roots.filter(r=>r.host_id===host),host,candidate.path);try{
   const reveal=(rid:string,path:string)=>{
@@ -154,7 +183,7 @@ export function FileTree({onContext,tab}:{onContext?:any,tab?:Tab}){
  return <>
   {tab?<div className="file-location"><select aria-label="Workspace" value={tab.root} onChange={e=>{setContextFolder(null);setSelected([]);setFocusRoot(e.target.value==='all'?roots[0]?.id||'':e.target.value);localStorage.setItem('library.files.workspace',e.target.value);tab.choose(e.target.value,e.target.value==='all'?'Files':rootLabel(e.target.value));}}>{!tab.root&&<option value="">Choose a workspace</option>}{roots.map(r=><option key={r.id||r.root_id} value={r.id||r.root_id}>{r.label||r.path}</option>)}<option value="all">All workspaces</option></select></div>:<>
   <div className="file-location"><select aria-label="File location" value={host} onChange={e=>setHost(e.target.value)}>{hosts.filter(h=>h.configured!==false).map(h=><option key={h.id} value={h.id}>{h.label||h.id}</option>)}</select><button className="icon-button" title="Find filenames" aria-label={searchOpen?'Close filename search':'Find filenames in workspace'} onClick={()=>{setSearchOpen(v=>!v);setFileSearch('');}}><Search size={14}/></button><button className="icon-button" title="Refresh files" aria-label="Refresh files" onClick={refreshAll}><RefreshCw size={14}/></button></div>
-  <form onSubmit={openPath} className="search-field"><Folder size={14}/><input aria-label="Open file or folder path" placeholder="Open a file or folder…" value={input} onChange={e=>setInput(e.target.value)}/></form>
+  <form onSubmit={openPath} className="search-field"><Folder size={14}/><input aria-label="Open file or folder path" placeholder="Add workspace or open file…" value={input} onChange={e=>setInput(e.target.value)}/></form>
   {searchOpen&&<div className="file-breadcrumb"><input autoFocus aria-label="Find filenames in workspace" placeholder={'Find filenames in '+rootLabel(focusRoot)+'…'} value={fileSearch} onChange={e=>setFileSearch(e.target.value)} onKeyDown={e=>{if(e.key==='Escape'){setSearchOpen(false);setFileSearch('');}}}/></div>}</>}
   {transferring&&<p className="empty-note" role="status">{transferring}</p>}
   <div className="file-create-actions" role="group" aria-label="Create in selected folder">
@@ -175,9 +204,9 @@ export function FileTree({onContext,tab}:{onContext?:any,tab?:Tab}){
    {!roots.length&&!error&&<p className="empty-note">No workspace folders yet.{tab?'':' Open a folder above.'}</p>}
   </div>
   {rowMenu&&<div ref={rowMenuRef} className="chat-link-menu" role="menu" style={{left:rowMenu.x,top:rowMenu.y}}>{rowMenu.path&&<button role="menuitem" onClick={()=>{void navigator.clipboard.writeText(rowMenu.path).catch(()=>{});setRowMenu(null);}}>Copy Path</button>}{rowMenu.items.map(item=><button role="menuitem" key={item.label} disabled={item.disabled} title={item.disabled?'Choose a writable local workspace':undefined} onClick={()=>{setRowMenu(null);item.run();}}>{item.label}</button>)}</div>}
-  {creating&&<div className="dialog-backdrop" onPointerDown={()=>{if(!creatingBusy)setCreating(null);}}><form className="history-dialog file-create-dialog" role="dialog" aria-modal="true" aria-label={creating.type==='file'?'New file':'New folder'} onSubmit={createItem} onPointerDown={e=>e.stopPropagation()} onKeyDown={e=>{if(e.key==='Escape'&&!creatingBusy){e.preventDefault();setCreating(null);}}}>
-   <label htmlFor={createNameId}>{creating.type==='file'?'File name':'Folder name'}</label><p>{place(rootLabel(creating.rid),creating.path)}</p><input id={createNameId} aria-label={creating.type==='file'?'File name':'Folder name'} autoFocus value={newName} onChange={e=>setNewName(e.target.value)} disabled={creatingBusy}/>
-   {createError&&<p className="inline-error" role="alert">{createError}</p>}<div><button type="button" onClick={()=>setCreating(null)} disabled={creatingBusy}>Cancel</button><button className="primary" type="submit" disabled={creatingBusy||!newName.trim()}>{creatingBusy?'Creating…':'Create'}</button></div>
+  {creating&&<div className="dialog-backdrop" onPointerDown={()=>{if(!creatingBusy)setCreating(null);}}><form className="history-dialog file-create-dialog" role="dialog" aria-modal="true" aria-label={creating.type==='file'?'New file':creating.type==='rename'?'Rename':'New folder'} onSubmit={createItem} onPointerDown={e=>e.stopPropagation()} onKeyDown={e=>{if(e.key==='Escape'&&!creatingBusy){e.preventDefault();setCreating(null);}}}>
+   <label htmlFor={createNameId}>{creating.type==='file'?'File name':creating.type==='rename'?'New name':'Folder name'}</label><p>{place(rootLabel(creating.rid),creating.type==='rename'?parentPath(creating.path):creating.path)}</p><input id={createNameId} aria-label={creating.type==='file'?'File name':creating.type==='rename'?'New name':'Folder name'} autoFocus onFocus={e=>{if(creating.type==='rename'){const dot=e.target.value.lastIndexOf('.');e.target.setSelectionRange(0,dot>0?dot:e.target.value.length);}}} value={newName} onChange={e=>setNewName(e.target.value)} disabled={creatingBusy}/>
+   {createError&&<p className="inline-error" role="alert">{createError}</p>}<div><button type="button" onClick={()=>setCreating(null)} disabled={creatingBusy}>Cancel</button><button className="primary" type="submit" disabled={creatingBusy||!newName.trim()}>{creating.type==='rename'?'Rename':creatingBusy?'Creating…':'Create'}</button></div>
   </form></div>}
   {ask&&<div className="dialog-backdrop" onPointerDown={()=>ask.resolve('Cancel')}><div className="history-dialog file-move-dialog" role="alertdialog" aria-modal="true" aria-label={ask.message} onPointerDown={e=>e.stopPropagation()} onKeyDown={e=>{if(e.key==='Escape')ask.resolve('Cancel');}}><p>{ask.message}</p><div>{ask.buttons.map((b,i)=><button key={b} autoFocus={i===0} className={i===0?'primary':''} onClick={()=>ask.resolve(b)}>{b}</button>)}</div></div></div>}
   {toast&&<div className="toast file-move-toast" role="status"><span>{toast.text}</span>{toast.recovery?.length>0&&<details className="file-transfer-recovery"><summary>Recovery locations</summary>{toast.recovery.map((item,i)=><p key={i}>{hostLabel(item.host_id||'mac')}: {item.path}</p>)}<button className="text-button" onClick={()=>void navigator.clipboard.writeText(toast.recovery.map(item=>(item.host_id||'mac')+': '+item.path).join('\n'))}>Copy paths</button></details>}{toast.token&&<button className="text-button" onClick={()=>void undo()}>Undo</button>}<button className="icon-button" aria-label="Dismiss notification" title="Dismiss notification" onClick={()=>setToast(null)}><X size={14}/></button></div>}
