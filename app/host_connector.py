@@ -42,6 +42,10 @@ class AmbiguousSessionAccount(ValueError):
     """No single local profile owns the session; the user must choose one."""
 
 
+class SessionAccountMismatch(ValueError):
+    """The requested profile cannot resume the session; .candidates lists those that can."""
+
+
 def _read(path, default):
     try:
         with open(os.path.expanduser(path)) as fh:
@@ -306,7 +310,7 @@ def shared_session_store(tool, source_account, target_account):
 
 def resolve_local_account(tool, account_id=None, model=None, session_id=None, cwd=None):
     data = _local_accounts()
-    bound = None
+    bound, pinned, ownership = None, False, ''
     if session_id:
         matches, directories = [], {}
         for profile in data.get('accounts', []):
@@ -337,17 +341,27 @@ def resolve_local_account(tool, account_id=None, model=None, session_id=None, cw
                 tokens=auth.get('tokens') or {}
                 profile_identities[profile['id']]=tokens.get('account_id')
             if len(creators)>1:raise ValueError('Native session ownership conflicts across profile transcripts')
-            if creators:
-                creator=next(iter(creators))
-                matches=[profile_id for profile_id in matches if profile_identities.get(profile_id)==creator]
+            owners=[profile_id for profile_id in matches if profile_identities.get(profile_id) in creators]
+            if owners:
+                matches,pinned=owners,True
+            elif creators:
+                # The creating login is signed in nowhere (re-login or removed profile).
+                # Codex resumes any rollout its CODEX_HOME can read, so presence decides.
+                ownership='creator_not_signed_in'
+        active = data.get('state', {}).get('active', {}).get(tool)
         if account_id:
             if account_id not in matches:
-                raise ValueError('Session does not exist in the selected host, account and workspace')
+                error = SessionAccountMismatch('Session does not exist in the selected host, account and workspace')
+                error.candidates = matches
+                raise error
             bound = account_id
         elif len(matches) == 1:
             bound = matches[0]
         elif len(matches) > 1 and (shared := _one_login(data, tool, matches, directories)):
             bound = shared
+        elif len(matches) > 1 and not pinned and active in matches and _login_identity(tool, directories[active]):
+            # No transcript names an owner among these logins: continue on the active account.
+            bound, ownership = active, ownership or 'unattributed_active'
         else:
             error = AmbiguousSessionAccount('Session account is missing or ambiguous; choose its original account')
             error.candidates = matches
@@ -364,7 +378,10 @@ def resolve_local_account(tool, account_id=None, model=None, session_id=None, cw
             _profile_directory(data, profile)
         except ValueError:
             profile['eligible'] = False
-    return resolve_account(data, tool, model, account_id, bound, auto=auto)
+    selection = resolve_account(data, tool, model, account_id, bound, auto=auto)
+    if ownership:
+        selection['ownership'] = ownership
+    return selection
 
 
 def local_profile(tool, account_id=None):

@@ -21,8 +21,17 @@ def local_defaults(provider, meta=None, account=None, model=None):
     meta=meta or {}
     # provider_account_id identifies a provider user, never a configured CLI home.
     bound=meta.get('account_id') or meta.get('account')
-    selection=host_connector.resolve_local_account(provider,account_id=bound or account,model=model or meta.get('model_main'),
+    wanted=bound or account
+    resolve=lambda aid:host_connector.resolve_local_account(provider,account_id=aid,model=model or meta.get('model_main'),
                      session_id=meta.get('id'),cwd=os.path.realpath(meta.get('cwd') or str(Path.home())))
+    try:
+        selection=resolve(wanted)
+    except host_connector.SessionAccountMismatch as exc:
+        # A stale binding (the profile signed in to another login since) must not block
+        # the resume: pick among the profiles that can read the transcript instead.
+        if not exc.candidates:
+            error=host_connector.AmbiguousSessionAccount(str(exc));error.candidates=[];raise error from exc
+        selection=dict(resolve(None),requested_account_id=wanted)
     aid,directory,env=host_connector.local_profile(provider,selection['account_id'])
     directory=os.path.realpath(directory)
     config={}
@@ -46,6 +55,10 @@ def local_defaults(provider, meta=None, account=None, model=None):
         result['effort']=configured_env.get('CLAUDE_CODE_EFFORT_LEVEL') or result['effort']
     if not meta.get('id'):result['account']=''
     if meta.get('cwd'):result['cwd']=meta['cwd']
+    # The chat's own last model and effort, as indexed; the owner-profile transcript below may refine them.
+    resume=meta.get('resume') or {}
+    result['model']=resume.get('model') or result['model']
+    result['effort']=resume.get('effort') or result['effort']
     paths=meta.get('files_all') or [meta.get('file')]
     # Only consult session files in the verified owner profile, never a mirror.
     paths=[Path(p) for p in paths if p and Path(p).is_file() and os.path.commonpath([os.path.realpath(p),directory])==directory]
@@ -61,9 +74,12 @@ def local_defaults(provider, meta=None, account=None, model=None):
                     if row.get('type')=='turn_context':
                         result['model']=payload.get('model') or result['model']
                         result['effort']=payload.get('effort') or payload.get('reasoning_effort') or result['effort']
-                    elif provider=='claude':
+                    elif provider=='claude' and not row.get('isSidechain'):
                         msg=row.get('message') or {}
-                        if msg.get('model') and msg['model']!='<synthetic>':result['model']=msg['model']
+                        if row.get('type')=='assistant' and msg.get('model') and msg['model']!='<synthetic>':result['model']=msg['model']
+                        # The session's own effort, never a subagent's.
+                        effort=((row.get('params') or {}).get('output_config') or {}).get('effort')
+                        if row.get('type')=='api-request' and effort and not str(row.get('querySource','')).startswith('agent:'):result['effort']=effort
         except OSError:continue
     if model:
         result['model']=model
@@ -83,7 +99,7 @@ def defaults(req,query,body):
         host=native.get('execution_host') or native.get('host_id') or query.get('host_id') or native.get('node') or 'mac'
         if '+' in host:host=query.get('host_id') if query.get('host_id') in host.split('+') else host
         if host not in ('mac','local'):
-            return {'defaults':{'provider':provider,'host_id':host,**({'cwd':native['cwd']} if native.get('cwd') else {}),'model':query.get('model') or native.get('model_main') or '', 'effort':'','account':native.get('account_id') or query.get('account') or ''}}
+            return {'defaults':{'provider':provider,'host_id':host,**({'cwd':native['cwd']} if native.get('cwd') else {}),'model':query.get('model') or (native.get('resume') or {}).get('model') or native.get('model_main') or '', 'effort':(native.get('resume') or {}).get('effort') or '','account':native.get('account_id') or query.get('account') or ''}}
         notice=''
         try:
             value=local_defaults(provider,native,query.get('account'),query.get('model'))
@@ -91,12 +107,14 @@ def defaults(req,query,body):
             # Profiles that share one login already resolved upstream. Only different
             # logins reach here; that goes to the notification center, once per chat.
             value=local_defaults(provider,{k:v for k,v in native.items() if k not in ('id','account_id','account')},None,query.get('model'))
-            value.update(account='',selectedAccount='',account_required=True)
+            candidates=list(getattr(exc,'candidates',()))
+            value.update(account='',selectedAccount='',account_required=True,account_candidates=candidates)
             value.pop('account_selection',None)
-            if len(getattr(exc,'candidates',())) > 1:
+            # Only a transcript no profile can read is a real failure; subagent transcripts never resume natively.
+            if not candidates and not native.get('is_child') and '-agent-' not in key:
                 import notices
                 title=(native.get('title_seed') or 'this chat')[:80]
-                notices.note(HERE/'data/notices.json','account:'+key,f'{provider.title()} chat "{title}" exists under different sign-ins. Choose its original account before sending.')
+                notices.note(HERE/'data/notices.json','account:'+key,f'{provider.title()} chat "{title}" cannot be resumed: no {provider.title()} account on this Mac can read its transcript.')
         if not value.get('cwd'):
             import hosts
             value['cwd']=hosts.get_host('mac')['default_cwd']
