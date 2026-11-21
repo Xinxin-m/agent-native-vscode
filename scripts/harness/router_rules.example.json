@@ -1,0 +1,29 @@
+[
+  {
+    "name": "version-copies",
+    "pattern": "\\b(v2|v3|new version|final version|make a copy)\\b",
+    "rule": "Edit the existing file in place. Do not create -v2, -final or copy files; keep at most the current and the previous version."
+  },
+  {
+    "name": "delete-results",
+    "pattern": "\\b(delete|remove|clean up|wipe)\\b.{0,40}\\b(data|results|outputs?|dataset)\\b",
+    "rule": "Datasets and finished results are never deleted without the user's explicit confirmation. List what would be removed and ask."
+  },
+  {
+    "name": "outward-action",
+    "pattern": "\\b(send|email|post|publish|tweet|submit)\\b.{0,40}\\b(to|the|this)\\b",
+    "rule": "Outward actions stay drafts. Prepare the message or post and wait for an explicit instruction to send or publish."
+  },
+  {
+    "name": "verify-before-done",
+    "pattern": "\\b(is it done|did it work|does it work|is it working|verify|double[- ]check)\\b",
+    "rule": "Check the result yourself before reporting: run it, render it or open it, and separate what you verified from what you assume.",
+    "agent": "reviewer"
+  },
+  {
+    "name": "many-requests",
+    "pattern": "\\b(also|and then|after that|plus)\\b.{0,200}\\b(also|and then|after that|plus)\\b",
+    "rule": "This prompt holds several requests. Keep a numbered ledger and report each item as done, in progress or unverified.",
+    "agent": "task-tracker"
+  }
+]
