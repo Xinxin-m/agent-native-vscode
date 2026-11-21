@@ -84,11 +84,19 @@ def defaults(req,query,body):
         if '+' in host:host=query.get('host_id') if query.get('host_id') in host.split('+') else host
         if host not in ('mac','local'):
             return {'defaults':{'provider':provider,'host_id':host,**({'cwd':native['cwd']} if native.get('cwd') else {}),'model':query.get('model') or native.get('model_main') or '', 'effort':'','account':native.get('account_id') or query.get('account') or ''},'notice':'Remote provider configuration is resolved on its host at launch.'}
-        value=local_defaults(provider,native,query.get('account'),query.get('model'))
+        notice=''
+        try:
+            value=local_defaults(provider,native,query.get('account'),query.get('model'))
+        except host_connector.AmbiguousSessionAccount as exc:
+            # A normal state for a chat seen from several profiles: report it, do not fail.
+            value=local_defaults(provider,{k:v for k,v in native.items() if k not in ('id','account_id','account')},None,query.get('model'))
+            value.update(account='',selectedAccount='',account_required=True)
+            value.pop('account_selection',None)
+            notice=str(exc)
         if not value.get('cwd'):
             import hosts
             value['cwd']=hosts.get_host('mac')['default_cwd']
-        return {'defaults':value}
+        return {'defaults':value,**({'notice':notice} if notice else {})}
     except (ValueError,OSError) as exc:
         return {'ok':False,'error':str(exc)},400
 

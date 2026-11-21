@@ -27,16 +27,23 @@ import glob
 import hashlib
 import json
 import os
+import pty
+import queue
 import re
+import select
 import shlex
 import shutil
 import subprocess
 import sys
+import termios
+import tempfile
 import threading
 import time
 import uuid
 import urllib.error
 import urllib.request
+
+import notices
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "data")
@@ -53,6 +60,79 @@ SWITCH_COOLDOWN_S = 600
 
 LOCK = threading.RLock()
 _last_bg = 0.0
+_login_sessions = {}
+_login_lock = threading.RLock()
+_pending_renewals = {}
+_login_starting = set()
+
+
+def _expiry_iso(value):
+    try:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return datetime.datetime.fromtimestamp(value, datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
+        if isinstance(value, str):
+            return datetime.datetime.fromisoformat(value.replace('Z', '+00:00')).astimezone(datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
+    except (ValueError, OverflowError, OSError):
+        pass
+    return None
+
+
+def _auth_env(d, a):
+    tool, aid = a['tool'], a['id']
+    env = env_for(tool, aid, d).copy()
+    var = 'CLAUDE_CONFIG_DIR' if tool == 'claude' else 'CODEX_HOME'
+    if _is_default(a) and d['state']['global_active'].get(tool) != aid:
+        directory = a.get('login_config_dir')
+        if not directory:
+            raise ValueError('This stashed account needs a separate sign-in profile')
+        env[var] = directory
+    elif d['state']['global_active'].get(tool) == aid:
+        env.pop(var, None)
+    return env
+
+
+def _claude_login_expiry(d, a):
+    """Stored sign-in deadline, never the short-lived OAuth access-token expiry."""
+    try:
+        result = subprocess.run([_cli('claude'), 'auth', 'status', '--json'], env=_auth_env(d, a),
+                                capture_output=True, text=True, timeout=10)
+        status = json.loads(result.stdout)
+        return _expiry_iso(status.get('loginExpiresAt'))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _epoch(value):
+    iso = _expiry_iso(value)
+    return datetime.datetime.fromisoformat(iso.replace('Z', '+00:00')).timestamp() if iso else None
+
+
+def account_warnings(account, record, now=None):
+    now = time.time() if now is None else now
+    result = []
+    label = account.get('label') or record.get('email') or account['id']
+    expiry = _expiry_iso(record.get('loginExpiresAt'))
+    if expiry:
+        seconds = datetime.datetime.fromisoformat(expiry.replace('Z', '+00:00')).timestamp() - now
+        if seconds <= 86400:
+            threshold = 'expired' if seconds <= 0 else '1h' if seconds <= 3600 else '12h' if seconds <= 43200 else '24h'
+            result.append({'kind': 'login_expiring' if seconds > 0 else 'auth_expired',
+                           'message': f"{account['tool'].title()} sign-in for {label} {'has expired' if seconds <= 0 else 'expires soon'}. Renew when chats are idle; signing in during a running turn is not verified safe.",
+                           'expires_at': expiry, 'resets_at': None, 'threshold': threshold,
+                           'key': f"{account['id']}:login:{expiry}:{threshold}", 'renew_requires_idle': True})
+    for window in record.get('windows') or []:
+        percent = window.get('percent')
+        if isinstance(percent, (int, float)) and not isinstance(percent, bool) and percent >= 90:
+            threshold = 'limit' if percent >= 100 else '90'
+            reset = window.get('resets_at')
+            if reset and _expiry_iso(reset) and datetime.datetime.fromisoformat(_expiry_iso(reset).replace('Z', '+00:00')).timestamp() <= now:
+                continue
+            # Reset times drift between polls; the key uses the reset hour (notices.py matches drift too).
+            hour = _expiry_iso(round((_epoch(reset) or 0) / 3600) * 3600) if reset else None
+            result.append({'kind': 'usage_high', 'message': f"{label} is at {percent:g}% of its {window.get('label') or window.get('kind') or 'usage'} limit.",
+                           'resets_at': reset, 'expires_at': None, 'threshold': threshold, 'window': window.get('kind'),
+                           'key': f"{account['id']}:usage:{window.get('kind')}:{hour}:{threshold}"})
+    return result
 
 try:
     import clis
@@ -240,6 +320,10 @@ def _claude_creds(d, a):
     if st["global_active"].get("claude") == a["id"]:
         return _kc_read(KC_SERVICE), "keychain:" + KC_SERVICE
     if _is_default(a):
+        if a.get('login_config_dir'):
+            isolated = dict(a, id=a['id'] + '-renewed', config_dir=a['login_config_dir'])
+            isolated.pop('keychain_service', None)
+            return _claude_creds(d, isolated)
         stash = a.get("stash")
         blob = _jread(os.path.join(stash, "claude-credentials.json"), None) if stash else None
         return blob, ("stash" if blob else "default login is stashed nowhere")
@@ -257,7 +341,7 @@ def _claude_refresh_via_cli(d, a):
     """Run `claude auth status --json` as that profile once; Claude Code refreshes
     an expired token while answering. Output is discarded (may name the account)."""
     try:
-        subprocess.run([_cli("claude"), "auth", "status", "--json"], env=env_for("claude", a["id"], d),
+        subprocess.run([_cli("claude"), "auth", "status", "--json"], env=_auth_env(d, a),
                        capture_output=True, text=True, timeout=60)
     except Exception:
         pass
@@ -321,7 +405,7 @@ def _claude_extra(u):
 
 def _fetch_claude(d, a):
     rec = {"logged_in": False, "error": "", "windows": [], "extra": None, "credits": None,
-           "email": "", "org": "", "plan": ""}
+           "email": "", "org": "", "plan": "", "loginExpiresAt": None}
     acc = _claude_json().get("oauthAccount") if d["state"]["global_active"].get("claude") == a["id"] \
         else _profile_oauth_account(a)
     if _is_default(a) and d["state"]["global_active"].get("claude") != a["id"] and a.get("stash"):
@@ -334,9 +418,31 @@ def _fetch_claude(d, a):
     blob, src = _claude_creds(d, a)
     tok = ((blob or {}).get("claudeAiOauth") or {}).get("accessToken")
     if not tok:
+        # The provider can verify its own profile even when our Keychain lookup
+        # cannot call the profile endpoint (for example, during rate limiting).
+        # Require the returned directory and stored identity to match so the
+        # global login cannot silently stand in for another profile.
+        try:
+            env = _auth_env(d, a)
+            result = subprocess.run([_cli('claude'), 'auth', 'status', '--json'],
+                                    env=env, capture_output=True, text=True, timeout=10)
+            status = json.loads(result.stdout)
+            expected_dir = env.get('CLAUDE_CONFIG_DIR') or os.path.join(HOME, '.claude')
+            expected_email = (rec.get('email') or '').strip().lower()
+            if (result.returncode == 0 and status.get('loggedIn') is True and expected_email
+                    and str(status.get('email') or '').strip().lower() == expected_email
+                    and status.get('configDirectory')
+                    and os.path.realpath(status['configDirectory']) == os.path.realpath(expected_dir)):
+                rec['logged_in'] = True
+                rec['loginExpiresAt'] = _expiry_iso(status.get('loginExpiresAt'))
+                rec['error'] = 'usage unavailable: credential lookup failed'
+                return rec
+        except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+            pass
         rec["error"] = src if isinstance(src, str) else "no credentials"
         return _claude_cached_fallback(a, rec)
     rec["logged_in"] = True
+    rec['loginExpiresAt'] = _claude_login_expiry(d, a)
     for attempt in (0, 1):
         try:
             u = _api_get("usage", tok)
@@ -386,6 +492,8 @@ def _codex_auth(d, a):
     if d["state"]["global_active"].get("codex") == a["id"]:
         return _jread(os.path.join(CODEX_HOME, "auth.json"), None)
     if _is_default(a):
+        if a.get('login_config_dir'):
+            return _jread(os.path.join(a['login_config_dir'], 'auth.json'), None)
         return _jread(os.path.join(a["stash"], "codex-auth.json"), None) if a.get("stash") else None
     return _jread(os.path.join(a["config_dir"], "auth.json"), None)
 
@@ -491,7 +599,7 @@ def _apply_codex_live(rec, usage):
 
 def _fetch_codex(d, a):
     rec = {"logged_in": False, "error": "", "windows": [], "extra": None, "credits": None,
-           "email": "", "org": "", "plan": ""}
+           "email": "", "org": "", "plan": "", "loginExpiresAt": None}
     auth = _codex_auth(d, a)
     toks = (auth or {}).get("tokens") or {}
     if not (toks.get("access_token") or (auth or {}).get("OPENAI_API_KEY")):
@@ -499,6 +607,9 @@ def _fetch_codex(d, a):
         return rec
     rec["logged_in"] = True
     c = _jwt_claims(toks.get("id_token", ""))
+    # Codex OAuth JWT exp is an automatically refreshed access-token deadline,
+    # not a verified login lifetime. Never turn it into a sign-in warning.
+    rec['accessTokenExpiresAt'] = _expiry_iso(_jwt_claims(toks.get('access_token', '')).get('exp'))
     oa = c.get("https://api.openai.com/auth") or {}
     rec["email"] = c.get("email", "")
     rec["plan"] = str(oa.get("chatgpt_plan_type") or ("api key" if auth.get("OPENAI_API_KEY") else "")).title()
@@ -565,6 +676,11 @@ def payload(d=None):
     auto = _auto_cfg()
     auto["last_switch"] = st.get("last_switch")
     out = []
+    with _login_lock:
+        active_logins = {s['id']: {k: s.get(k) for k in ('login_id', 'authorization_url', 'code_required', 'browser_opened')}
+                         for s in _login_sessions.values() if not s['done'].is_set()}
+        login_errors = {s['id']: s.get('error') or ('Sign-in did not complete. Start it again.' if s.get('result') != 0 else None)
+                        for s in _login_sessions.values() if s['done'].is_set()}
     for a in sorted(d["accounts"] + d.get("pending_accounts", []), key=lambda x: (x["tool"], not _is_default(x))):
         c = d["cache"].get(a["id"], {})
         out.append({
@@ -577,9 +693,19 @@ def payload(d=None):
             "extra": c.get("extra"), "credits": c.get("credits"),
             "spend_control": c.get("spend_control"), "quota_source": c.get("quota_source"),
             "quota_attributed": c.get("quota_attributed"),
+            "loginExpiresAt": c.get('loginExpiresAt'), "accessTokenExpiresAt": c.get('accessTokenExpiresAt'),
+            "warnings": account_warnings(a, c), "renewal_pending": a['id'] in _pending_renewals,
+            "login": active_logins.get(a['id']),
+            "login_error": login_errors.get(a['id']), "login_starting": a['id'] in _login_starting,
+            "renewal_error": (_pending_renewals.get(a['id']) or {}).get('error'),
             "global": st["global_active"].get(a["tool"]) == a["id"],
         })
+    try:
+        notices.annotate(out, os.path.join(DATA, 'notices.json'))
+    except (OSError, ValueError, KeyError) as error:
+        print(f"notices: {type(error).__name__}: {error}")
     return {"active": st["active"], "auto_switch": auto,
+            "notice_center": notices.summary(os.path.join(DATA, "notices.json")),
             "accounts": [a for a in out if a['logged_in'] and a['email']],
             "pending_accounts": [a for a in out if not (a['logged_in'] and a['email'])]}
 
@@ -592,6 +718,14 @@ def _promote_verified(d, a, record):
 
 def verify(aid):
     """Check only this profile; a typed name alone never establishes a login."""
+    with _login_lock:
+        sessions = [s for s in _login_sessions.values() if s['id'] == aid]
+        if aid in _login_starting or any(not s['done'].is_set() for s in sessions):
+            raise ValueError('Sign-in is still in progress. Complete authorization before checking the account.')
+        if sessions:
+            latest = sessions[-1]
+            if latest.get('error') or latest.get('result') != 0:
+                raise ValueError(latest.get('error') or 'Sign-in did not complete. Start it again.')
     with LOCK:
         d = load()
         a = _acct(d, aid)
@@ -602,6 +736,15 @@ def verify(aid):
         d['cache'][aid] = rec
         _promote_verified(d, a, rec)
         save(d)
+        if rec.get('logged_in') and rec.get('email') and (sessions or rec.get('quota_attributed')):
+            try:
+                notices.resolve_signin(os.path.join(DATA, 'notices.json'), aid)
+            except (OSError, ValueError) as error:
+                print(f"notices: {type(error).__name__}: {error}")
+        with _login_lock:
+            for sid, session in list(_login_sessions.items()):
+                if session['id'] == aid and session['done'].is_set():
+                    _login_sessions.pop(sid, None)
         return payload(d)
 
 
@@ -616,9 +759,13 @@ def env_for(tool, account_id=None, d=None):
     default profile, whose home is the global location) run with the plain env."""
     d = d or load()
     a = _acct(d, account_id or d["state"]["active"].get(tool)) if (account_id or tool) else None
-    if not a or a["tool"] != tool or _is_default(a) or d["state"]["global_active"].get(tool) == a["id"]:
+    if not a or a["tool"] != tool or d["state"]["global_active"].get(tool) == a["id"]:
         return _base_env()
     var = "CLAUDE_CONFIG_DIR" if tool == "claude" else "CODEX_HOME"
+    if _is_default(a):
+        if not a.get('login_config_dir'):
+            raise ValueError('Default account is stashed; renew its sign-in before launching it separately')
+        return _base_env(**{var: a['login_config_dir']})
     return _base_env(**{var: a["config_dir"]})
 
 
@@ -750,16 +897,399 @@ def add(tool, label):
     return {"ok": True, "id": aid, "config_dir": cdir, "login_cmd": cmd}
 
 
-def start_login(aid):
-    """Open an isolated native login in Terminal, only on an explicit UI action."""
+def _login_activity(a):
+    """Read fresh inventory; an unattributed live turn may use this account."""
+    try:
+        import live
+        rows, unclassified = live.mac_sessions()  # read-only process scan, no remote probe or server restart
+        if any(not isinstance(row, dict) or row.get('tool') in (None, a['tool']) for row in unclassified):
+            return 'Some local chat processes cannot be attributed safely.'
+        for row in rows:
+            if row.get('node', 'mac') not in ('mac', 'local') or row.get('tool') != a['tool'] or row.get('alive') is False:
+                continue
+            if row.get('account_id') and row['account_id'] != a['id']:
+                continue
+            if row.get('status') != 'idle':
+                return 'A chat on this provider is running or its state is uncertain.'
+    except Exception:
+        return 'Live chat status could not be checked.'
+    return None
+
+
+def set_default(tool, aid):
+    """Select future launches only. Never move credentials or affect live chats."""
+    with LOCK:
+        data = load()
+        account = _acct(data, aid)
+        if not account or account['tool'] != tool:
+            raise ValueError('Unknown account for this provider')
+        if account not in data['accounts'] or not (data.get('cache', {}).get(aid) or {}).get('logged_in'):
+            raise ValueError('Sign in and verify this account first')
+        data['state']['active'][tool] = aid
+        save(data)
+        return payload(data)
+
+
+def _login_target(d, a):
+    """A stashed default signs in separately, never over the current global login."""
+    stashed = _is_default(a) and d['state']['global_active'].get(a['tool']) != a['id']
+    if not stashed:
+        return a, _auth_env(d, a), False
+    root = os.path.join(DATA, 'login-profiles')
+    os.makedirs(root, mode=0o700, exist_ok=True)
+    directory = tempfile.mkdtemp(prefix=a['tool'] + '-default-', dir=root)
+    target = dict(a, id=a['tool'] + '-recovery-' + uuid.uuid4().hex, config_dir=directory)
+    env = _base_env()
+    env['CLAUDE_CONFIG_DIR' if a['tool'] == 'claude' else 'CODEX_HOME'] = directory
+    return target, env, True
+
+
+def _finish_login(session):
+    if not session['stashed']:
+        return
+    with LOCK:
+        data = load()
+        account = _acct(data, session['id'])
+        if not account:
+            raise ValueError('The account was removed during sign-in')
+        target = session['target']
+        os.makedirs(BACKUPS, mode=0o700, exist_ok=True)
+        stash = tempfile.mkdtemp(prefix='renewed-default-', dir=BACKUPS)
+        if account['tool'] == 'claude':
+            credentials, _source = _claude_creds(data, target)
+            identity = _profile_oauth_account(target)
+            if not credentials or not identity:
+                raise RuntimeError('Sign-in finished but its isolated credential could not be verified')
+            _jwrite(os.path.join(stash, 'claude-credentials.json'), credentials, mode=0o600)
+            _jwrite(os.path.join(stash, 'claude-oauthAccount.json'), identity, mode=0o600)
+        else:
+            auth = _jread(os.path.join(target['config_dir'], 'auth.json'), None)
+            if not auth:
+                raise RuntimeError('Sign-in finished but its isolated credential could not be verified')
+            _jwrite(os.path.join(stash, 'codex-auth.json'), auth, mode=0o600)
+        account['stash'] = stash
+        account['login_config_dir'] = target['config_dir']
+        # A renewed stashed default can resume its existing history without
+        # moving the globally active login. Never replace profile-local data.
+        names = ['projects'] if account['tool'] == 'claude' else ['sessions', 'state_5.sqlite']
+        original = os.path.join(HOME, '.' + account['tool'])
+        for name in names:
+            link = os.path.join(target['config_dir'], name)
+            if not os.path.lexists(link):
+                os.symlink(os.path.join(original, name), link)
+        data.get('cache', {}).pop(account['id'], None)
+        save(data)
+
+
+def _open_login_browser(url):
+    try:
+        return subprocess.run(['/usr/bin/open', '-g', url], capture_output=True, timeout=10).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _browser_login(d, a):
+    """Native OAuth in an owned PTY; only the explicit action opens a browser."""
+    target, env, stashed = _login_target(d, a)
+    env['BROWSER'] = '/usr/bin/false'
+    env['TERM'] = 'dumb'
+    master, slave = pty.openpty()
+    attrs = termios.tcgetattr(slave)
+    attrs[3] &= ~termios.ECHO
+    termios.tcsetattr(slave, termios.TCSANOW, attrs)
+    try:
+        argv = [_cli(a['tool']), *(['auth', 'login'] if a['tool'] == 'claude' else ['login'])]
+        proc = subprocess.Popen(argv, stdin=slave,
+                                stdout=slave, stderr=slave, env=env, close_fds=True)
+    except Exception:
+        os.close(master)
+        raise
+    finally:
+        os.close(slave)
+    buf = b''
+    deadline = time.monotonic() + 20
+    url = None
+    while time.monotonic() < deadline and proc.poll() is None:
+        ready, _, _ = select.select([master], [], [], .2)
+        if not ready:
+            continue
+        try:
+            buf += os.read(master, 8192)
+        except OSError:
+            break
+        expression = rb'https://claude\.com/cai/oauth/authorize\?[^\s\x1b\x07]+' if a['tool'] == 'claude' else rb'https://auth\.openai\.com/(?:oauth/authorize|authorize)\?[^\s\x1b\x07]+'
+        match = re.search(expression, buf)
+        if match and (b'Paste code here' in buf or b'\n' in buf[match.end():]):
+            url = match.group().decode('ascii')
+            break
+        buf = buf[-65536:]
+    if not url:
+        proc.terminate()
+        proc.wait(timeout=3)
+        os.close(master)
+        raise RuntimeError(a['tool'].title() + ' browser sign-in could not start. Please try again.')
+    login_id = uuid.uuid4().hex
+    session = {'id': a['id'], 'process': proc, 'master': master, 'target': target,
+               'stashed': stashed, 'done': threading.Event(), 'result': None, 'error': None, 'tool': a['tool'],
+               'authorization_url': url, 'login_id': login_id, 'code_required': a['tool'] == 'claude'}
+    with _login_lock:
+        _login_sessions[login_id] = session
+
+    def finish():
+        try:
+            deadline = time.monotonic() + 300
+            while proc.poll() is None and time.monotonic() < deadline:
+                ready, _, _ = select.select([master], [], [], .2)
+                if ready:
+                    try:
+                        os.read(master, 8192)  # drain private native output; never expose it
+                    except OSError:
+                        break
+            if proc.poll() is None:
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.terminate()  # only this owned sign-in child, never a chat
+            result = proc.wait(timeout=3)
+            if result == 0:
+                _finish_login(session)
+            session['result'] = result
+        except Exception as error:
+            session['error'] = str(error)
+        finally:
+            os.close(master)
+            session['finished_at'] = time.time()
+            session['done'].set()
+    threading.Thread(target=finish, daemon=True).start()
+    opened = _open_login_browser(url)
+    session['browser_opened'] = opened
+    return {'ok': True, 'id': a['id'], 'login_started': True, 'login_id': login_id,
+            'authorization_url': url, 'browser_opened': opened, 'code_required': a['tool'] == 'claude',
+            'message': 'Sign in with Claude, then paste the authorization code.' if a['tool'] == 'claude' else 'Complete sign-in in your browser, then check the account.'}
+
+
+def _claude_browser_login(d, a):
+    return _browser_login(d, a)
+
+
+def _codex_browser_login(d, a):
+    """Use native OAuth RPC: its authUrl belongs to the caller to open.
+
+    macOS codex login uses NSWorkspace and does not honor BROWSER; the app-server
+    protocol avoids a second foreground browser launch. No thread/turn is made.
+    """
+    target, env, stashed = _login_target(d, a)
+    proc = subprocess.Popen([_cli('codex'), 'app-server'], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            text=True, bufsize=1, env=env)
+    incoming = queue.Queue()
+
+    def read():
+        try:
+            for line in proc.stdout:
+                try:
+                    incoming.put(json.loads(line))
+                except ValueError:
+                    pass
+        except (OSError, ValueError):
+            pass
+        finally:
+            incoming.put(None)
+
+    threading.Thread(target=read, daemon=True).start()
+
+    def send(value):
+        proc.stdin.write(json.dumps(value) + '\n')
+        proc.stdin.flush()
+
+    def response(request_id):
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            try:
+                message = incoming.get(timeout=max(.01, deadline - time.monotonic()))
+            except queue.Empty:
+                break
+            if message is None:
+                break
+            if message.get('id') == request_id:
+                if message.get('error'):
+                    raise RuntimeError('Codex could not start its native browser sign-in')
+                return message.get('result') or {}
+        raise RuntimeError('Codex browser sign-in did not respond')
+
+    def close_owned():
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            _reap_login_process(proc)
+        finally:
+            proc.stdout.close()
+
+    try:
+        send({'id': 1, 'method': 'initialize', 'params': {'clientInfo': {'name': 'library_account_login', 'version': '1.0'}}})
+        response(1)
+        send({'method': 'initialized', 'params': {}})
+        send({'id': 2, 'method': 'account/login/start', 'params': {'type': 'chatgpt'}})
+        result = response(2)
+        url, native_id = result.get('authUrl'), result.get('loginId')
+        if not isinstance(url, str) or not re.match(r'^https://auth\.openai\.com/', url) or not native_id:
+            raise RuntimeError('Codex did not return a supported authorization URL')
+    except Exception:
+        close_owned()
+        raise
+    login_id = uuid.uuid4().hex
+    session = {'id': a['id'], 'process': proc, 'target': target, 'stashed': stashed,
+               'done': threading.Event(), 'result': None, 'error': None, 'tool': 'codex',
+               'authorization_url': url, 'login_id': login_id, 'code_required': False}
+    with _login_lock:
+        _login_sessions[login_id] = session
+
+    def finish():
+        try:
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                try:
+                    message = incoming.get(timeout=max(.01, deadline - time.monotonic()))
+                except queue.Empty:
+                    break
+                if message is None:
+                    break
+                params = message.get('params') or {}
+                if message.get('method') == 'account/login/completed' and params.get('loginId') == native_id:
+                    if not params.get('success'):
+                        raise RuntimeError('Codex sign-in was not completed. Start it again.')
+                    _finish_login(session)
+                    session['result'] = 0
+                    return
+            raise RuntimeError('Codex sign-in expired. Start it again.')
+        except Exception as error:
+            session['error'] = str(error)
+        finally:
+            try:
+                close_owned()
+            except (OSError, ValueError, subprocess.SubprocessError):
+                session['error'] = session['error'] or 'The dedicated sign-in process could not close cleanly.'
+            finally:
+                session['finished_at'] = time.time()
+                session['done'].set()
+    threading.Thread(target=finish, daemon=True).start()
+    session['browser_opened'] = _open_login_browser(url)
+    return {'ok': True, 'id': a['id'], 'login_started': True,
+            **{k: session[k] for k in ('login_id', 'authorization_url', 'browser_opened', 'code_required')},
+            'message': 'Complete sign-in in your browser, then check the account.'}
+
+
+def submit_login_code(aid, login_id, code):
+    if not isinstance(code, str) or not code.strip() or '\n' in code or '\r' in code or len(code) > 8192:
+        raise ValueError('Enter the authorization code from Claude.')
+    with _login_lock:
+        session = _login_sessions.get(login_id)
+        if not session or session['id'] != aid or session['process'].poll() is not None:
+            raise ValueError('This sign-in has expired. Start it again.')
+        os.write(session['master'], (code.strip() + '\n').encode())
+    if not session['done'].wait(timeout=30):
+        raise RuntimeError('Claude is still processing sign-in. Check the account in a moment.')
+    if session['error']:
+        raise RuntimeError(session['error'])
+    if session['result'] != 0:
+        raise RuntimeError('Claude could not complete sign-in. Start it again.')
+    with _login_lock:
+        _login_sessions.pop(login_id, None)
+    return {'ok': True, 'id': aid, 'message': 'Sign-in completed. Check the account to verify it.'}
+
+
+def _reap_login_process(proc):
+    """Reap only a dedicated child returned by this module's Popen call."""
+    try:
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=3)
+
+
+def start_login(aid, when_idle=False):
+    # The URL handshake can take seconds; reserve the account before yielding
+    # so concurrent clicks cannot create two native authorization sessions.
+    with _login_lock:
+        if aid in _login_starting:
+            return {'ok': True, 'id': aid, 'login_started': False, 'login_pending': True,
+                    'message': 'Sign-in is starting. Its authorization link will appear shortly.'}
+        _login_starting.add(aid)
+    try:
+        result = _start_login(aid, when_idle)
+        if result.get('login_started'):
+            with _login_lock:
+                _pending_renewals.pop(aid, None)
+        return result
+    finally:
+        with _login_lock:
+            _login_starting.discard(aid)
+
+
+def _start_login(aid, when_idle=False):
+    """Start the requested account's native sign-in on an explicit UI action."""
     d = load()
     a = _acct(d, aid)
     if not a:
         raise ValueError("unknown account")
-    if _is_default(a) or d["state"]["global_active"].get(a["tool"]) == aid:
-        raise ValueError("Create a separate profile to add a login")
+    with _login_lock:
+        for sid, session in list(_login_sessions.items()):
+            if session['id'] == aid and not session['done'].is_set():
+                return {'ok': True, 'id': aid, 'login_started': True,
+                        **{k: session.get(k) for k in ('login_id', 'authorization_url', 'code_required', 'browser_opened')},
+                        'message': 'Sign-in is already open in your browser.'}
+    busy = _login_activity(a)
+    if busy:
+        if when_idle:
+            with _login_lock:
+                _pending_renewals[aid] = {'queued_at': time.time()}
+            return {'ok': True, 'id': aid, 'login_started': False, 'renewal_pending': True,
+                    'message': busy + ' Sign-in will open when chats are safely idle.'}
+        raise ValueError(busy + ' Choose Renew when idle to preserve running chats.')
+    if a['tool'] == 'claude':
+        _link_isolated_claude_projects(d, a)
+        return _claude_browser_login(d, a)
+    try:
+        return _codex_browser_login(d, a)
+    except (OSError, RuntimeError):
+        if _is_default(a) and d['state']['global_active'].get('codex') != aid:
+            raise RuntimeError('The isolated default-account browser sign-in could not start; try again without changing the global account.')
+        return _terminal_login(d, a)
+
+
+def _link_isolated_claude_projects(data, account):
+    """Share history only for an idle isolated profile with no projects entry."""
+    if account.get('tool') != 'claude' or not account.get('config_dir') or _is_default(account) or data['state']['global_active'].get('claude') == account['id']:
+        return
+    root = os.path.realpath(os.path.expanduser(account['config_dir']))
+    canonical_root = os.path.realpath(os.path.join(HOME, '.claude'))
+    projects = os.path.join(canonical_root, 'projects')
+    if not os.path.isdir(root) or not os.path.isdir(projects):
+        return
+    if os.path.commonpath([root, canonical_root]) in (root, canonical_root):
+        return
+    target = os.path.join(root, 'projects')
+    if os.path.lexists(target):
+        return
+    try:
+        os.symlink(projects, target)
+    except FileExistsError:
+        pass
+
+
+def _terminal_login(d, a):
+    """Explicit sign-in fallback only, after the native browser PTY failed."""
+    aid = a['id']
     key = "CLAUDE_CONFIG_DIR" if a["tool"] == "claude" else "CODEX_HOME"
-    args = ["env", key + "=" + a["config_dir"], _cli(a["tool"])]
+    scoped_env = _auth_env(d, a)
+    args = ['env', key + '=' + scoped_env[key]] if key in scoped_env else ['env', '-u', key]
+    args += [_cli(a['tool'])]
     args += ["auth", "login"] if a["tool"] == "claude" else ["login"]
     command = shlex.join(args)
     if sys.platform != 'darwin':
@@ -774,7 +1304,7 @@ def start_login(aid):
     with os.fdopen(fd, 'w') as handle:
         handle.write('#!/bin/sh\nexport PATH=' + shlex.quote(_base_env()['PATH']) + '\n' + command + '\nprintf "\\nSign-in finished. Return to Workspace and click Check sign-in.\\n"\n')
     try:
-        result = subprocess.run(['/usr/bin/open', '-a', 'Terminal', path], capture_output=True, timeout=10)
+        result = subprocess.run(['/usr/bin/open', '-g', '-a', 'Terminal', path], capture_output=True, timeout=10)
         started = result.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         started = False
@@ -839,9 +1369,17 @@ def _h_add(req, query, body):
 
 def _h_login(req, query, body):
     try:
-        return start_login((body or {}).get("id"))
+        return start_login((body or {}).get("id"), when_idle=(body or {}).get('when_idle') is True)
     except (ValueError, RuntimeError) as exc:
         return {"ok": False, "error": str(exc)}, 400
+
+
+def _h_login_code(req, query, body):
+    body = body or {}
+    try:
+        return submit_login_code(body.get('id'), body.get('login_id'), body.get('code'))
+    except (ValueError, RuntimeError, OSError) as exc:
+        return {'ok': False, 'error': str(exc)}, 400
 
 
 def _h_verify(req, query, body):
@@ -864,6 +1402,71 @@ def _h_switch(req, query, body):
         return {"ok": False, "error": str(e)}, 400
 
 
+def _h_default(req, query, body):
+    body = body or {}
+    try:
+        return set_default(body.get('tool'), body.get('id'))
+    except ValueError as error:
+        return {'ok': False, 'error': str(error)}, 400
+
+
+def _run_pending_renewals():
+    with _login_lock:
+        queued = [aid for aid, state in _pending_renewals.items() if not state.get('error')]
+    for aid in queued:
+        data = load()
+        account = _acct(data, aid)
+        if not account:
+            with _login_lock:
+                _pending_renewals.pop(aid, None)
+            continue
+        if _login_activity(account):
+            continue
+        try:
+            result = start_login(aid, when_idle=True)
+            if result.get('login_started'):
+                with _login_lock:
+                    _pending_renewals.pop(aid, None)
+        except (OSError, ValueError, RuntimeError) as error:
+            with _login_lock:
+                _pending_renewals[aid]['error'] = str(error)
+
+
+def _notice_account(failure):
+    account_id = failure.get('account_id')
+    if not isinstance(account_id, str):
+        return None
+    data = load()
+    profile = _acct(data, account_id)
+    if profile and profile['tool'] == failure.get('provider'):
+        return {**data['cache'].get(account_id, {}), 'id': account_id, 'label': profile.get('label')}
+    return None
+
+
+def collect_run_notice(run):
+    failure = run.get('failure') or {'kind': 'other'}
+    failure = {**failure, 'provider': run.get('provider'),
+               'account_id': failure.get('account_id') or run.get('account_id'),
+               'model': run.get('model'), 'run_id': run['id'],
+               'chat_key': run.get('key') or run.get('conversation_key'),
+               'observed_at': failure.get('observed_at') or run.get('finished_at')}
+    try:
+        notices.act(os.path.join(DATA, 'notices.json'), {'action': 'collect', 'failure': failure},
+                    account=_notice_account(failure))
+    except (OSError, ValueError, KeyError) as error:
+        print(f"notices: {type(error).__name__}: {error}")
+
+
+def _h_notices(req, query, body):
+    try:
+        body = body or {}
+        failure = body.get('failure')
+        account = _notice_account(failure) if body.get('action') in ('collect', 'shown') and isinstance(failure, dict) else None
+        return notices.act(os.path.join(DATA, 'notices.json'), body, account=account)
+    except ValueError as error:
+        return {'ok': False, 'error': str(error)}, 400
+
+
 def _h_auto(req, query, body):
     set_auto(body or {})
     return payload()
@@ -872,11 +1475,12 @@ def _h_auto(req, query, body):
 def background():
     """Refresh quota observations only; routing occurs once at launch time."""
     global _last_bg
+    _run_pending_renewals()
     every = int(_config().get("usage_refresh_s") or 300)
     if time.time() - _last_bg < every:
         return
     _last_bg = time.time()
-    refresh()
+    payload(refresh())
 
 
 ROUTES = {
@@ -884,10 +1488,14 @@ ROUTES = {
     ("POST", "/api/accounts/refresh"): _h_refresh,
     ("POST", "/api/accounts/add"): _h_add,
     ("POST", "/api/accounts/login"): _h_login,
+    ("POST", "/api/accounts/login/code"): _h_login_code,
     ("POST", "/api/accounts/verify"): _h_verify,
     ("POST", "/api/accounts/remove"): _h_remove,
     ("POST", "/api/accounts/switch"): _h_switch,
+    ("POST", "/api/accounts/default"): _h_default,
     ("POST", "/api/accounts/auto_switch"): _h_auto,
+    ("GET", "/api/notices"): lambda req, query, body: notices.listing(os.path.join(DATA, 'notices.json')),
+    ("POST", "/api/notices"): _h_notices,
 }
 BACKGROUND = [(background, 30)]
 

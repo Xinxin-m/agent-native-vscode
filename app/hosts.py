@@ -13,15 +13,21 @@ user, create/test an SSH alias using a dedicated key and verify its host key,
 copy host_connector.py there, create its connector.json with host_id second-mac
 and host-local account directories, add the record above, then explicitly
 POST /api/hosts/probe {"id":"second-mac"}. Never sync credential files.
-The cluster uses read_alias cluster-dtn and execution_alias cluster-compute; no scheduler polling,
-allocation creation, SSH key enrollment, network changes or background probes.
+A cluster is a remote_sources entry in data/config.json, for example
+{"name":"cluster","label":"Cluster","kind":"slurm","host":"cluster-dtn",
+ "live_host":"cluster-compute","node_pattern":"node-\\d+","login_aliases":["cluster"]}:
+host is its data-transfer alias, live_host an allocated compute node whose
+hostname must match node_pattern, and login_aliases never execute. No scheduler
+polling, allocation creation, SSH key enrollment, network changes or background probes.
 """
 import json
 import os
+import re
 import subprocess
 import threading
 import time
 from automation import automation_kind
+import json_cache
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, 'data')
@@ -39,12 +45,34 @@ def _read(path, default):
         return default
 
 
+def _index():
+    """Shared parsed index, refreshed in the background; read-only."""
+    return json_cache.latest(os.path.join(DATA, 'index.json'), {})
+
+
 def _config():
     return _read(os.path.join(DATA, 'config.json'), {})
 
 
 def _saved_hosts():
     return _read(os.path.join(DATA, 'hosts.json'), {}).get('hosts') or []
+
+
+_WORKSPACES = [None, {}]  # (index object, {host: top folders}); the index copy is shared and unchanging
+
+
+def _workspaces(index):
+    if _WORKSPACES[0] is not index:
+        counts = {}
+        for meta in index.values():
+            path = meta.get('cwd') or ''
+            if meta.get('is_child') or automation_kind(meta) or not path.startswith('/') or path.startswith(('/tmp', '/private/tmp')):
+                continue
+            for host in str(meta.get('node') or 'mac').split('+'):
+                host_counts = counts.setdefault(host, {})
+                host_counts[path] = host_counts.get(path, 0) + 1
+        _WORKSPACES[:] = [index, {host: sorted(c, key=lambda path: (-c[path], path))[:30] for host, c in counts.items()}]
+    return _WORKSPACES[1]
 
 
 def host_records():
@@ -55,12 +83,13 @@ def host_records():
         name = source.get('name')
         if not name or name == 'mac':
             continue
-        records.append({'id': name, 'label': 'compute cluster' if name == 'cluster' else name,
+        records.append({'id': name, 'label': source.get('label') or name,
                         'transport': 'ssh', 'configured': bool(source.get('live_host')),
-                        'read_alias': 'cluster-dtn' if name == 'cluster' else source.get('host'),
+                        'read_alias': source.get('read_alias') or source.get('host'),
                         'execution_alias': source.get('live_host'),
                         'connector_path': '~/.local/lib/chat-library/host_connector.py',
-                        'kind': 'slurm' if name == 'cluster' else 'ssh'})
+                        'kind': source.get('kind') or 'ssh', 'node_pattern': source.get('node_pattern') or '',
+                        'login_aliases': source.get('login_aliases') or []})
     records.append({'id': 'second-mac', 'label': 'Second Mac', 'transport': 'ssh', 'configured': False,
                     'execution_alias': '', 'read_alias': '', 'connector_path': '~/.local/lib/chat-library/host_connector.py'})
     byid = {r['id']: r for r in records}
@@ -80,17 +109,9 @@ def host_records():
                 record.update(state='stale', can_execute=False)
         if not record.get('configured'):
             record.update(state='unconfigured', can_execute=False)
-    index = _read(os.path.join(DATA, 'index.json'), {})
+    folders_by_host = _workspaces(_index())
     for record in byid.values():
-        counts = {}
-        for meta in index.values():
-            path = meta.get('cwd') or ''
-            if meta.get('is_child') or automation_kind(meta) or not path.startswith('/') or path.startswith(('/tmp', '/private/tmp')):
-                continue
-            if record['id'] not in str(meta.get('node') or 'mac').split('+'):
-                continue
-            counts[path] = counts.get(path, 0) + 1
-        folders = sorted(counts, key=lambda path: (-counts[path], path))[:30]
+        folders = folders_by_host.get(record['id'], [])
         record['workspaces'] = folders
         record['default_cwd'] = record.get('default_cwd') or (folders[0] if folders else os.path.expanduser('~') if record['id']=='mac' else '')
     return list(byid.values())
@@ -130,14 +151,15 @@ def probe_host(host_id):
             raise ValueError('Connector identity or protocol does not match this host')
         if host.get('expected_machine_id') and remote['machine_id'] != host['expected_machine_id']:
             raise ValueError('Connector machine identity changed')
-        if host.get('kind') == 'slurm' and (not remote.get('job_id') or not str(remote.get('hostname') or '').startswith('node-')):
+        pattern = host.get('node_pattern')
+        if host.get('kind') == 'slurm' and (not remote.get('job_id') or pattern and not re.fullmatch(pattern, str(remote.get('hostname') or ''))):
             raise ValueError('Cluster connector is not inside an allocated compute node')
         observed_at = time.time()
         sessions = []
         for row in remote.get('sessions') or []:
             row = dict(row, node=host_id, observed_at=observed_at)
             if 'stop' not in remote.get('capabilities', []) or not row.get('identity'):
-                row.update(stop_allowed=False, stop_reason=row.get('stop_reason') or 'Connector process controls are unavailable')
+                row.update(stop_allowed=False, stop_reason=row.get('stop_reason') or "This host's connector cannot stop sessions; stop it on the host.")
             sessions.append(row)
         state = dict(state='online', can_execute='run' in remote.get('capabilities', []), observed_at=observed_at,
                      machine_id=remote['machine_id'], hostname=remote.get('hostname'), job_id=remote.get('job_id'),
