@@ -83,16 +83,20 @@ def defaults(req,query,body):
         host=native.get('execution_host') or native.get('host_id') or query.get('host_id') or native.get('node') or 'mac'
         if '+' in host:host=query.get('host_id') if query.get('host_id') in host.split('+') else host
         if host not in ('mac','local'):
-            return {'defaults':{'provider':provider,'host_id':host,**({'cwd':native['cwd']} if native.get('cwd') else {}),'model':query.get('model') or native.get('model_main') or '', 'effort':'','account':native.get('account_id') or query.get('account') or ''},'notice':'Remote provider configuration is resolved on its host at launch.'}
+            return {'defaults':{'provider':provider,'host_id':host,**({'cwd':native['cwd']} if native.get('cwd') else {}),'model':query.get('model') or native.get('model_main') or '', 'effort':'','account':native.get('account_id') or query.get('account') or ''}}
         notice=''
         try:
             value=local_defaults(provider,native,query.get('account'),query.get('model'))
         except host_connector.AmbiguousSessionAccount as exc:
-            # A normal state for a chat seen from several profiles: report it, do not fail.
+            # Profiles that share one login already resolved upstream. Only different
+            # logins reach here; that goes to the notification center, once per chat.
             value=local_defaults(provider,{k:v for k,v in native.items() if k not in ('id','account_id','account')},None,query.get('model'))
             value.update(account='',selectedAccount='',account_required=True)
             value.pop('account_selection',None)
-            notice=str(exc)
+            if len(getattr(exc,'candidates',())) > 1:
+                import notices
+                title=(native.get('title_seed') or 'this chat')[:80]
+                notices.note(HERE/'data/notices.json','account:'+key,f'{provider.title()} chat "{title}" exists under different sign-ins. Choose its original account before sending.')
         if not value.get('cwd'):
             import hosts
             value['cwd']=hosts.get_host('mac')['default_cwd']

@@ -336,6 +336,18 @@ def _failure_incident(records, failure, account, now):
     return _incident(records, account_id, warning, now, observed)
 
 
+def note(path, key, message, now=None):
+    """Add a center-only notice once per key; archiving it keeps it quiet."""
+    now = time.time() if now is None else now
+    with _LOCK:
+        state = _read(path)
+        records = state.setdefault('notices', {})
+        if key not in records:
+            records[key] = {'kind': 'other', 'first_seen': now, 'message': message}
+            _write(path, state)
+    return key
+
+
 def act(path, body, now=None, account=None):
     """Collect incidents and update shared notification state."""
     now = time.time() if now is None else now

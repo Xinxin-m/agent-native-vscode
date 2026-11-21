@@ -258,6 +258,41 @@ def _profile_directory(data, profile):
     return directory
 
 
+def _login_identity(tool, directory):
+    """Non-secret login identity the provider CLI itself reads from this home, or None."""
+    if tool == 'codex':
+        tokens = (_read(os.path.join(directory, 'auth.json'), {}) or {}).get('tokens') or {}
+        if not tokens.get('account_id'):
+            return None
+        try:
+            part = (tokens.get('id_token') or '').split('.')[1]
+            claims = json.loads(base64.urlsafe_b64decode(part + '=' * (-len(part) % 4)))
+            user = (claims.get('https://api.openai.com/auth') or {}).get('chatgpt_user_id')
+        except (IndexError, ValueError, TypeError, AttributeError):
+            user = None
+        return ('codex', tokens['account_id'], user or '')
+    # Claude keeps the default home's login in ~/.claude.json, others in <home>/.claude.json.
+    default = os.path.realpath(os.path.expanduser('~/.claude'))
+    path = '~/.claude.json' if os.path.realpath(directory) == default else os.path.join(directory, '.claude.json')
+    login = (_read(path, {}) or {}).get('oauthAccount') or {}
+    return ('claude', login['accountUuid'], login.get('organizationUuid') or '') if login.get('accountUuid') else None
+
+
+def _one_login(data, tool, matches, directories):
+    """Profiles that see a session and share one signed-in login act as one account.
+
+    Signed-out profiles cannot run the resume and are not candidates once a
+    signed-in one matches. Returns the active profile for new chats, else the
+    default, else the first by id; None when the logins differ or none is known.
+    """
+    identities = {pid: _login_identity(tool, directories[pid]) for pid in matches}
+    signed_in = sorted(pid for pid, login in identities.items() if login)
+    if not signed_in or len({identities[pid] for pid in signed_in}) != 1:
+        return None
+    active = data.get('state', {}).get('active', {}).get(tool)
+    return next((pid for pid in (active, tool + '-default') if pid in signed_in), signed_in[0])
+
+
 def shared_session_store(tool, source_account, target_account):
     """An explicit recovery may change account only for the same physical store."""
     source, source_home, _ = local_profile(tool, source_account)
@@ -273,7 +308,7 @@ def resolve_local_account(tool, account_id=None, model=None, session_id=None, cw
     data = _local_accounts()
     bound = None
     if session_id:
-        matches = []
+        matches, directories = [], {}
         for profile in data.get('accounts', []):
             if profile.get('tool') != tool:
                 continue
@@ -283,6 +318,7 @@ def resolve_local_account(tool, account_id=None, model=None, session_id=None, cw
                 continue
             if _session_exists(tool, directory, session_id, cwd):
                 matches.append(profile['id'])
+                directories[profile['id']] = directory
         if tool == 'codex' and matches:
             # Shared session-directory symlinks establish presence, not ownership.
             # The native transcript creator must match this profile's auth identity.
@@ -310,8 +346,12 @@ def resolve_local_account(tool, account_id=None, model=None, session_id=None, cw
             bound = account_id
         elif len(matches) == 1:
             bound = matches[0]
+        elif len(matches) > 1 and (shared := _one_login(data, tool, matches, directories)):
+            bound = shared
         else:
-            raise AmbiguousSessionAccount('Session account is missing or ambiguous; choose its original account')
+            error = AmbiguousSessionAccount('Session account is missing or ambiguous; choose its original account')
+            error.candidates = matches
+            raise error
     try:
         import accounts
         auto = accounts._auto_cfg()
