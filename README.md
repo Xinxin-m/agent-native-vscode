@@ -25,9 +25,11 @@ The full [agent onboarding guide](docs/AGENT-ONBOARDING.md) covers discovery, ac
 
 - Search and organize local Claude Code and Codex conversations by project.
 - Open chat and file tabs beside each other; preview images, Markdown, HTML, PDF, and source files.
+- Create, move, and copy files in the Files tab, including between this computer and a connected SSH host.
 - Continue conversations through the native provider and follow broker-managed work from multiple clients.
 - Keep drafts while switching tabs, inspect pending questions and permissions, and see run status.
 - Connect multiple Claude and Codex profiles and inspect their verified identities in Accounts.
+- Review sign-in and usage-limit notices in one notification center, and move new chats to another account from a notice.
 - Group conversations automatically, then rename projects or move chats yourself.
 
 The browser workspace has the broadest feature set. The optional VS Code extension continues existing conversations using the same backend. It keeps the native editor, terminal, and other extensions.
@@ -140,6 +142,7 @@ Before restarting a running backend, inspect `/api/runs` and the broker journals
 ```sh
 cd app/workbench
 npm ci
+npm test
 npm run build
 ```
 
@@ -147,7 +150,7 @@ The repository includes the browser build, so a fresh user can run Python direct
 
 `python3 scripts/package_workspace.py` creates an allowlisted source-and-assets archive with a file inventory, hashes, privacy scan, and dependency notices. It excludes private data, installed dependencies, old build hashes, browser captures, and local reports. Read the inventory before sharing. See [repository layout and release checks](docs/RELEASE.md).
 
-The root keeps the entry points and project overview; `app/` contains the runnable application, and `docs/` contains setup and maintenance guides. See the directory map in the release guide before adding a new file.
+The root keeps the entry points and project overview; `app/` contains the runnable application, and `docs/` contains setup and maintenance guides. `AGENTS.md` (imported by `CLAUDE.md`) gives coding agents the repository rules; `agents/` and `prompts/` hold general agent roles and operating rules. See the directory map in the release guide before adding a new file.
 
 Feel free to customize the interface, grouping rules, or provider workflows for your own use. Open issues with reproduction steps, runtime versions, and redacted logs. Never attach conversation exports, credentials, or private file paths to a public issue.
 
