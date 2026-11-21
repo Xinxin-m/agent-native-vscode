@@ -5,9 +5,16 @@ export function dismissPopupDetails(menus:Iterable<{open:boolean;contains:(targe
 }
 export function installPopupDismissal(doc:Document){
  const outside=(event:PointerEvent)=>dismissPopupDetails(doc.querySelectorAll<HTMLDetailsElement>(popupSelector),event.target);
- const escape=(event:KeyboardEvent)=>{if(event.key==='Escape')dismissPopupDetails(doc.querySelectorAll<HTMLDetailsElement>(popupSelector));};
+ const escape=(event:KeyboardEvent)=>{
+  if(event.key!=='Escape')return;
+  const trigger=doc.activeElement?.closest('details.chat-settings[open]')?.querySelector<HTMLElement>('summary');
+  dismissPopupDetails(doc.querySelectorAll<HTMLDetailsElement>(popupSelector));
+  trigger?.focus();
+ };
  // Delay action dismissal until React has dispatched the chosen action.
  const selected=(event:MouseEvent)=>{const target=event.target as Element;if(!target?.closest)return;const action=target.closest('button,a');const menu=action?.closest<HTMLDetailsElement>('details.fv-menu, .context-menu details');if(menu)queueMicrotask(()=>{menu.open=false;});};
+ const blur=()=>dismissPopupDetails(doc.querySelectorAll<HTMLDetailsElement>('details.chat-settings[open]'));
+ doc.defaultView?.addEventListener('blur',blur);
  doc.addEventListener('pointerdown',outside,true);doc.addEventListener('keydown',escape,true);doc.addEventListener('click',selected,true);
- return()=>{doc.removeEventListener('pointerdown',outside,true);doc.removeEventListener('keydown',escape,true);doc.removeEventListener('click',selected,true);};
+ return()=>{doc.defaultView?.removeEventListener('blur',blur);doc.removeEventListener('pointerdown',outside,true);doc.removeEventListener('keydown',escape,true);doc.removeEventListener('click',selected,true);};
 }

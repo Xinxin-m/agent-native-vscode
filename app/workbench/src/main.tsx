@@ -1,8 +1,11 @@
 import React from 'react';
 import {createRoot} from 'react-dom/client';
 import App from './App';
+import {WorkspaceScopeProvider} from './navigation/WorkspaceSelector';
 import {installTooltips} from './ui/tooltips';
 import {installPopupDismissal} from './ui/dismiss';
+import {installRunningIndicator} from './ui/runningIndicator';
 installPopupDismissal(document);
 installTooltips(document);
-createRoot(document.getElementById('root')!).render(<App/>);
+installRunningIndicator(document);
+createRoot(document.getElementById('root')!).render(<WorkspaceScopeProvider><App/></WorkspaceScopeProvider>);
