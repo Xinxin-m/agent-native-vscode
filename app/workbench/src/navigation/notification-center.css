@@ -1,0 +1,32 @@
+.library-notifications{display:inline-flex;flex:0 0 auto;align-items:center;color:var(--ink,var(--vscode-foreground,#262523));font-size:13px}
+.library-notifications .notification-bell{position:relative;display:grid;place-items:center;width:28px;height:28px;padding:0;border:0;border-radius:var(--radius,5px);background:transparent;color:inherit;cursor:pointer}
+.notification-bell:hover,.notification-bell[aria-expanded=true]{background:var(--hover,var(--vscode-toolbar-hoverBackground,#8882))}
+.notification-bell svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.notification-bell i{position:absolute;top:3px;right:3px;width:7px;height:7px;border-radius:50%;background:var(--vscode-charts-red,#d03342)}
+.notification-bell i[hidden],.notification-panel[hidden]{display:none}
+.notification-panel{box-sizing:border-box;position:fixed;z-index:2000;inset:auto auto 36px 8px;width:min(380px,calc(100% - 16px));max-height:min(530px,calc(100% - 44px));overflow:auto;overscroll-behavior:contain;padding:12px;border:1px solid var(--line,var(--vscode-panel-border,#8886));border-radius:var(--radius,8px);background:var(--panel,var(--paper,var(--vscode-editor-background,#fff)));box-shadow:0 5px 20px #0002;text-align:left;color:var(--ink,var(--vscode-foreground,#262523));font-size:13px;line-height:1.4}
+.notification-panel h2{margin:0 0 7px;font-size:15px}
+.notification-panel ul{margin:0;padding:0;list-style:none}
+.notification-panel p{margin:0;overflow-wrap:anywhere}
+.notification-panel p[role=status]:not(:empty){margin:9px 0 2px}
+.notification-panel .notification-tabs,.notification-panel .notification-actions{display:flex;flex-wrap:wrap;gap:5px}
+.notification-panel .notification-actions:empty{display:none}
+.notification-panel button{cursor:pointer}
+.notification-panel .notification-tabs button,.notification-panel .notification-actions button,.notification-panel .notification-body button{background:transparent;color:inherit;border:1px solid var(--line,var(--vscode-panel-border,#8886));border-radius:var(--radius,5px);padding:4px 7px;font:inherit;max-width:100%;overflow-wrap:anywhere}
+.notification-panel .notification-tabs button[aria-pressed=true],.notification-panel button:hover{background:var(--hover,var(--vscode-toolbar-hoverBackground,#8882))}
+.notification-row{position:relative;padding:9px 28px 9px 0;border-bottom:1px solid var(--line,var(--vscode-panel-border,#8886))}
+.notification-row:last-child{padding-bottom:2px;border-bottom:0}
+.notification-panel .notification-row>.auth-warning{margin:0;padding:0;border:0;background:transparent;color:inherit;font:inherit}
+.notification-panel .notification-row>.auth-warning button{margin:5px 5px 0 0}
+.notification-row .notification-actions{margin-top:6px}
+.notification-panel .notification-archive{position:absolute;right:0;top:7px;width:26px;height:26px;border:0;border-radius:var(--radius,5px);background:transparent;color:inherit;font-size:19px;line-height:1}
+.workspace-footer:has(>.library-notifications){opacity:1}
+.workspace-footer:has(>.library-notifications)>:not(.library-notifications){opacity:.65}
+.workspace-footer>.library-notifications{margin-left:auto}
+.workspace-footer>.library-notifications+button{margin-left:0}
+.notification-panel h2:focus{outline:none}
+
+#topbar>.library-notifications{margin-left:auto}
+.notification-panel-top{inset:55px 8px auto auto;max-height:min(530px,calc(100% - 63px))}
+
+.notification-panel{box-sizing:border-box}
