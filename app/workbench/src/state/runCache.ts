@@ -1,6 +1,6 @@
 import type {RunState} from './runs';
 export const runCachePrefix='library.workbench.run.';
-const fields=['id','status','key','conversation_key','session_id','provider','host_id','account_id','created_at','updated_at','operation','recovery_blocked'];
+const fields=['id','status','key','conversation_key','session_id','provider','host_id','account_id','created_at','updated_at','finished_at','operation','recovery_blocked'];
 /** Event journals live on the server. A browser cache must replay from zero. */
 export function cacheRunState(state:RunState):RunState{
  const run:any={};for(const field of fields){const value=state.run?.[field];if(typeof value==='string')run[field]=value.slice(0,256);else if(typeof value==='boolean'||typeof value==='number')run[field]=value;}
