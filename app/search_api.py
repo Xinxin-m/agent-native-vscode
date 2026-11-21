@@ -70,6 +70,8 @@ def search(data, query):
             skipped += 1
             continue
         for turn_index, turn in enumerate(chat.get('turns') or []):
+            if turn.get('channel') == 'analysis':
+                continue
             text = str(turn.get('text') or '')
             position = text.casefold().find(folded)
             if position < 0:
@@ -78,7 +80,10 @@ def search(data, query):
             matched_roots.add(logical_key)
             rows.append({'key':logical_key,'matched_key':key,'turn_index':turn_index,
                          'snippet':('…' if start else '')+text[start:position+len(needle)+140],
-                         'role':turn.get('role'),'host_id':meta.get('node') or 'mac'})
+                         'role':turn.get('role'),'host_id':meta.get('execution_host') or meta.get('host_id') or meta.get('node'),
+                         'cwd':meta.get('cwd'), 'execution_cwd':meta.get('execution_cwd'),
+                         'execution_host':meta.get('execution_host') or meta.get('host_id'),
+                         'node':meta.get('node')})
             # Pagination counts logical conversations, never matching turns.
             break
     return {'ok':True,'results':rows[offset:offset+limit],

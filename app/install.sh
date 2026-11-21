@@ -5,6 +5,7 @@
 #   ./install.sh --hooks-only    only wire the session hooks
 #   ./install.sh --skill-only    only install the agent skill
 #   ./install.sh --service       also keep the server running at login
+#   ./install.sh --daily-label   only install the once-a-day relabel job (also part of --service)
 #   ./install.sh --no-refresh    skip the first (slow) refresh
 #   ./install.sh --uninstall     remove hooks, skill, and service (keeps your data)
 #
@@ -22,12 +23,13 @@ SKILL_DIR="$HOME/.claude/skills/chat-dashboard"
 PLIST="$HOME/Library/LaunchAgents/com.chatdashboard.server.plist"
 SYSTEMD_UNIT="$HOME/.config/systemd/user/chat-dashboard.service"
 
-DO_CONFIG=1 DO_HOOKS=1 DO_SKILL=1 DO_SERVICE=0 DO_REFRESH=1 DO_UNINSTALL=0
+DO_CONFIG=1 DO_HOOKS=1 DO_SKILL=1 DO_SERVICE=0 DO_DAILY=0 DO_REFRESH=1 DO_UNINSTALL=0
 for arg in "$@"; do
   case "$arg" in
     --hooks-only)  DO_CONFIG=0; DO_SKILL=0; DO_REFRESH=0 ;;
     --skill-only)  DO_CONFIG=0; DO_HOOKS=0; DO_REFRESH=0 ;;
-    --service)     DO_SERVICE=1 ;;
+    --service)     DO_SERVICE=1; DO_DAILY=1 ;;
+    --daily-label) DO_CONFIG=0; DO_HOOKS=0; DO_SKILL=0; DO_REFRESH=0; DO_DAILY=1 ;;
     --no-refresh)  DO_REFRESH=0 ;;
     --uninstall)   DO_UNINSTALL=1 ;;
     -h|--help)     sed -n '2,20p' "$0"; exit 0 ;;
@@ -123,6 +125,7 @@ if [ "$DO_UNINSTALL" = 1 ]; then
   unwire_hook "$CODEX_HOOKS"
   [ -d "$SKILL_DIR" ] && rm -rf "$SKILL_DIR" && say "removed $SKILL_DIR"
   if [ -f "$PLIST" ]; then launchctl unload "$PLIST" 2>/dev/null || true; rm -f "$PLIST"; say "removed launch agent"; fi
+  "$HERE/scripts/install_daily_label.sh" --remove
   if [ -f "$SYSTEMD_UNIT" ]; then systemctl --user disable --now chat-dashboard 2>/dev/null || true; rm -f "$SYSTEMD_UNIT"; say "removed systemd unit"; fi
   echo "Done. Delete $HERE to remove the tool itself."
   exit 0
@@ -242,6 +245,12 @@ UNITEOF
     systemctl --user enable --now chat-dashboard
     say "systemd user unit enabled -- http://127.0.0.1:$PORT"
   fi
+fi
+
+# ------------------------------------------------------- 4b. daily relabel
+if [ "$DO_DAILY" = 1 ]; then
+  echo "daily relabel job:"
+  "$HERE/scripts/install_daily_label.sh" "${PY_ABS:-$(command -v "$PY")}" | sed 's/^/  /'
 fi
 
 # --------------------------------------------------------- 5. first refresh

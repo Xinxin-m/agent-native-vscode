@@ -260,6 +260,7 @@ def analytics(days=30, cwd='', host='', include_ops=False):
     today = dt.datetime.now().astimezone().date()
     lo, hi = (today-dt.timedelta(days=days-1)).isoformat(), today.isoformat()
     index = load_index(); enrich = load_json(DATA/'enrich.json', {})
+    titles = load_json(DATA/'chat_flags.json', {}).get('titles') or {}
     selected = {}
     for key, meta in index.items():
         root = index.get(meta.get('root_key') or key, meta)
@@ -303,7 +304,7 @@ def analytics(days=30, cwd='', host='', include_ops=False):
         if 'pricing_buckets' in row:
             row['estimate']=estimate_cost(row.pop('pricing_buckets'))
             if not row['estimate']['total_tokens']: row['estimate']['coverage']=0
-        row['sessions'] = [dict(key=k, title=(enrich.get(k) or {}).get('title') or index.get(k, {}).get('title_seed') or k) for k in sorted(row['sessions'])]
+        row['sessions'] = [dict(key=k, title=titles.get(k) or (enrich.get(k) or {}).get('title') or index.get(k, {}).get('title_seed') or k) for k in sorted(row['sessions'])]
         return row
     return dict(from_day=lo, to_day=hi, tools=[finish(v) for v in sorted(groups.values(), key=lambda r:-(r['calls']+r['references']))],
         agents=[finish(v) for v in sorted(agents.values(), key=lambda r:-sum(r['usage'].values()))],

@@ -8,7 +8,7 @@ data/chats/ plus their generated titles/descriptions/keywords in data/enrich.jso
   python3 search_chats.py database migration        # AND of all terms
   python3 search_chats.py vercel --any               # OR
   python3 search_chats.py slurm -n 30                # more results
-  python3 search_chats.py backup --source codex         # one agent only
+  python3 search_chats.py backup --source codex      # one agent only
   python3 search_chats.py backup --since 2026-08-01
   python3 search_chats.py --full claude-<session-id>
 
@@ -24,6 +24,7 @@ import sys
 ROOT = os.path.dirname(os.path.abspath(__file__))
 CHATS = os.path.join(ROOT, "data", "chats")
 ENRICH = os.path.join(ROOT, "data", "enrich.json")
+FLAGS = os.path.join(ROOT, "data", "chat_flags.json")
 
 W_TITLE, W_KEYWORD, W_DESC, W_BODY_CAP = 10, 6, 4, 8
 
@@ -110,6 +111,7 @@ def main():
 
     pats = [re.compile(re.escape(t), re.I) for t in args.terms]
     enrich = load_json(ENRICH, {})
+    titles = (load_json(FLAGS, {}) or {}).get("titles") or {}
     results = []
 
     for name in os.listdir(CHATS):
@@ -126,10 +128,11 @@ def main():
             continue
 
         meta = enrich.get(key, {})
-        title = meta.get("title") or chat.get("title_seed") or "(untitled)"
+        title = titles.get(key) or meta.get("title") or chat.get("title_seed") or "(untitled)"
         desc = meta.get("description", "")
         keywords = " ".join(meta.get("keywords", []))
-        body = "\n".join(t.get("text", "") for t in chat.get("turns", []))
+        body = "\n".join(t.get("text", "") for t in chat.get("turns", [])
+                         if t.get("channel") != "analysis")
 
         score, matched, best = 0, 0, ""
         for pat in pats:

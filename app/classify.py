@@ -108,6 +108,11 @@ def main():
     if os.path.exists(ENRICH):
         with open(ENRICH) as fh:
             enrich = json.load(fh)
+    try:  # a manual rename is the title given to classification; it never queues a chat
+        with open(os.path.join(DATA, "chat_flags.json")) as fh:
+            titles = json.load(fh).get("titles") or {}
+    except (OSError, ValueError, AttributeError):
+        titles = {}
     proj = {"projects": [], "assignments": {}}
     if os.path.exists(PROJECTS) and not reclassify_all:
         try:
@@ -128,7 +133,12 @@ def main():
 
     proj = effective_projects(index, proj)
     atomic_json_dump(proj, PROJECTS, indent=1)
-    todo = [k for k in index if not index[k].get('is_child') and not automation_kind(index[k]) and k not in proj.get('manual_assignments', []) and (reclassify_all or k not in proj["assignments"])]
+    # A chat with only a provisional title has not been labelled yet; it waits for its first label.
+    waiting = {k for k, v in enrich.items() if isinstance(v, dict) and v.get('provisional')}
+    todo = [k for k in index if not index[k].get('is_child') and not automation_kind(index[k]) and k not in proj.get('manual_assignments', []) and k not in waiting and (reclassify_all or k not in proj["assignments"])]
+    if "--min" in sys.argv and len(todo) < int(sys.argv[sys.argv.index("--min") + 1]):
+        print(f"only {len(todo)} chats to classify; waiting for the daily run")
+        return
     if not todo:
         print("nothing to classify")
         return
@@ -143,7 +153,7 @@ def main():
             d = os.path.basename(m.get("cwd") or "") or "?"
             lines.append(" | ".join([
                 k, m["source"], d,
-                (e.get("title") or m.get("title_seed") or m.get("first_prompt", ""))[:80],
+                (titles.get(k) or e.get("title") or m.get("title_seed") or m.get("first_prompt", ""))[:80],
                 e.get("topic_hint", "")[:40],
                 ",".join(e.get("keywords", [])[:4]),
                 "true" if e.get("is_ops") else "false",
