@@ -98,7 +98,7 @@ def command_catalog(provider='claude', cwd='', host_id='mac'):
 
 def native_claude_commands(cwd=''):
     """Commands the installed Claude CLI advertises on initialize, the same source the
-    native clients use. No prompt is sent and no session is persisted."""
+    Library Code app uses. No prompt is sent and no session is persisted."""
     key = cwd if cwd and Path(cwd).is_dir() else tempfile.gettempdir()
     with _NATIVE_LOCK:
         cached = _NATIVE.get(key)
