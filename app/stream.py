@@ -62,7 +62,8 @@ def _account(tool, wanted):
 
 def _claude_transcript(env, cwd, sid):
     base = env.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
-    slug = re.sub(r"[^A-Za-z0-9]", "-", cwd)
+    from host_connector import claude_project_dir
+    slug = claude_project_dir(cwd)
     return os.path.join(os.path.expanduser(base), "projects", slug, sid + ".jsonl")
 
 

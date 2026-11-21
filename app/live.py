@@ -4,17 +4,18 @@ on each remote source (docs/V2-CONTRACTS.md, `GET /api/live`).
 
 Mac Claude sessions come from ~/.claude/sessions/<pid>.json whose pid is alive and
 still the same process (procStart matches). Mac Codex sessions come from `ps`.
-Remote sessions come from `ssh <live_host> '<live_cmd>'` (the cluster `chats --json`).
+Remote sessions come from `ssh <live_host> '<live_cmd>'` (for example a `chats --json` script).
 The route answers from the in-memory cache (seeded from data/live.json); the
 background thread refreshes the Mac list every `live_refresh_s` seconds. Remote
-sources are probed only on an explicit POST /api/live/refresh: each probe runs
-squeue + srun on a cluster, and a timer loop of those overloaded the cluster.
+sources are probed only on an explicit POST /api/live/refresh: a probe may run
+scheduler commands (squeue + srun on a cluster), and a timer loop of those can overload it.
 
   python3 live.py          refresh now and print the merged list as a table
   python3 live.py --json   refresh now and print the payload
 """
 import calendar, ctypes, glob, json, math, os, secrets, signal, subprocess, sys, threading, time
 from concurrent.futures import ThreadPoolExecutor
+import json_cache
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(ROOT, "data")
@@ -28,6 +29,11 @@ def _jload(path, default):
             return json.load(fh)
     except (OSError, ValueError):
         return default
+
+
+def _index():
+    """Shared parsed index, refreshed in the background; read-only."""
+    return json_cache.latest(os.path.join(DATA, "index.json"), {})
 
 
 def _jsave(path, obj):
@@ -67,12 +73,12 @@ def _tail_lines(path):
     with open(path, "rb") as fh:
         fh.seek(0, 2)
         fh.seek(max(0, fh.tell() - 3_000_000))
-        return fh.read().decode("utf-8", "replace").splitlines()
+        return fh.read().decode("utf-8", "replace").split("\n")  # JSON strings may hold raw U+2028
 
 
 def last_prompt(session_id, cwd):
     """(epoch, text, mtime) of the last message I typed, from the transcript tail.
-    Same rules as the cluster `chats` script."""
+    Same rules as the remote `chats` script."""
     slug = "".join(c if c.isalnum() else "-" for c in (cwd or ""))
     paths = glob.glob(f"{HOME}/.claude/projects/{slug}/{session_id}.jsonl") or \
         glob.glob(f"{HOME}/.claude/projects/*/{session_id}.jsonl")
@@ -285,10 +291,18 @@ def mac_sessions():
             activity_note="Shared app service; conversation activity is not attributable" if app_server else "Conversation activity is not verified for this process",
             attach_cmd=f"tmux attach -t {tm}" if tm else "", restart_cmd=""))
     observed_at = time.time()
+    owned = _broker_processes()
     for row in rows:
         row['observed_at'] = observed_at
-        row['identity'] = process_identity(row['pid']) if row['tool'] == 'claude' else None
+        row['identity'] = process_identity(row['pid']) if row['tool'] == 'claude' or row['pid'] in owned else None
         row['stop_allowed'] = False
+        run = owned.get(row['pid'])
+        if run and row['identity'] and all(row['identity'].get(k) == (run.get('process_identity') or {}).get(k)
+                                           for k in ('pid', 'start_sec', 'start_usec')):
+            # Started by the Library broker: Stop interrupts the run through the broker.
+            row.update(broker_run_id=run['id'], run_key=run.get('key') or run.get('conversation_key') or '',
+                       stop_allowed=True, stop_reason='')
+            continue
         try:
             _validate_stop_session(row)
             row['stop_allowed'] = True
@@ -321,7 +335,7 @@ def remote_sessions(src):
         s["node"] = name
         s['observed_at'] = time.time()
         s['stop_allowed'] = False
-        s['stop_reason'] = 'Remote stopping requires verified process identity'
+        s['stop_reason'] = f'Listed by the {name} status script without a verified process; stop it on {name}.'
         sid = s.get("id") or ""
         s["id"] = f"{name}:{sid.split(':', 1)[1]}" if ":" in sid else f"{name}:{s.get('host')}:{s.get('name')}"
         sessions.append(s)
@@ -372,7 +386,7 @@ def refresh(remote=True):
                 _LAST_REMOTE[node["name"]] = (now, rows)
             nodes.append(node)
             sessions.extend(rows or [])
-        index = _jload(os.path.join(DATA, "index.json"), {})
+        index = _index()
         for s in sessions:
             key = f"{s.get('tool')}-{s.get('session_id')}" if s.get("session_id") else ""
             s["chat_key"] = key if key in index else ""
@@ -413,7 +427,7 @@ def _with_host_sessions(payload):
                 sessions.append(dict(observed))
             elif observed.get('observed_at', 0) > existing.get('observed_at', 0):
                 existing.update(observed)
-    index = _jload(os.path.join(DATA, 'index.json'), {})
+    index = _index()
     for row in sessions:
         key = row.get('tool', '') + '-' + row.get('session_id', '')
         if not row.get('chat_key') and key in index:
@@ -501,28 +515,56 @@ def _claude_executable(path):
             bool(__import__('re').fullmatch(r'[0-9]+(?:\.[0-9]+)+(?:[-.][A-Za-z0-9]+)*', os.path.basename(path))))
 
 
+def _broker_processes():
+    """pid -> run record for broker-owned provider processes still marked running.
+
+    Reads the run journals only; never constructs the broker (that would mark runs
+    of another process interrupted)."""
+    owned = {}
+    for path in glob.glob(os.path.join(DATA, 'execution', 'runs', '*', 'run.json')):
+        run = _jload(path, {})
+        if not isinstance(run, dict) or run.get('status') in ('completed', 'failed', 'interrupted') and not run.get('recovery_blocked'):
+            continue  # a blocked recovery is a broker-owned process that outlived a server restart
+        if isinstance(run.get('process_pid'), int) and run.get('process_transport', 'local') == 'local':
+            owned[run['process_pid']] = run
+    return owned
+
+
+# When Stop is offered (2026-11-15): broker-owned runs always (through the broker);
+# a Claude CLI on this Mac (terminal, tmux, VS Code, desktop app) when its pid,
+# start time, session file and workspace all match; a remote session only through a
+# connector that re-verifies the process. Codex processes outside the broker serve
+# several conversations and are never stopped from here.
 def _stop_candidate(row):
+    if row.get('broker_run_id'):
+        if row.get('alive') is not True or not _fresh(row, time.time()):
+            raise ValueError('This list is out of date; refresh, then stop.')
+        return
     if row.get('node') != 'mac':
         if row.get('alive') is not True or row.get('tool') != 'claude' or not row.get('stop_allowed') or not row.get('identity') or not row.get('execution_identity') or not _fresh(row, time.time()):
-            raise ValueError('Remote stopping requires fresh verified connector process identity')
+            raise ValueError('This remote session must be re-checked on its host before it can be stopped; refresh and try again.')
         return
     if row.get('tool') != 'claude':
-        raise ValueError('This session has an ambiguous process-to-conversation mapping')
+        raise ValueError('This Codex process may serve several conversations, so Stop is off here; stop it in its own app.')
     if row.get('alive') is not True:
-        raise ValueError('Only a verified running session can be stopped')
+        raise ValueError('This session is no longer running.')
     if not _fresh(row, time.time()):
-        raise ValueError('Refresh the session observation before stopping')
+        raise ValueError('This list is out of date; refresh, then stop.')
     identity = row.get('identity')
     if not isinstance(identity, dict) or any(identity.get(k) is None for k in ('pid', 'uid', 'start_sec', 'start_usec', 'executable', 'boot_id')):
-        raise ValueError('Native process identity is missing')
+        raise ValueError('Its process could not be verified, so Stop is off.')
     if identity['uid'] != os.getuid() or identity['pid'] != row.get('pid') or identity['pid'] <= 1:
-        raise ValueError('Process owner or PID does not match this session')
+        raise ValueError('Its process belongs to another user or has changed, so Stop is off.')
     if not identity['boot_id'] or not identity['start_sec'] or not _claude_executable(identity['executable']) or not row.get('session_id'):
-        raise ValueError('Process identity is ambiguous')
+        raise ValueError('Its process could not be matched to one conversation, so Stop is off.')
 
 
 def _validate_stop_session(row, policy=None):
     _stop_candidate(row)
+    if row.get('broker_run_id'):
+        if process_identity(row['pid']) != row['identity']:
+            raise ValueError('Its process changed; refresh the list.')
+        return
     if row.get('node') != 'mac':
         return  # Connector repeats native validation immediately before SIGTERM.
     if process_identity(row['pid']) != row['identity']:
@@ -592,6 +634,14 @@ def stop_commit(token, source='manual', policy=None):
         since = current.get('started_at') or (current.get('identity') or {}).get('start_sec') if policy['basis'] == 'age' else current.get('last_act_ts')
         if stop_policy() != policy or (policy['basis'] == 'idle' and current.get('status') != 'idle') or not isinstance(since, (int, float)) or time.time() - since <= policy['hours'] * 3600:
             raise ValueError('Automatic stop rule or session activity changed')
+    if current.get('broker_run_id'):
+        if policy is not None:
+            raise ValueError('Automatic stopping never interrupts a Library run.')
+        import broker
+        broker.instance().control(current['broker_run_id'], {'action': 'interrupt'})
+        result = {'ok': True, 'state': 'stop_requested', 'id': current['id'], 'run_id': current['broker_run_id']}
+        _record_outcome(current, result['state'], source)
+        return result
     if current.get('node') != 'mac':
         import hosts
         result = hosts.session_control(current['node'], 'stop', current, policy=policy)
@@ -666,8 +716,19 @@ def _record_outcome(row, state, source, error=''):
         _jsave(OUTCOMES_JSON, records[-100:])
 
 
-def stop_outcomes():
-    with _POLICY_LOCK:
+def stop_outcomes(wait=True):
+    # Settings must not wait behind an automatic stop in progress (it holds the
+    # lock through a fresh process scan or an SSH call): show the saved records.
+    if not _POLICY_LOCK.acquire(blocking=wait):
+        return [{k: v for k, v in row.items() if k not in ('identity', 'execution_identity')} for row in _jload(OUTCOMES_JSON, [])]
+    try:
+        return _stop_outcomes()
+    finally:
+        _POLICY_LOCK.release()
+
+
+def _stop_outcomes():
+    with _POLICY_LOCK:  # reentrant
         records = _jload(OUTCOMES_JSON, [])
         changed = False
         for row in records:
@@ -703,7 +764,7 @@ def stop_outcomes():
 
 
 def get_policy(req, query, body):
-    return dict(stop_policy(), outcomes=stop_outcomes(), scope='Verified Claude processes on this Mac and connected Linux hosts with process controls. Age rules include busy sessions; idle rules require idle status. Shared or ambiguous Codex processes and unverified hosts are excluded.')
+    return dict(stop_policy(), outcomes=stop_outcomes(wait=False), scope='Verified Claude processes on this Mac and connected Linux hosts with process controls. Age rules include busy sessions; idle rules require idle status. Shared or ambiguous Codex processes and unverified hosts are excluded.')
 
 
 def post_policy(req, query, body):
@@ -740,7 +801,7 @@ def enforce_stop_policy():
             since = (row.get('started_at') or identity.get('start_sec')) if policy['basis'] == 'age' else row.get('last_act_ts')
             if not isinstance(since, (int, float)) or now - since <= policy['hours'] * 3600:
                 continue
-            if not row.get('stop_allowed') or (policy['basis'] == 'idle' and row.get('status') != 'idle'):
+            if not row.get('stop_allowed') or row.get('broker_run_id') or (policy['basis'] == 'idle' and row.get('status') != 'idle'):
                 continue
             if any(item.get('identity') == identity and now - item.get('at', 0) < 3600 for item in previous):
                 continue
