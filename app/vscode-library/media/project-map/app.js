@@ -71,3 +71,12 @@ $('#map-settings').setAttribute('aria-expanded','false');$('#map-settings').oncl
 $('#activity-period').onchange=e=>{period=e.target.value;ProjectMapHost.prefs.setItem('project-map-period',period);offset=0;revision++;expanded.clear();manual.clear();[...windows.keys()].forEach(closeWindow);isLive=true;cutoff=Infinity;stopPlay();refresh(true)};
 $('#hide-inactive').onchange=e=>{hideInactive=e.target.checked;ProjectMapHost.prefs.setItem('project-map-hide-inactive',String(hideInactive));offset=0;revision++;manual.clear();fitAfterRender=true;render();refresh(true)};
 document.addEventListener('pointerdown',e=>{if(!e.target.closest('#settings-panel,#map-settings')){$('#settings-panel').hidden=true;$('#map-settings').setAttribute('aria-expanded','false')}});
+
+/* Keep control hints in the viewport, outside clipped map/window containers. */
+(function installControlHints(){
+ const tip=document.createElement('div');tip.id='control-tooltip';tip.setAttribute('role','tooltip');tip.hidden=true;document.body.append(tip);
+ let target=null,oldTitle=null,oldDescription=null;
+ function hide(){if(target){if(oldTitle!==null)target.setAttribute('title',oldTitle);if(oldDescription===null)target.removeAttribute('aria-describedby');else target.setAttribute('aria-describedby',oldDescription)}target=null;tip.hidden=true}
+ function show(event){const el=event.target instanceof Element?event.target.closest('[data-tip],[title],button[aria-label]'):null;if(el===target)return;hide();if(!el)return;const label=el.getAttribute('data-tip')||el.getAttribute('title')||el.getAttribute('aria-label');if(!label)return;target=el;oldTitle=el.getAttribute('title');oldDescription=el.getAttribute('aria-describedby');el.removeAttribute('title');el.setAttribute('aria-describedby',[oldDescription,tip.id].filter(Boolean).join(' '));tip.textContent=label;tip.hidden=false;const r=el.getBoundingClientRect(),w=tip.offsetWidth,h=tip.offsetHeight;tip.style.left=Math.max(8,Math.min(r.left+r.width/2-w/2,innerWidth-w-8))+'px';tip.style.top=Math.max(8,Math.min(r.bottom+h+14<=innerHeight?r.bottom+6:r.top-h-6,innerHeight-h-8))+'px'}
+ document.addEventListener('pointerover',show);document.addEventListener('focusin',show);document.addEventListener('pointerout',e=>{if(target&&!target.contains(e.relatedTarget))hide()});document.addEventListener('focusout',hide);document.addEventListener('pointerdown',hide);document.addEventListener('scroll',hide,true);window.addEventListener('resize',hide);document.addEventListener('keydown',e=>{if(e.key==='Escape')hide()});
+})();

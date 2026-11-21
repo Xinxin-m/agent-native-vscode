@@ -19,3 +19,6 @@
 
 body[data-theme=beige]{--bg:#f6f3ec;--panel:#fcfaf5;--ink:#36332d;--muted:#837d71;--line:#e9e3d8;--soft:#efebe3;--accent:#3c6d9e;--tint:#e7edf2;--dot:#b6afa3;color-scheme:light}
 body[data-theme=sage]{--bg:#f4f6f0;--panel:#fbfcf9;--ink:#2e352f;--muted:#748074;--line:#e0e5da;--soft:#ecf0e7;--accent:#3f7254;--tint:#e1ece3;--dot:#a6b29f;color-scheme:light}
+
+[data-tip]:hover:after,[data-tip]:focus-visible:after{display:none}
+#control-tooltip{position:fixed;z-index:2147483647;max-width:min(320px,calc(100vw - 16px));max-height:calc(100vh - 16px);overflow:hidden;overflow-wrap:anywhere;pointer-events:none;padding:6px 9px;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:6px;box-shadow:var(--shadow);font:11px/1.4 system-ui,sans-serif}#control-tooltip[hidden]{display:none}

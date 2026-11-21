@@ -27,7 +27,7 @@ Open the panel through `vscode://local.library-workspace/open`; optional `?key=<
 
 Create new conversations, change provider/model/account/host, fork or compact, manage projects, preview images, in browser Library. This first panel continues existing conversations, including native remote conversations through the broker. No terminal or filesystem execution is added by the panel. Transcript availability still depends on Library indexing; polling is not an indexing freshness guarantee. Drafts are private to this VS Code installation, while accepted prompts, runs and decisions are shared through the broker. Use one Library panel per VS Code window; concurrent windows rely on broker conflict/idempotency guards. A service outage preserves drafts and shows an error; Refresh/retry reconnects.
 
-Coverage: native account binding, shared run discovery and visible pending decisions. This is a focused additional chat client, not full Workspace UI parity.
+This is a focused additional chat client, not full Workspace UI parity.
 
 
 ## Project maps
