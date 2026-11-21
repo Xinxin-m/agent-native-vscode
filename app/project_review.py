@@ -43,6 +43,7 @@ def audit(index, enrich, projects, config, now=None, previous=None, flags=None):
     names = {p['id']: p['name'] for p in projects.get('projects', [])}
     rules = config.get('classification_rules', [])
     manual = set(projects.get('manual_assignments', []))
+    titles = (flags or {}).get('titles') or {}  # a manual rename wins
     items = []
     recent = 0
     fingerprints = {}
@@ -63,18 +64,18 @@ def audit(index, enrich, projects, config, now=None, previous=None, flags=None):
         if destinations:
             target = matches[0].get('project_id')
             if target != current:
-                items.append({'key': key, 'title': label.get('title') or meta.get('title_seed') or key,
+                items.append({'key': key, 'title': titles.get(key) or label.get('title') or meta.get('title_seed') or key,
                               'current': current, 'suggested': target, 'manual': key in manual,
                               'kind': 'rule_conflict' if len(destinations)>1 else 'placement',
                               'reason': matches[0].get('reason') or 'Matches configured purpose rule',
                               'ts_last': stamp})
         elif not current or current.startswith('workspace-'):
-            items.append({'key':key,'title':label.get('title') or meta.get('title_seed') or key,
+            items.append({'key':key,'title':titles.get(key) or label.get('title') or meta.get('title_seed') or key,
                           'current':current,'suggested':None,'manual':key in manual,
                           'kind':'unclassified' if not current else 'workspace_seed',
                           'reason':'Review purpose and whether a dedicated project is needed', 'ts_last':stamp})
         elif (stamp >= (now-dt.timedelta(days=14)).isoformat()[:10] and old_fingerprints.get(key) != fingerprint) or (pending.get(key,{}).get('kind') == 'purpose_review' and pending[key].get('current') == current):
-            items.append({'key':key,'title':label.get('title') or meta.get('title_seed') or key,
+            items.append({'key':key,'title':titles.get(key) or label.get('title') or meta.get('title_seed') or key,
                           'current':current,'suggested':None,'manual':key in manual,'kind':'purpose_review',
                           'reason':'Recent or changed conversation: inspect whether purpose still fits, or a new project/parent/merge is needed','ts_last':stamp})
     items.sort(key=lambda row: row.get('ts_last',''), reverse=True)
