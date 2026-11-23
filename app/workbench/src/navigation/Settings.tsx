@@ -1,4 +1,4 @@
-import {modelDisplay} from '../chat/modelDisplay';
+import {composerModels} from '../chat/modelCatalog';
 import {textSizes,nearestTextSize} from './textSize';
 import "./settings-polish.css";
 import React,{useState,useEffect} from 'react';
@@ -9,6 +9,7 @@ import {AccountsPage} from './AccountsPanel';
 import {useNotices,NoticeToggle,NoticeDuration} from './Notices';
 import {Insights} from './Insights';
 import {SessionCleanup} from './SessionCleanup';
+import {ModelUpdates} from '../chat/ModelUpdates';
 import {SECTIONS,matches,shownSections,type SettingRow} from './settingsSearch';
 
 type Row=SettingRow&{control:React.ReactNode;wide?:boolean};
@@ -36,7 +37,7 @@ export function Settings({initialTab='Appearance'}:{initialTab?:string}){
  const server=useServerSettings(data,refresh),notices=useNotices();
  if(initialTab==='Accounts')return <AccountsPage/>;
  const official=false,on=(value:boolean,change:(v:boolean)=>void)=><input type="checkbox" checked={value} onChange={e=>change(e.target.checked)}/>;
- const models=(provider:string)=>{const list=[['','Last used model'],...(data?.compose_options?.[provider]?.models||[]).filter((m:any)=>m.id).map((m:any)=>[m.id,modelDisplay(m,data?.compose_options?.[provider]?.models||[])])],v=p.defaultModels?.[provider]||'';return v&&!list.some(o=>o[0]===v)?[...list,[v,v]]:list;};
+ const models=(provider:string)=>{const v=p.defaultModels?.[provider]||'',list=[['','Last used model'],...composerModels(provider,data?.compose_options?.[provider]?.models||[],v).filter((m:any)=>m.id).map((m:any)=>[m.id,m.label])];return v&&!list.some(o=>o[0]===v)?[...list,[v,v]]:list;};
  const model=(provider:string,label:string)=>choose(label,p.defaultModels?.[provider]||'',models(provider),x=>setPreferences({defaultModels:{...p.defaultModels,[provider]:x}}));
  const compact={enabled:true,threshold:.5,idle_minutes:0,...server.value('auto_compact',{})},setCompact=(patch:any)=>void server.set('auto_compact',{...compact,...patch});
  const rows:Row[]=[
@@ -49,6 +50,7 @@ export function Settings({initialTab='Appearance'}:{initialTab?:string}){
   ...(official?[]:[
   {section:'Chats',label:'Claude Code model',hint:'Model for new Claude Code chats.',keywords:'default model opus sonnet',control:model('claude','Claude Code model')},
   {section:'Chats',label:'Codex model',hint:'Model for new Codex chats.',keywords:'default model gpt',control:model('codex','Codex model')},
+  {section:'Chats',label:'Model updates',hint:'New models appear when the Claude Code or Codex CLI refreshes its list. Check reads those lists and the CLI versions; nothing is sent to a model.',keywords:'check install upgrade cli version new models fable',wide:true,control:<ModelUpdates/>},
   {section:'Chats',label:'Thinking',hint:'Model reasoning in conversations.',keywords:'reasoning',control:choose('Thinking',p.thinking||'collapsed',[['collapsed','Show collapsed'],['expanded','Show expanded'],['hidden','Hide']],x=>setPreferences({thinking:x as any}))},
   {section:'Chats',label:'Tool output',hint:'Tool calls and their results in a run.',keywords:'activity details',control:choose('Tool output',p.toolOutput||'folded',[['folded','Folded'],['expanded','Expanded']],x=>setPreferences({toolOutput:x as any}))},
   {section:'Chats',label:'Composer height limit',hint:'Automatic fits up to eight lines and a quarter of the pane; choose a percentage to set a different limit.',keywords:'message box input',control:choose('Composer height limit',p.composerMax??'auto',[['auto','Automatic'],[.3,'30%'],[.45,'45%'],[.6,'60%'],[.75,'75%']],x=>setPreferences({composerMax:x==='auto'?null:+x}))},

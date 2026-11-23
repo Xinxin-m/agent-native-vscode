@@ -1,4 +1,5 @@
 import {useId} from 'react';
+import {ModelUpdates} from './ModelUpdates';
 
 type Effort = string | {id:string; name?:string};
 type Choice = {id:string; name:string};
@@ -18,9 +19,10 @@ export function effortChoices(advertised:Effort[]=[]):Choice[]{
 
 export function EffortPicker({choices,value,disabled,onChange}:{choices:Choice[];value:string;disabled:boolean;onChange:(value:string)=>void}){
  const id=useId();
- if(!choices.length)return null;
  const unavailable=value&&!choices.some(choice=>choice.id===value);
- return <div className="chat-picker-effort">
+ // The footer sits here so every model picker offers it, also when a model has no effort levels.
+ if(!choices.length)return <ModelUpdates compact/>;
+ return <><div className="chat-picker-effort">
   <span id={id}>Thinking</span>
   {choices.length===1&&!unavailable
    ? <span className="chat-picker-fixed">{choices[0].name}</span>
@@ -31,5 +33,5 @@ export function EffortPicker({choices,value,disabled,onChange}:{choices:Choice[]
       </label>)}
       {unavailable&&<small>Saved effort unavailable: {effortName(value)}</small>}
      </div>}
- </div>;
+ </div><ModelUpdates compact/></>;
 }

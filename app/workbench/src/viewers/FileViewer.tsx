@@ -10,10 +10,11 @@ import {HtmlPreview} from './HtmlPreview';
 import {ImageViewer} from './ImageViewer';
 import './viewers.css';
 import {RecoveryPanel} from './RecoveryPanel';
-const SourceEditor=lazy(()=>import('./SourceEditor').then(m=>({default:m.SourceEditor})));
-const RenderedMarkdownEditor=lazy(()=>import('./RenderedMarkdownEditor').then(m=>({default:m.RenderedMarkdownEditor})));
-const RenderedHtmlEditor=lazy(()=>import('./RenderedHtmlEditor').then(m=>({default:m.RenderedHtmlEditor})));
-const PdfViewer=lazy(()=>import('./PdfViewer').then(m=>({default:m.PdfViewer})));
+import {reloadOnStaleChunk} from '../ui/chunkReload';
+const SourceEditor=lazy(()=>reloadOnStaleChunk(()=>import('./SourceEditor')).then(m=>({default:m.SourceEditor})));
+const RenderedMarkdownEditor=lazy(()=>reloadOnStaleChunk(()=>import('./RenderedMarkdownEditor')).then(m=>({default:m.RenderedMarkdownEditor})));
+const RenderedHtmlEditor=lazy(()=>reloadOnStaleChunk(()=>import('./RenderedHtmlEditor')).then(m=>({default:m.RenderedHtmlEditor})));
+const PdfViewer=lazy(()=>reloadOnStaleChunk(()=>import('./PdfViewer')).then(m=>({default:m.PdfViewer})));
 type Mode='render'|'source'|'split'|'diff';
 function savedMode(resource:Resource):Mode{try{const value=resource.mode||sessionStorage.getItem('file-mode:'+fileViewIdentity(resource));if(['render','source','split','diff'].includes(value))return value as Mode;}catch{}return 'render';}
 export function FileViewer({resource}:{resource:Resource}){

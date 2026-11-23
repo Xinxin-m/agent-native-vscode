@@ -99,7 +99,8 @@ function renderTree(){const signature=JSON.stringify([state.key,state.tree]);if(
  for(const node of nodes){let depth=0,parent=node.parent_key,seen=new Set([node.key]);while(parent&&!seen.has(parent)){seen.add(parent);depth++;parent=byKey.get(parent)?.parent_key;}
   const row=element('div');row.className='subagent-row';for(let i=0;i<Math.min(depth,8);i++)row.append(element('span','›'));
   const button=element('button',node.title||'Recorded agent');button.disabled=Boolean(node.missing);button.onclick=()=>post('select',{key:node.key});row.append(button);
-  const status=node.status;if(status&&status!=='unknown')row.append(element('small',status==='completed'?'Finished':status));else row.append(element('small',node.missing?'Transcript unavailable':'Recorded'));box.append(row)
+  const status=node.missing?'unknown':node.agent_status||'unknown',dot=element('span');dot.className='agent-dot '+status;dot.title=node.activity_evidence||status;dot.setAttribute('aria-hidden','true');button.prepend(dot);
+  const small=element('small',node.missing?'Transcript unavailable':status==='finished'&&node.activity==='stopped'?'Stopped':status[0].toUpperCase()+status.slice(1));small.className='agent-state '+status;row.append(small);box.append(row)
  }
  if(!nodes.length)box.append(element('p','No linked subagents recorded.'));
 }

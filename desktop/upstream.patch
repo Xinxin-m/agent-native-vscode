@@ -1580,6 +1580,109 @@ index cd93a447d1c..f875687e753 100644
  	private onDidChangeAutoHideViewContainers(e: { before: number; after: number }): void {
  		// Only update if auto-hide is enabled and composite bar position is top/bottom
  		const activityBarPosition = this.configurationService.getValue<ActivityBarPosition>(LayoutSettings.ACTIVITY_BAR_LOCATION);
+diff --git a/src/vs/workbench/browser/parts/titlebar/media/titlebarpart.css b/src/vs/workbench/browser/parts/titlebar/media/titlebarpart.css
+index 12ab3a958e8..2d84d7f84dc 100644
+--- a/src/vs/workbench/browser/parts/titlebar/media/titlebarpart.css
++++ b/src/vs/workbench/browser/parts/titlebar/media/titlebarpart.css
+@@ -111,6 +111,36 @@
+ 	padding-left: 16px; /* ensure there is some space between title and controls */
+ }
+ 
++.monaco-workbench .part.titlebar .library-sidebar-toggle {
++	-webkit-app-region: no-drag;
++	z-index: 1;
++	display: grid;
++	place-items: center;
++	flex: none;
++	width: 28px;
++	height: 24px;
++	margin-inline-start: 6px;
++	padding: 0;
++	border: 0;
++	border-radius: 4px;
++	background: transparent;
++	color: inherit;
++	cursor: pointer;
++}
++
++.monaco-workbench.mac:not(.web):not(.fullscreen) .part.titlebar .library-sidebar-toggle {
++	margin-inline-start: 80px;
++}
++
++.monaco-workbench .part.titlebar .library-sidebar-toggle:hover {
++	background: var(--vscode-toolbar-hoverBackground);
++}
++
++.monaco-workbench .part.titlebar .library-sidebar-toggle:focus-visible {
++	outline: 1px solid var(--vscode-focusBorder);
++	outline-offset: -1px;
++}
++
+ /* Window title text */
+ .monaco-workbench .part.titlebar > .titlebar-container > .titlebar-center > .window-title {
+ 	flex: 0 1 auto;
+diff --git a/src/vs/workbench/browser/parts/titlebar/titlebarPart.ts b/src/vs/workbench/browser/parts/titlebar/titlebarPart.ts
+index 9c530bfbee3..32a99fe6283 100644
+--- a/src/vs/workbench/browser/parts/titlebar/titlebarPart.ts
++++ b/src/vs/workbench/browser/parts/titlebar/titlebarPart.ts
+@@ -53,7 +53,10 @@ import { IView } from '../../../../base/browser/ui/grid/grid.js';
+ import { createInstantHoverDelegate } from '../../../../base/browser/ui/hover/hoverDelegateFactory.js';
+ import { IBaseActionViewItemOptions } from '../../../../base/browser/ui/actionbar/actionViewItems.js';
+ import { IHoverDelegate } from '../../../../base/browser/ui/hover/hoverDelegate.js';
+-import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
++import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
++import { Codicon } from '../../../../base/common/codicons.js';
++import { ThemeIcon } from '../../../../base/common/themables.js';
++import product from '../../../../platform/product/common/product.js';
+ import { safeIntl } from '../../../../base/common/date.js';
+ import { IsCompactTitleBarContext, TitleBarVisibleContext } from '../../../common/contextkeys.js';
+ import { ServiceCollection } from '../../../../platform/instantiation/common/serviceCollection.js';
+@@ -262,6 +265,7 @@ export class BrowserTitlebarPart extends Part implements ITitlebarPart {
+ 	private title!: HTMLElement;
+ 
+ 	private leftContent!: HTMLElement;
++	private librarySidebarToggle?: HTMLButtonElement;
+ 	private centerContent!: HTMLElement;
+ 	private rightContent!: HTMLElement;
+ 
+@@ -531,6 +535,27 @@ export class BrowserTitlebarPart extends Part implements ITitlebarPart {
+ 		// Menubar: install a custom menu bar depending on configuration
+ 		this.updateMenubarInstallation();
+ 
++		if (!this.isAuxiliary && product.applicationName.startsWith('library-code') && hasCustomTitlebar(this.configurationService, this.titleBarStyle)) {
++			const toggle = this.librarySidebarToggle = append(this.leftContent, $('button.library-sidebar-toggle', { type: 'button' }));
++			const update = () => {
++				const visible = this.layoutService.isVisible(Parts.SIDEBAR_PART);
++				const label = visible ? localize('hideLibrarySidebar', "Hide Sidebar") : localize('showLibrarySidebar', "Show Sidebar");
++				toggle.setAttribute('aria-label', label);
++				toggle.setAttribute('aria-expanded', String(visible));
++				toggle.title = label;
++				toggle.className = 'library-sidebar-toggle ' + ThemeIcon.asClassName(visible ? Codicon.layoutSidebarLeft : Codicon.layoutSidebarLeftOff);
++			};
++			this._register(addDisposableListener(toggle, EventType.CLICK, () => {
++				void this.instantiationService.invokeFunction(accessor => accessor.get(ICommandService).executeCommand('workbench.action.toggleSidebarVisibility'));
++			}));
++			this._register(this.layoutService.onDidChangePartVisibility(event => {
++				if (event.partId === Parts.SIDEBAR_PART) {
++					update();
++				}
++			}));
++			update();
++		}
++
+ 		// Title
+ 		this.title = append(this.centerContent, $('div.window-title'));
+ 		this.createTitle();
+@@ -792,6 +817,9 @@ export class BrowserTitlebarPart extends Part implements ITitlebarPart {
+ 					actions,
+ 					(group) => group === 'navigation'
+ 				);
++				if (this.librarySidebarToggle) {
++					actions.primary = actions.primary.filter(action => action.id !== 'workbench.action.toggleSidebarVisibility');
++				}
+ 			}
+ 
+ 			// --- Global Actions (after layout so e.g. notification bell appears to the right of layout controls).
 diff --git a/src/vs/workbench/common/notifications.ts b/src/vs/workbench/common/notifications.ts
 index d46ad101a73..d7760ba8824 100644
 --- a/src/vs/workbench/common/notifications.ts

@@ -66,6 +66,14 @@ _pending_renewals = {}
 _login_starting = set()
 
 
+class LoginBusy(ValueError):
+    pass
+
+
+class LoginEmailRequired(ValueError):
+    pass
+
+
 def _expiry_iso(value):
     try:
         if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -110,7 +118,7 @@ def _epoch(value):
 def account_warnings(account, record, now=None):
     now = time.time() if now is None else now
     result = []
-    label = account.get('label') or record.get('email') or account['id']
+    label = (record.get('email') if record.get('logged_in') else None) or account.get('label') or account['id']
     expiry = _expiry_iso(record.get('loginExpiresAt'))
     if expiry:
         seconds = datetime.datetime.fromisoformat(expiry.replace('Z', '+00:00')).timestamp() - now
@@ -663,11 +671,42 @@ def refresh(d=None):
                 rec = _fetch_claude(d, a) if a["tool"] == "claude" else _fetch_codex(d, a)
             except Exception as e:
                 rec = {"logged_in": False, "error": f"{type(e).__name__}", "windows": []}
+            rec = _check_pending_identity(d, a, rec)
             rec["fetched_at"] = int(time.time())
             d["cache"][a["id"]] = rec
             _promote_verified(d, a, rec)
         save(d)
         return d
+
+
+def _mark_duplicate_logins(d, rows):
+    """Group profiles for display only. Existing per-profile routing stays valid."""
+    from host_connector import _login_identity, _profile_directory
+
+    by_email = {}
+    for row in rows:
+        if row['logged_in'] and row['email']:
+            by_email.setdefault((row['tool'], row['email'].casefold()), []).append(row)
+    for peers in by_email.values():
+        if len(peers) < 2:
+            continue
+        by_identity = {}
+        for row in peers:
+            profile = _acct(d, row['id'])
+            try:
+                identity = _login_identity(row['tool'], _profile_directory(d, profile))
+            except (OSError, ValueError):
+                continue
+            if identity and all(identity):
+                by_identity.setdefault(identity, []).append(row)
+        for aliases in by_identity.values():
+            if len(aliases) < 2:
+                continue
+            primary = min(aliases, key=lambda row: (
+                row['id'] != d['state']['active'].get(row['tool']), not row['global'], row['id']))
+            for row in aliases:
+                if row is not primary:
+                    row['duplicate_of'] = primary['id']
 
 
 def payload(d=None):
@@ -698,10 +737,12 @@ def payload(d=None):
             "login": active_logins.get(a['id']),
             "login_error": login_errors.get(a['id']), "login_starting": a['id'] in _login_starting,
             "renewal_error": (_pending_renewals.get(a['id']) or {}).get('error'),
+            "expected_email": _pending_email(d, a),
             "global": st["global_active"].get(a["tool"]) == a["id"],
         })
+    _mark_duplicate_logins(d, out)
     try:
-        notices.annotate(out, os.path.join(DATA, 'notices.json'))
+        notices.annotate([row for row in out if not row.get('duplicate_of')], os.path.join(DATA, 'notices.json'))
     except (OSError, ValueError, KeyError) as error:
         print(f"notices: {type(error).__name__}: {error}")
     return {"active": st["active"], "auto_switch": auto,
@@ -714,6 +755,27 @@ def _promote_verified(d, a, record):
     if record.get('logged_in') and record.get('email') and a in d.get('pending_accounts', []):
         d['pending_accounts'].remove(a)
         d['accounts'].append(a)
+
+
+def _valid_email(value):
+    if isinstance(value, str) and len(value) <= 254 and re.fullmatch(r"[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+", value.strip()):
+        return value.strip()
+    return None
+
+
+def _pending_email(data, account):
+    if account in data.get('pending_accounts', []):
+        return _valid_email(account.get('expected_email') or account.get('label'))
+    return None
+
+
+def _check_pending_identity(data, account, record):
+    expected = _pending_email(data, account)
+    actual = record.get('email') or ''
+    if expected and record.get('logged_in') and actual and actual.casefold() != expected.casefold():
+        return {'logged_in': False, 'windows': [],
+                'error': f'Expected {expected}. The provider signed in as {actual}. Choose the expected account in your browser and try again.'}
+    return record
 
 
 def verify(aid):
@@ -732,6 +794,7 @@ def verify(aid):
         if not a:
             raise ValueError('Unknown account setup')
         rec = _fetch_claude(d, a) if a['tool'] == 'claude' else _fetch_codex(d, a)
+        rec = _check_pending_identity(d, a, rec)
         rec['fetched_at'] = int(time.time())
         d['cache'][aid] = rec
         _promote_verified(d, a, rec)
@@ -902,7 +965,9 @@ def _login_activity(a):
     try:
         import live
         rows, unclassified = live.mac_sessions()  # read-only process scan, no remote probe or server restart
-        if any(not isinstance(row, dict) or row.get('tool') in (None, a['tool']) for row in unclassified):
+        tools_by_pid = {row.get('pid'): row.get('tool') for row in rows if isinstance(row, dict)}
+        if any((row.get('tool') if isinstance(row, dict) else tools_by_pid.get(row)) in (None, a['tool'])
+               for row in unclassified):
             return 'Some local chat processes cannot be attributed safely.'
         for row in rows:
             if row.get('node', 'mac') not in ('mac', 'local') or row.get('tool') != a['tool'] or row.get('alive') is False:
@@ -999,6 +1064,9 @@ def _browser_login(d, a):
     termios.tcsetattr(slave, termios.TCSANOW, attrs)
     try:
         argv = [_cli(a['tool']), *(['auth', 'login'] if a['tool'] == 'claude' else ['login'])]
+        hint = _pending_email(d, a) if a['tool'] == 'claude' else None
+        if hint:
+            argv.extend(['--email', hint])
         proc = subprocess.Popen(argv, stdin=slave,
                                 stdout=slave, stderr=slave, env=env, close_fds=True)
     except Exception:
@@ -1188,8 +1256,11 @@ def submit_login_code(aid, login_id, code):
         session = _login_sessions.get(login_id)
         if not session or session['id'] != aid or session['process'].poll() is not None:
             raise ValueError('This sign-in has expired. Start it again.')
-        os.write(session['master'], (code.strip() + '\n').encode())
-    if not session['done'].wait(timeout=30):
+        if session.get('write'):
+            session['write'](code.strip())
+        else:
+            os.write(session['master'], (code.strip() + '\n').encode())
+    if not session['done'].wait(timeout=session.get('code_wait', 30)):
         raise RuntimeError('Claude is still processing sign-in. Check the account in a moment.')
     if session['error']:
         raise RuntimeError(session['error'])
@@ -1198,6 +1269,94 @@ def submit_login_code(aid, login_id, code):
     with _login_lock:
         _login_sessions.pop(login_id, None)
     return {'ok': True, 'id': aid, 'message': 'Sign-in completed. Check the account to verify it.'}
+
+
+REMOTE_AUTH_URL = re.compile(r'^https://claude\.com/cai/oauth/authorize\?[^\s]+$')
+
+
+def start_remote_login(host_id, account_id, tool):
+    """Claude sign-in for an account on an execution host, through its SSH helper.
+
+    The helper runs the native login in its own PTY there; this Mac only opens
+    the authorization URL in the background and relays the pasted code.
+    """
+    import hosts
+    import host_connector
+    host = hosts.get_host(host_id)
+    label = host.get('label') or host_id
+    if host.get('transport') == 'local':
+        raise ValueError('This account is on this Mac')
+    if not host.get('can_execute'):
+        host = hosts.probe_host(host_id)
+    if not host.get('can_execute') or not host.get('machine_id'):
+        raise ValueError(label + ' is offline or not allocated; start its compute session, then try again')
+    if tool != 'claude':
+        raise ValueError('Codex sign-in on ' + label + ' must run there: codex login. Then retry the message.')
+    if 'login' not in (host.get('capabilities') or []):
+        raise ValueError(label + "'s Library connector predates remote sign-in. Install the current host_connector.py there, or run claude auth login on the host, then retry.")
+    if not any(a.get('id') == account_id and a.get('tool') == tool for a in host.get('accounts') or []):
+        raise ValueError('Account ' + str(account_id) + ' is not configured on ' + label)
+    key = host_id + ':' + account_id
+    with _login_lock:
+        for session in _login_sessions.values():
+            if session['id'] == key and not session['done'].is_set():
+                return {'ok': True, 'id': account_id, 'host_id': host_id, 'login_started': True, 'needs_code': True,
+                        **{k: session.get(k) for k in ('login_id', 'authorization_url', 'code_required', 'browser_opened', 'message')}}
+    request = dict(host_id=host_id, machine_id=host['machine_id'], job_id=host.get('job_id'), tool=tool, account_id=account_id)
+    proc = subprocess.Popen(host_connector.ssh_command(host, 'login', request), stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+
+    def line(seconds):
+        if select.select([proc.stdout], [], [], seconds)[0]:
+            try:
+                return json.loads(proc.stdout.readline() or 'null')
+            except ValueError:
+                return None
+        return None
+    first = line(40) or {}
+    url = first.get('authorization_url')
+    if not isinstance(url, str) or not REMOTE_AUTH_URL.match(url):
+        _stop_remote_login(proc)
+        detail = (proc.stderr.read() or '').strip().replace('Connector: ', '')[-300:] if proc.poll() is not None else ''
+        raise RuntimeError(detail or 'Claude sign-in could not start on ' + label + '. Try again.')
+    login_id = uuid.uuid4().hex
+    message = 'Signing in to ' + label + ' Claude account ' + account_id + '. Finish in your browser, then paste the code here.'
+
+    def write(code):
+        proc.stdin.write(code + '\n')
+        proc.stdin.flush()
+    session = {'id': key, 'process': proc, 'write': write, 'code_wait': 100, 'done': threading.Event(), 'result': None,
+               'error': None, 'tool': tool, 'host_id': host_id, 'authorization_url': url, 'login_id': login_id,
+               'code_required': True, 'message': message}
+    with _login_lock:
+        _login_sessions[login_id] = session
+
+    def finish():
+        try:
+            done = line(700) or {}
+            session['result'] = done.get('result')
+            if done.get('result') is None:
+                session['error'] = (proc.stderr.read() if proc.poll() is not None else '').strip().replace('Connector: ', '')[-300:] or 'Sign-in on ' + label + ' did not finish. Start it again.'
+        except (OSError, ValueError) as error:
+            session['error'] = str(error)
+        finally:
+            _stop_remote_login(proc)
+            session['finished_at'] = time.time()
+            session['done'].set()
+    threading.Thread(target=finish, daemon=True).start()
+    session['browser_opened'] = _open_login_browser(url)
+    return {'ok': True, 'id': account_id, 'host_id': host_id, 'login_started': True, 'login_id': login_id,
+            'authorization_url': url, 'browser_opened': session['browser_opened'], 'code_required': True,
+            'needs_code': True, 'message': message}
+
+
+def _stop_remote_login(proc):
+    """Close only this sign-in's own SSH child."""
+    try:
+        proc.stdin.close()
+    except OSError:
+        pass
+    _reap_login_process(proc)
 
 
 def _reap_login_process(proc):
@@ -1213,7 +1372,7 @@ def _reap_login_process(proc):
             proc.wait(timeout=3)
 
 
-def start_login(aid, when_idle=False):
+def start_login(aid, when_idle=False, email_hint=None, require_pending_email=False):
     # The URL handshake can take seconds; reserve the account before yielding
     # so concurrent clicks cannot create two native authorization sessions.
     with _login_lock:
@@ -1222,7 +1381,7 @@ def start_login(aid, when_idle=False):
                     'message': 'Sign-in is starting. Its authorization link will appear shortly.'}
         _login_starting.add(aid)
     try:
-        result = _start_login(aid, when_idle)
+        result = _start_login(aid, when_idle, email_hint, require_pending_email)
         if result.get('login_started'):
             with _login_lock:
                 _pending_renewals.pop(aid, None)
@@ -1232,12 +1391,45 @@ def start_login(aid, when_idle=False):
             _login_starting.discard(aid)
 
 
-def _start_login(aid, when_idle=False):
+def _check_email_hint(data, account, hint):
+    if account not in data.get('pending_accounts', []) or not hint:
+        raise ValueError('Enter a valid email for this incomplete sign-in.')
+    expected = _pending_email(data, account)
+    if expected and expected.casefold() != hint.casefold():
+        raise ValueError('This setup expects ' + expected + '.')
+    return expected
+
+
+def _set_first_expected_email(aid, hint):
+    # Refresh holds this lock during provider requests. Bound the only login
+    # path that writes the registry, then validate against a fresh snapshot.
+    if not LOCK.acquire(timeout=1):
+        raise RuntimeError('Account usage is refreshing. Try sign-in again in a moment.')
+    try:
+        d = load()
+        a = _acct(d, aid)
+        if not a:
+            raise ValueError("unknown account")
+        if not _check_email_hint(d, a, hint):
+            a['expected_email'] = hint
+            save(d)
+        return d, a
+    finally:
+        LOCK.release()
+
+
+def _start_login(aid, when_idle=False, email_hint=None, require_pending_email=False):
     """Start the requested account's native sign-in on an explicit UI action."""
     d = load()
     a = _acct(d, aid)
     if not a:
         raise ValueError("unknown account")
+    if email_hint is not None:
+        hint = _valid_email(email_hint)
+        if not _check_email_hint(d, a, hint):
+            d, a = _set_first_expected_email(aid, hint)
+    if require_pending_email and a in d.get('pending_accounts', []) and not _pending_email(d, a):
+        raise LoginEmailRequired('Enter the email this profile should use, then continue in your browser.')
     with _login_lock:
         for sid, session in list(_login_sessions.items()):
             if session['id'] == aid and not session['done'].is_set():
@@ -1251,7 +1443,7 @@ def _start_login(aid, when_idle=False):
                 _pending_renewals[aid] = {'queued_at': time.time()}
             return {'ok': True, 'id': aid, 'login_started': False, 'renewal_pending': True,
                     'message': busy + ' Sign-in will open when chats are safely idle.'}
-        raise ValueError(busy + ' Choose Renew when idle to preserve running chats.')
+        raise LoginBusy(busy + ' Choose Renew when idle to preserve running chats.')
     if a['tool'] == 'claude':
         _link_isolated_claude_projects(d, a)
         return _claude_browser_login(d, a)
@@ -1368,8 +1560,14 @@ def _h_add(req, query, body):
 
 
 def _h_login(req, query, body):
+    body = body or {}
     try:
-        return start_login((body or {}).get("id"), when_idle=(body or {}).get('when_idle') is True)
+        return start_login(body.get("id"), when_idle=body.get('when_idle') is True,
+                           email_hint=body.get('email_hint'), require_pending_email=True)
+    except LoginBusy as exc:
+        return {"ok": False, "code": "login_busy", "error": str(exc)}, 409
+    except LoginEmailRequired as exc:
+        return {"ok": False, "code": "login_email_required", "error": str(exc)}, 422
     except (ValueError, RuntimeError) as exc:
         return {"ok": False, "error": str(exc)}, 400
 
@@ -1427,9 +1625,13 @@ def _run_pending_renewals():
             if result.get('login_started'):
                 with _login_lock:
                     _pending_renewals.pop(aid, None)
+            elif not (result.get('renewal_pending') or result.get('login_pending')):
+                raise RuntimeError(result.get('message') or 'Sign-in did not start. Try again.')
         except (OSError, ValueError, RuntimeError) as error:
             with _login_lock:
-                _pending_renewals[aid]['error'] = str(error)
+                state = _pending_renewals.get(aid)
+                if state is not None:
+                    state['error'] = str(error)
 
 
 def _notice_account(failure):
@@ -1439,22 +1641,57 @@ def _notice_account(failure):
     data = load()
     profile = _acct(data, account_id)
     if profile and profile['tool'] == failure.get('provider'):
-        return {**data['cache'].get(account_id, {}), 'id': account_id, 'label': profile.get('label')}
+        record = data['cache'].get(account_id, {})
+        label = (record.get('email') if record.get('logged_in') else None) or profile.get('label')
+        return {**record, 'id': account_id, 'label': label}
     return None
 
 
 def collect_run_notice(run):
     failure = run.get('failure') or {'kind': 'other'}
+    account_id = failure.get('account_id') or run.get('account_id')
+    remote = run.get('host_id', 'mac') not in ('mac', 'local')
+    if remote and account_id:
+        account_id = run['host_id'] + ':' + account_id  # never the same-named profile on this Mac
     failure = {**failure, 'provider': run.get('provider'),
-               'account_id': failure.get('account_id') or run.get('account_id'),
+               'account_id': account_id,
                'model': run.get('model'), 'run_id': run['id'],
                'chat_key': run.get('key') or run.get('conversation_key'),
                'observed_at': failure.get('observed_at') or run.get('finished_at')}
     try:
         notices.act(os.path.join(DATA, 'notices.json'), {'action': 'collect', 'failure': failure},
-                    account=_notice_account(failure))
+                    account=None if remote else _notice_account(failure))
     except (OSError, ValueError, KeyError) as error:
         print(f"notices: {type(error).__name__}: {error}")
+
+
+def _notice_display(result):
+    """Refresh the display name of still-current quota notices without editing history."""
+    if not result.get('notices'):
+        return result
+    data = load()
+    now = time.time()
+    for notice in result['notices']:
+        if notice.get('archived_at') or notice.get('resolved_at') or notice.get('kind') != 'usage_high':
+            continue
+        reset = notice.get('at')
+        if not reset or reset <= now:
+            continue
+        aid = notice.get('account_id')
+        profile = _acct(data, aid)
+        if not profile:
+            continue
+        for warning in account_warnings(profile, data['cache'].get(aid, {}), now):
+            current = _epoch(warning.get('resets_at'))
+            if warning.get('kind') == 'usage_high' and notice.get('family') == f"{aid}:usage:{warning.get('window')}" \
+                    and current and abs(reset - current) <= notices.RESET_TOLERANCE:
+                notice['message'] = warning['message']
+                break
+    return result
+
+
+def _get_notices(req, query, body):
+    return _notice_display(notices.listing(os.path.join(DATA, 'notices.json')))
 
 
 def _h_notices(req, query, body):
@@ -1462,7 +1699,7 @@ def _h_notices(req, query, body):
         body = body or {}
         failure = body.get('failure')
         account = _notice_account(failure) if body.get('action') in ('collect', 'shown') and isinstance(failure, dict) else None
-        return notices.act(os.path.join(DATA, 'notices.json'), body, account=account)
+        return _notice_display(notices.act(os.path.join(DATA, 'notices.json'), body, account=account))
     except ValueError as error:
         return {'ok': False, 'error': str(error)}, 400
 
@@ -1494,7 +1731,7 @@ ROUTES = {
     ("POST", "/api/accounts/switch"): _h_switch,
     ("POST", "/api/accounts/default"): _h_default,
     ("POST", "/api/accounts/auto_switch"): _h_auto,
-    ("GET", "/api/notices"): lambda req, query, body: notices.listing(os.path.join(DATA, 'notices.json')),
+    ("GET", "/api/notices"): _get_notices,
     ("POST", "/api/notices"): _h_notices,
 }
 BACKGROUND = [(background, 30)]

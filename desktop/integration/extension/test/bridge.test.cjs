@@ -28,3 +28,5 @@ test('bridge permits the account login code submission only as a write',()=>{
 });
 
 test('remote model discovery is an explicit metadata request',()=>{assert.equal(bridge.route('/api/models/discover','POST'),'/api/models/discover');assert.throws(()=>bridge.route('/api/models/discover'));assert.throws(()=>bridge.route('/api/models/discover/extra','POST'));});
+
+test('model update check is a write route with a long timeout for CLI installs',()=>{assert.equal(bridge.route('/api/models/refresh','POST'),'/api/models/refresh');assert.throws(()=>bridge.route('/api/models/refresh'));assert.match(require('node:fs').readFileSync(require.resolve('../bridge.cjs'),'utf8'),/'\/api\/models\/refresh'\?750000/);});

@@ -30,7 +30,8 @@ class NativeEvents extends EventTarget {
 window.addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='b'){e.preventDefault();e.stopImmediatePropagation();void rpc('toggleSidebar');}},true);
 void import('./main');
 
-function dismissPopovers(){document.querySelectorAll('details.chat-settings[open],details.chat-scope-menu[open]').forEach(node=>node.removeAttribute('open'));window.dispatchEvent(new Event('workbench-dismiss-popovers'));}
-window.addEventListener('blur',dismissPopovers);
+// detail 'escape' lets a layered popup (the agent tree) peel one layer itself instead of closing.
+function dismissPopovers(reason?:string){document.querySelectorAll('details.chat-settings[open],details.chat-scope-menu[open]').forEach(node=>node.removeAttribute('open'));window.dispatchEvent(new CustomEvent('workbench-dismiss-popovers',{detail:reason}));}
+window.addEventListener('blur',()=>dismissPopovers());
 document.addEventListener('pointerdown',event=>{document.querySelectorAll('details.chat-settings[open],details.chat-scope-menu[open]').forEach(node=>{if(!node.contains(event.target as Node))node.removeAttribute('open')})},true);
-window.addEventListener('keydown',event=>{if(event.key==='Escape'){const trigger=document.activeElement?.closest('details.chat-settings[open]')?.querySelector<HTMLElement>('summary');dismissPopovers();trigger?.focus();}if((event.metaKey||event.ctrlKey)&&['t','l'].includes(event.key.toLowerCase())){event.preventDefault();event.stopImmediatePropagation();void rpc(event.key.toLowerCase()==='t'?'terminal':'showChats')}},true);
+window.addEventListener('keydown',event=>{if(event.key==='Escape'){const trigger=document.activeElement?.closest('details.chat-settings[open]')?.querySelector<HTMLElement>('summary');dismissPopovers('escape');trigger?.focus();}if((event.metaKey||event.ctrlKey)&&['t','l'].includes(event.key.toLowerCase())){event.preventDefault();event.stopImmediatePropagation();void rpc(event.key.toLowerCase()==='t'?'terminal':'showChats')}},true);

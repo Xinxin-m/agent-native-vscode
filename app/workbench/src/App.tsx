@@ -155,6 +155,9 @@ export default function App(){
   const current=panel.params.resource,draft=current.kind==='chat'?conversations.get(conversationIdentity(current)):null;
   if(draft&&(draft.text?.trim()||draft.attachments?.length||runs.some(run=>run.id===draft.runId&&!terminal(run.status))))return void open(r,'tab',panel.group.id);
   panel.api.updateParameters({...panel.params,resource:r,preview:false});panel.api.setTitle(c.title||'Conversation');panel.api.setActive();nav.current.visit(panel.group.id,r);saveHistory();};
+ // Agent tree "Open in current tab" and its back arrow: swap this tab's chat; an already open chat is focused instead.
+ const replaceChat=(panelId:string|undefined,r:Resource)=>{const panel=panelId?dock.current?.getPanel(panelId):undefined,found=findOpenChat(dock.current?.panels||[],r);if(!panel||(found&&found!==panel))return void open(r,'tab',panel?.group.id);
+  panel.api.updateParameters({...panel.params,resource:r,preview:false});panel.api.setTitle(r.title||'Conversation');panel.api.setActive();nav.current.visit(panel.group.id,r);saveHistory();};
  const groupTabs=async(mode:'provider'|'project',includeFiles=false)=>{
   const apiDock=dock.current;if(!apiDock)return;
   let projects:any[]=[];if(mode==='project'){try{projects=(await api('/api/project_catalog')).projects||[]}catch{notify('Project catalog is unavailable.');return;}}
@@ -186,7 +189,7 @@ export default function App(){
  function resize(e:React.PointerEvent){e.preventDefault();const start=e.clientX,original=width;const move=(event:PointerEvent)=>setWidth(Math.min(430,Math.max(210,original+event.clientX-start)));const up=()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);};window.addEventListener('pointermove',move);window.addEventListener('pointerup',up);}
  const menuAction=(fn:()=>void)=>()=>{closeMenu();fn();};
  const panel=menuState?.panelId&&dock.current?.getPanel(menuState.panelId);
- return <WorkbenchContext.Provider value={{data,stateError:error,accounts,pendingNoticeAccounts,hosts,runs,attention,liveSessions,preferences,open,notify,refresh,setPreferences:patch=>setPrefs(p=>({...p,...patch})),updateTitle,history:(panelId:string)=>showHistory(undefined,panelId),renameChat:async(key:string,title:string)=>{const value=await api('/api/chat_state',{action:'rename',key,title});await refresh();return value.title}}}><ShellContext.Provider value={{menu:showMenu,addMenu,newChat,history:showHistory,toggleSidebar:()=>setSidebar(v=>!v),navigate,canNavigate,navRevision}}>
+ return <WorkbenchContext.Provider value={{data,stateError:error,accounts,pendingNoticeAccounts,hosts,runs,attention,liveSessions,preferences,open,notify,refresh,setPreferences:patch=>setPrefs(p=>({...p,...patch})),updateTitle,history:(panelId:string)=>showHistory(undefined,panelId),replace:replaceChat,renameChat:async(key:string,title:string)=>{const value=await api('/api/chat_state',{action:'rename',key,title});await refresh();return value.title}}}><ShellContext.Provider value={{menu:showMenu,addMenu,newChat,history:showHistory,toggleSidebar:()=>setSidebar(v=>!v),navigate,canNavigate,navRevision}}>
  <PathContextMenu/><div className={'app '+(!sidebar?'sidebar-hidden':'')} style={{'--sidebar-width':width+'px'} as any}>
   {sidebar&&<><Sidebar mode={mode} setMode={setMode} onContext={showMenu} onDismiss={()=>setSidebar(false)}/><button className="sidebar-scrim" aria-label="Dismiss navigation overlay" onClick={()=>setSidebar(false)}/></>}
   {sidebar&&<div role="separator" aria-label="Resize navigation" aria-orientation="vertical" className="sidebar-resizer" onPointerDown={resize} tabIndex={0} onKeyDown={e=>{if(e.key==='ArrowLeft')setWidth(w=>Math.max(210,w-20));if(e.key==='ArrowRight')setWidth(w=>Math.min(430,w+20));}}/>}

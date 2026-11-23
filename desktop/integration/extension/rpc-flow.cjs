@@ -59,7 +59,8 @@ function createDispatcher(handle){
  let mutations=Promise.resolve(),opens=Promise.resolve();
  return message=>{
   if(message.action==='open'){const operation=opens.then(()=>handle(message));opens=operation.catch(()=>{});return operation}
-  const parallel=(message.action==='api'&&message.body===undefined)||parallelActions.has(message.action)||(message.action==='githubAccounts'&&!message.connect);
+  // A model update check writes no Library data and an install can take minutes, so it must not hold the send lane.
+  const parallel=(message.action==='api'&&(message.body===undefined||message.path==='/api/models/refresh'))||parallelActions.has(message.action)||(message.action==='githubAccounts'&&!message.connect);
   if(parallel)return Promise.resolve().then(()=>handle(message));
   const operation=mutations.then(()=>handle(message));
   mutations=operation.catch(()=>{});return operation;

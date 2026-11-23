@@ -119,6 +119,11 @@ function activate(context){
  }
  async function open(resource,destination,explicitColumn){
   if(!resource||typeof resource.kind!=='string')throw Error('Invalid resource');
+  // A Mac chat's link to a file that is not on this Mac: the backend resolves the chat's exact link on the host whose workspaces hold it.
+  if(resource.kind==='file'&&resource.meta?.chat_key&&!resource.root_id&&!resource.file_id&&['mac','local',undefined].includes(resource.host_id)&&path.isAbsolute(resource.path||'')&&!(await fs.stat(resource.path).then(()=>true,()=>false))){
+   const {resource:reference}=await api('/api/files/reference',{chat_key:resource.meta.chat_key,path:resource.path});
+   resource={...resource,host_id:reference.host_id,file_id:reference.file_id};
+  }
   if(resource.kind==='files'&&resource.root_id===undefined){const location=await require('./file-context.cjs').workspaceFor(vscode,filesTab.rootId);if(vscode.workspace.getConfiguration('library').get('files.tabWorkspace')==='all')location.root_id='all';resource={...resource,...location};}
   if(resource.kind==='project-map'){if(resource.project_id&&await revealExisting(vscode,resource))return;await projectMaps.open(resource.project_id,resource.title);return;}
   const columns=vscode.window.tabGroups.all.map(g=>g.viewColumn),active=vscode.window.tabGroups.activeTabGroup.viewColumn;
@@ -130,7 +135,7 @@ function activate(context){
   }
   if(resource.kind==='file'){
    if(!['mac','local',undefined].includes(resource.host_id)){
-    const roots=(await api('/api/files/roots?host_id='+encodeURIComponent(resource.host_id))).roots||[];
+    const roots=resource.file_id?[]:(await api('/api/files/roots?host_id='+encodeURIComponent(resource.host_id))).roots||[];
     const root=roots.filter(r=>resource.root_id?r.id===resource.root_id:resource.path===r.path||resource.path.startsWith(r.path.replace(/\/$/,'')+'/')).sort((a,b)=>b.path.length-a.path.length)[0];
     let uri,reader=remoteProvider;
     if(root){
@@ -210,6 +215,10 @@ function activate(context){
     if(panels.get(key)===view)panels.delete(key);release();
     panels.set(nextKey,view);view.title=next.title;connect(view,'chat',next,nextKey);
    },context.globalState);
+   // Agent tree "Open in current tab" and its back arrow: this chat tab shows another chat, as history does.
+   if(m.action==='replace'){const next=m.resource;if(kind!=='chat'||next?.kind!=='chat'||typeof next.key!=='string'||!next.key)throw Error('Only a chat tab can show another chat');const nextKey=resourceKey(next);
+    if(panels.has(nextKey)||officialChats.enabled())return open(next,'tab');if(await revealExisting(vscode,next))return true;
+    if(panels.get(key)===view)panels.delete(key);release();panels.set(nextKey,view);view.title=String(next.title||'Conversation').slice(0,150);connect(view,'chat',next,nextKey);return true;}
    if(m.action==='title'){if('title' in view&&typeof m.title==='string')view.title=m.title.slice(0,150);return true;}
    if(m.action==='preferences'){const previous=preferences,next={...preferences,...m.value};require('./interface-scale.cjs').zoomLevel(next.fontSize);try{if(previous.fontSize!==next.fontSize)await require('./interface-scale.cjs').apply(vscode,next.fontSize);if(previous.theme!==next.theme)await require('./themes.cjs').apply(vscode,next.theme);await context.globalState.update('preferences',next);}catch(error){await require('./interface-scale.cjs').apply(vscode,previous.fontSize).catch(()=>{});throw error;}preferences=next;for(const w of views)void w.postMessage({type:'preferences',value:preferences});projectMaps.setTheme(preferences.theme==='system'?(vscode.window.activeColorTheme.kind===vscode.ColorThemeKind.Dark?'dark':'light'):preferences.theme);return true;}
    if(m.action==='githubAccounts'){if(kind!=='accounts'&&kind!=='settings')throw Error('Account actions are only available in Accounts.');if(m.connect)trusted();return require('./github-accounts.cjs').list(vscode,Boolean(m.connect));}
@@ -261,7 +270,17 @@ function activate(context){
  command('library.transferFiles',async request=>{trusted();return require('./transfer-files.cjs').transferFiles(vscode,filesTab,request,async()=>{remoteProvider.refresh();refreshFiles();await vscode.commands.executeCommand('workbench.files.action.refreshFilesExplorer');});});
  command('library.removeWorkspace',uri=>{const folder=(vscode.workspace.workspaceFolders||[]).find(f=>f.uri.toString()===uri);if(folder&&!vscode.workspace.updateWorkspaceFolders(folder.index,1))throw Error('Could not close workspace');});
  command('library.search',()=>{for(const w of views)void w.postMessage({type:'search'});});
- command('library.refresh',()=>{reads.invalidate();remoteProvider.refresh();for(const w of views)void w.postMessage({type:'refresh'});});
+ command('library.refresh',require('./history-refresh.cjs').createHistoryRefresh({
+  api,
+  redraw:()=>{
+   reads.invalidate();
+   remoteProvider.refresh();
+   for(const w of views)void w.postMessage({type:'refresh'});
+  },
+  progress:message=>vscode.window.setStatusBarMessage(message),
+  warn:message=>void vscode.window.showWarningMessage(message),
+  complete:()=>vscode.window.setStatusBarMessage('Chat history refreshed', 3000),
+ }));
  command('library.splitRight',()=>vscode.commands.executeCommand('workbench.action.newGroupRight'));
  command('library.splitDown',()=>vscode.commands.executeCommand('workbench.action.newGroupBelow'));
  // The tab-bar plus starts a chat with the active chat's provider, else the default provider, else asks.

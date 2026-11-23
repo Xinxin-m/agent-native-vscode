@@ -1,6 +1,6 @@
 'use strict';
 const vscode=require('vscode'),fs=require('node:fs/promises'),path=require('node:path'),{randomBytes,randomUUID}=require('node:crypto');
-const {visibleRoot,attachmentMime,endpoint,request,terminal,replay,pending,prepare,accepted,fileTarget}=require('./core');
+const {visibleRoot,orderTree,attachmentMime,endpoint,request,terminal,replay,pending,prepare,accepted,fileTarget,clusterWorkbenchTarget}=require('./core');
 function activate(context){let panel,queue=Promise.resolve(),selected='',nativeKey='',chat=null,defaults=null,runState=null,drafts=context.globalState.get('drafts',{}),chats=[],catalog=[],disposed=false,polling=false,error='',chatRevision,chatRunStamp='',metadataNotice='',commandList=[],commandKey='',runQueue=null,queueSupported=false,queueError='',tree=null,accounts=[],capabilities={};
  const api=(route,body)=>request(endpoint(vscode.workspace.getConfiguration('library').get('endpoint')),route,body);
  let transcriptCache;
@@ -78,9 +78,25 @@ function activate(context){let panel,queue=Promise.resolve(),selected='',nativeK
  }
 if(m.type==='projectMap'){await projectMaps.open();return;}if(m.type==='ready'){await list();if(selected)await select(selected);else await refresh();return;}if(m.type==='select'){await select(m.key);return;}if(m.type==='refresh'){error='';commandKey='';await list();await refresh();return;}if(m.type==='copy'){if(typeof m.text==='string')await vscode.env.clipboard.writeText(m.text);return;}if(m.key!==selected||!selected)return;
  if(m.type==='earlierActivity'){const id=runState?.run.id,before=runState?.truncatedBefore;if(!id||m.runId!==id||!before)return;const value=await api('/api/run?id='+encodeURIComponent(id)+'&before='+before);if(runState?.run.id===id){runState={...replay(runState,value.run,value.events),truncatedBefore:value.events_truncated_before??null};publish();}return;}
- if(m.type==='subagents'){tree=await api('/api/session_tree?key='+encodeURIComponent(selected));publish();return;}
+ if(m.type==='subagents'){tree=orderTree(await api('/api/session_tree?key='+encodeURIComponent(selected)));publish();return;}
  if(m.type==='draft'){if(typeof m.text!=='string'||m.text.length>2000000)return;draft().text=m.text;await save();return;}
- if(m.type==='openFile'){if(typeof m.href==='string'&&/^https?:\/\//i.test(m.href)){await vscode.env.openExternal(vscode.Uri.parse(m.href));return;}const target=fileTarget(m.href,defaults?.cwd||chat?.cwd,defaults?.host_id||chat?.execution_host||'mac');if(!target)throw Error('Only local file links can open in this editor.');const stat=await fs.stat(target.path);if(!stat.isFile())throw Error('This link is not a regular file');const doc=await vscode.workspace.openTextDocument(vscode.Uri.file(target.path));const line=Math.min(target.line-1,doc.lineCount-1);await vscode.window.showTextDocument(doc,{viewColumn:vscode.ViewColumn.Beside,selection:new vscode.Range(line,0,line,0),preview:true});return;}
+ if(m.type==='openFile'){
+  if(typeof m.href==='string'&&/^https?:\/\//i.test(m.href)){await vscode.env.openExternal(vscode.Uri.parse(m.href));return;}
+  const cwd=defaults?.cwd||chat?.cwd,target=fileTarget(m.href,cwd,defaults?.host_id||chat?.execution_host||'mac');
+  const stat=target?await fs.stat(target.path).catch(()=>null):null;
+  // A link to a file that is not on this Mac opens in the Workbench reader, which resolves the chat's exact link on its host.
+  const remote=stat?null:clusterWorkbenchTarget(m.href,cwd,nativeKey||selected);
+  if(remote){
+   const base=endpoint(vscode.workspace.getConfiguration('library').get('endpoint'));
+   await vscode.commands.executeCommand('simpleBrowser.show',base+'/workbench#resource='+encodeURIComponent(JSON.stringify(remote)),{viewColumn:vscode.ViewColumn.Beside});
+   return;
+  }
+  if(!target)throw Error('Only local file links can open in this editor.');
+  if(!stat?.isFile())throw Error('This link is not a regular file');
+  const doc=await vscode.workspace.openTextDocument(vscode.Uri.file(target.path));const line=Math.min(target.line-1,doc.lineCount-1);
+  await vscode.window.showTextDocument(doc,{viewColumn:vscode.ViewColumn.Beside,selection:new vscode.Range(line,0,line,0),preview:true});
+  return;
+ }
  trusted();error='';if(m.type==='queueAction'){if(!['steer','edit','cancel'].includes(m.action))throw Error('Unsupported queue action');const item=runQueue?.items?.find(x=>x.id===m.itemId);if(!item)throw Error('This queued message is no longer available');const body={action:m.action,key:selected,item_id:item.id,version:m.version};if(m.action==='edit'){if(typeof m.text!=='string')throw Error('Message is required');body.message=m.text;}runQueue=(await api('/api/run/queue',body)).queue;await refresh(false);publish();return;}if(m.type==='attach'){if(!['mac','local'].includes(defaults?.host_id))throw Error('Remote attachment staging is unavailable.');const files=await vscode.window.showOpenDialog({canSelectMany:true,canSelectFiles:true,canSelectFolders:false});for(const file of files||[]){if(file.scheme!=='file')throw Error('Select a local file');const stat=await fs.stat(file.fsPath);if(!stat.isFile()||stat.size>20*1024*1024)throw Error('Attachments must be regular files of at most 20 MB');const data=await fs.readFile(file.fsPath);const result=await api('/api/attachments',{name:path.basename(file.fsPath),mime:attachmentMime(data),data_base64:data.toString('base64')});draft().attachments.push(result.attachment);await save();}publish();return;}
  if(m.type==='removeAttachment'){draft().attachments=draft().attachments.filter(a=>a.id!==m.id);await save();publish();return;}
  if(m.type==='send'){if(!defaults)throw Error('Conversation defaults have not loaded');if(chat?.is_child&&chat.native_resumable===false)throw Error('Open this child in browser Library to create an explicit linked handoff.');const retryId=draft().pending?.request_id;await refresh();if(queueError&&!m.steer&&!m.resend&&!draft().queuedRequest)throw Error(queueError);if(retryId&&!draft().pending){publish();return;}const retry=m.resend?steers.find(x=>m.resendId?x.requestId===m.resendId:x.message===m.resend):null;if(m.resend&&!retry)throw Error('Original steering message is no longer available; your draft is retained.');const text=retry?retry.message:draft().text.trim();

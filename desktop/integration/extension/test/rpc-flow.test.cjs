@@ -77,3 +77,5 @@ test('state deltas merge rows and metadata, recover an invalid base without losi
  const recovered=await cache.request('base','/api/state',undefined,{fresh:true});assert.deepEqual(recovered.chats,[{key:'recovered'}]);
  assert.deepEqual(sent.map(x=>x.since),[undefined,'a','b',undefined]);assert.equal(sent[1].etag,'');assert.equal(sent[2].etag,'');
 });
+
+test('a model update check does not hold the send lane',async()=>{const slow=deferred(),events=[];const dispatch=flow.createDispatcher(async m=>{events.push(m.tag);if(m.tag==='refresh')await slow.promise;return m.tag});const a=dispatch({action:'api',path:'/api/models/refresh',body:{install:true},tag:'refresh'}),b=dispatch({action:'api',path:'/api/runs',body:{message:'m'},tag:'send'});assert.equal(await b,'send');slow.resolve();assert.equal(await a,'refresh');});

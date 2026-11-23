@@ -32,6 +32,7 @@ RSYNC_TIMEOUT = 1800
 PIPELINE_TIMEOUT = 3600
 
 _lock = threading.Lock()
+_active_sync = None
 
 
 def _jload(path, default):
@@ -206,19 +207,36 @@ def _run_pipeline():
         return False
 
 
-def sync(run_pipeline=True):
-    """Sync every remote source; run the pipeline when anything changed."""
-    if not _lock.acquire(blocking=False):
-        return {"busy": True, "sources": status()["sources"]}
+def sync(run_pipeline=True, *, wait=False):
+    """Pull configured sources or share an in-progress result with a manual scan."""
+    global _active_sync
+    with _lock:
+        job = _active_sync
+        if job is None:
+            _active_sync = {"done": threading.Event()}
+    if job is not None:
+        if not wait:
+            return {"busy": True, "sources": status()["sources"]}
+        job["done"].wait()
+        if "error" in job:
+            raise RuntimeError(job["error"])
+        return job["result"]
     try:
         results = [sync_source(s) for s in (_config().get("remote_sources") or [])]
         changed = sum(r.get("changed", 0) for r in results)
         pipeline = None
         if run_pipeline and changed:
             pipeline = _run_pipeline()
-        return {"busy": False, "changed": changed, "pipeline": pipeline, "sources": results}
+        result = {"busy": False, "changed": changed, "pipeline": pipeline, "sources": results}
+        _active_sync["result"] = result
+        return result
+    except Exception as exc:
+        _active_sync["error"] = str(exc)
+        raise
     finally:
-        _lock.release()
+        with _lock:
+            _active_sync["done"].set()
+            _active_sync = None
 
 
 def status():
@@ -229,7 +247,8 @@ def status():
         out.append({"name": name, "host": s.get("host"), "last_ok": st.get("last_ok"),
                     "last_error": st.get("last_error", ""), "files": st.get("files", 0),
                     "seconds": st.get("seconds"), "changed": st.get("changed", 0)})
-    return {"running": _lock.locked(), "sources": out}
+    with _lock:
+        return {"running": _active_sync is not None, "sources": out}
 
 
 def _get(req, query, body):
@@ -237,8 +256,9 @@ def _get(req, query, body):
 
 
 def _post_run(req, query, body):
-    if _lock.locked():
-        return {"started": False, "running": True, **status()}
+    current = status()
+    if current["running"]:
+        return {"started": False, **current}
     threading.Thread(target=sync, daemon=True).start()
     return {"started": True, **status()}
 

@@ -10,6 +10,7 @@ import json
 import os
 import threading
 
+import agent_activity
 from indexer import LINEAGE_FIELDS, resolve_lineage
 
 DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
@@ -102,7 +103,7 @@ def warm():
 def _snapshot(key):
     """Latest snapshot. A stale one is served while a rebuild runs, unless it lacks the key."""
     snap = _SNAP.get('value')
-    if snap is None or snap['stamps'][0][0] != DATA or key not in snap['index']:
+    if snap is None or snap['stamps'][0][0] != DATA or (key not in snap['index'] and key not in snap['by_root']):
         return _rebuild(force=True)
     if snap['stamps'] != _stamps() and not _BUILD.locked():
         threading.Thread(target=_rebuild, daemon=True).start()
@@ -142,23 +143,31 @@ def session_tree(req, query, body):
     key = (query or {}).get('key') or ''
     snap = _snapshot(key)
     index = snap['index']
-    if key not in index:
+    if key not in index and key not in snap['by_root']:
         return {'error': 'Session not found', 'key': key, 'nodes': [], 'edges': []}
-    root = index[key].get('root_key') or key
+    root = index.get(key, {}).get('root_key') or key
     enrich, titles = snap['enrich'], snap['titles']  # a manual rename wins
     project_id = snap['assignments'].get(root)
     selected = {k: index[k] for k in snap['by_root'].get(root, ())}
     # Include ancestors when a partial transcript import lacks a root record.
-    selected.setdefault(key, index[key])
+    if key in index:
+        selected.setdefault(key, index[key])
     nodes, edges, missing = [], [], set()
+    live = agent_activity._live()
     fields = ('id', 'source', 'title_seed', 'model_main', 'models', 'ts_first',
               'ts_last', 'status', 'node', 'execution_host', 'host_id', 'cwd', 'account_id', 'usage') + LINEAGE_FIELDS
     for node_key, meta in selected.items():
         node = {f: meta[f] for f in fields if f in meta}
         node.update(key=node_key, root_key=root, project_id=project_id,
-                    title=titles.get(node_key) or (enrich.get(node_key) or {}).get('title') or meta.get('agent_label') or meta.get('title_seed') or node_key)
+                    title=titles.get(node_key) or meta.get('desktop_title') or (enrich.get(node_key) or {}).get('title') or meta.get('agent_label') or meta.get('title_seed') or node_key)
         # Absent until checked in the background; the broker re-verifies on send.
         node.update(_cached_resume(node_key, meta))
+        if meta.get('is_child'):
+            # Subagents are not broker runs or processes; their transcripts say whether they run.
+            try:
+                node.update(agent_activity.child_activity(meta, index, live=live))
+            except Exception as exc:  # evidence is advisory; never fail the tree
+                node.update(activity='unknown', activity_evidence='Activity check failed: ' + type(exc).__name__)
         nodes.append(node)
         parent = meta.get('parent_key')
         if parent and parent != node_key:

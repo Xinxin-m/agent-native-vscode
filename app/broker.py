@@ -20,12 +20,20 @@ import re
 import signal
 import selectors
 import subprocess
+import sys
 import threading
 import time
 import uuid
 
 import attention_watch
 import stream
+
+# One approval policy for hooks, broker and monitor: ~/.claude/hooks/approval_policy.py (absent: every approval asks as before).
+sys.path.insert(0, os.path.expanduser('~/.claude/hooks'))
+try:
+    import approval_policy
+except Exception:  # noqa: BLE001
+    approval_policy = None
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / 'data'
@@ -676,16 +684,50 @@ class Broker:
                 raise ValueError(previous.get('recovery_reason') or 'recovery blocked; prior provider exit is unverified')
 
     def _launch(self, spec):
-        from host_connector import build_cli_launch
+        from host_connector import bind_remote_session, build_cli_launch
         protocol = 'app-server' if spec['provider'] == 'codex' else 'claude-stream'
+        account, binding = spec.get('account_id') or None, None
+        # Native remote chats (for example started in tmux) carry no Library
+        # binding. Resolve it from host evidence; the run record then keeps it.
+        if spec.get('session_id') and not account and spec['host_id'] not in ('mac', 'local') and not spec.get('shared_session_from'):
+            binding = bind_remote_session(spec['host_id'], spec['provider'], spec['cwd'], spec['session_id'])
+            account = binding['account_id']
         launch = build_cli_launch(spec['host_id'], spec['provider'], spec['cwd'],
-                                  account_id=spec.get('account_id') or None,
+                                  account_id=account,
                                   session_id=spec.get('session_id') or None,
                                   model=spec.get('model') or None, effort=spec.get('effort') or None,
                                   protocol=protocol, images=None,
                                   **({'shared_session_from': spec['shared_session_from']} if spec.get('shared_session_from') else {}))
         launch['protocol'] = protocol
+        if binding and launch.get('account_selection'):
+            launch['account_selection'] = dict(launch['account_selection'], reason=binding['reason'])
         return launch
+
+    def _account_choice_run(self, spec, error):
+        """Keep the unsent message on a failed run whose card asks for the owning account.
+
+        Nothing reached a provider. Choosing an account continues it once.
+        """
+        import host_connector
+        ids = list(getattr(error, 'candidates', None) or [])
+        if spec['host_id'] in ('mac', 'local'):
+            data = host_connector._local_accounts()
+            rows = [dict(p, **{k: v for k, v in (data.get('cache', {}).get(p['id']) or {}).items() if k in ('email', 'logged_in')})
+                    for p in data.get('accounts', []) if p.get('tool') == spec['provider']]
+        else:
+            import hosts
+            rows = [a for a in hosts.get_host(spec['host_id']).get('accounts') or [] if a.get('tool') == spec['provider']]
+        candidates = [{k: row.get(k) for k in ('id', 'label', 'email', 'logged_in')} for row in rows if not ids or row.get('id') in ids]
+        failure = {'kind': 'account_required', 'provider': spec['provider'], 'account_id': '', 'host_id': spec['host_id'],
+                   'host_label': getattr(error, 'host_label', '') or '', 'candidates': candidates, 'raw': str(error), 'observed_at': now()}
+        run = self.store.create(dict(spec, account_id='', host_label=failure['host_label']))
+        if run.get('status') != 'queued':
+            return run  # same request id already recorded
+        run = self.store.update(run['id'], status='failed', phase='finished', failed_message=spec.get('message', ''),
+                                error=str(error), failure=failure, finished_at=now())
+        self.store.emit(run['id'], 'failure', failure)
+        self.store.emit(run['id'], 'state', {'status': 'failed', 'phase': 'finished', 'failure': failure})
+        return self.store.get(run['id'])
 
     def start(self, spec):
         with self.lock:
@@ -696,8 +738,14 @@ class Broker:
             if attachments and spec['host_id'] not in ('mac', 'local'):
                 raise ValueError('remote attachment staging is not available; upload on the execution host first')
             spec = dict(spec, attachment_records=attachments)
-            launch = self._launch(spec)  # validation before a run can be accepted
+            import host_connector
+            try:
+                launch = self._launch(spec)  # validation before a run can be accepted
+            except host_connector.AmbiguousSessionAccount as error:
+                return self._account_choice_run(spec, error)
             self._reject_live_resume(spec, launch)
+            if launch.get('host_label'):
+                spec['host_label'] = launch['host_label']
             spec['account_id'] = launch.get('account_id') or spec.get('account_id') or ''
             if launch.get('account_selection'):
                 spec['account_selection'] = launch['account_selection']
@@ -1641,7 +1689,14 @@ class Broker:
                 decisions = params.get('availableDecisions')
                 policy = self.policy(run.get('cwd'))
                 acceptable = decisions is None or isinstance(decisions, list) and 'accept' in decisions
-                if kind == 'approval' and acceptable and policy['auto_approve_tools']:
+                cmd = params.get('command')
+                answer = self._policy_answer(run, 'Bash', {'command': ' '.join(cmd) if isinstance(cmd, list) else cmd}) \
+                    if kind == 'approval' and method == 'item/commandExecution/requestApproval' and cmd else ('allow', '')
+                if kind == 'approval' and answer and answer[0] == 'route':
+                    self._send(ctrl, {'id': ev['id'], 'result': {'decision': 'decline'}})
+                    self.store.emit(rid, 'approval_routed', {'request_id': request, 'method': method, 'provider': 'codex',
+                                                             'summary': answer[1][:200]})
+                elif kind == 'approval' and acceptable and policy['auto_approve_tools'] and answer and answer[0] == 'allow':
                     self._send(ctrl, {'id': ev['id'], 'result': {'decision': 'accept'}})
                     self.store.emit(rid, 'approval_auto_accepted', {'request_id': request, 'method': method, 'provider': 'codex',
                                                                     'summary': self._summary(params.get('command') or params.get('reason') or params)})
@@ -2032,7 +2087,15 @@ class Broker:
                          for q in (request.get('input') or {}).get('questions') or []]
             # The CLI applies settings deny rules and PreToolUse hooks before it asks,
             # so only requests those guards let through reach this point.
-            if kind == 'approval' and tool_name and policy['auto_approve_tools']:
+            answer = self._policy_answer(run, tool_name, request.get('input') or {}) if kind == 'approval' else None
+            if answer and answer[0] == 'route':
+                self._send(ctrl, {'type': 'control_response', 'response': {
+                    'subtype': 'success', 'request_id': ev['request_id'],
+                    'response': {'behavior': 'deny', 'message': answer[1], 'interrupt': False}}})
+                self.store.emit(rid, 'approval_routed', {'request_id': request_id, 'name': tool_name, 'provider': 'claude',
+                                                         'summary': self._summary(request.get('input'))})
+                return True
+            if kind == 'approval' and tool_name and policy['auto_approve_tools'] and answer and answer[0] == 'allow':
                 self._send(ctrl, {'type': 'control_response', 'response': {
                     'subtype': 'success', 'request_id': ev['request_id'],
                     'response': {'behavior': 'allow', 'updatedInput': request.get('input') or {}}}})
@@ -2084,6 +2147,21 @@ class Broker:
                 if rule.get('agent_questions') in ('ask', 'defer'):
                     result['agent_questions'] = rule['agent_questions']
         return result
+
+    def _policy_answer(self, run, tool_name, tool_input):
+        """approval_policy.py for one request: ('allow', reason), ('route', message to the agent) after filing the
+        verification request, or None (her answer is needed). Without the policy file every request is allowed as before."""
+        if approval_policy is None:
+            return ('allow', 'no policy file')
+        cwd = run.get('cwd') or ''
+        answer, reason, hits = approval_policy.permission_decision(tool_name, tool_input, cwd)
+        if answer != 'route':
+            return (answer, reason) if answer else None
+        data = {'cwd': cwd, 'session_id': run.get('session_id'), 'hook_event_name': 'broker'}
+        # the hooks' own path: an approved new folder or a one-time token allows it; otherwise the request is filed
+        out = approval_policy.gate(data, tool_name, tool_input, (answer, reason, hits), 'PreToolUse') or {}
+        hs = out.get('hookSpecificOutput') or {}
+        return ('allow' if hs.get('permissionDecision') == 'allow' else 'route', hs.get('permissionDecisionReason') or reason)
 
     @staticmethod
     def _summary(value):

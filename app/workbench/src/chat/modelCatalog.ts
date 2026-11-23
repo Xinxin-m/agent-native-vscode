@@ -1,5 +1,6 @@
 import {modelDisplay} from './modelDisplay';
-// The server builds the list: Claude versions from the tiers file named by config models_file,
+// The server builds the list: Claude versions from each CLI profile's additionalModelOptionsCache
+// and the tiers file named by config models_file, newest first per family;
 // Codex from ~/.codex/models_cache.json. Nothing is hard-coded here.
 // Aliases such as opus resolve to an exact version that is also listed, so each model is shown
 // once: the selected id wins (a saved alias stays selected) and a 1M-context variant follows its base.

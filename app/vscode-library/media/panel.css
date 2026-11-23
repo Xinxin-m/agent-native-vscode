@@ -25,3 +25,4 @@
 @keyframes library-activity-spin{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){#headerStatus.is-running::before{animation-duration:2.4s}}
 #resumeCost{display:block;margin-bottom:4px}#resumeCost[hidden]{display:none}
+.agent-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:1px;background:#9a9a9e;box-sizing:border-box}.agent-dot.running{background:#2f7fe0}.agent-dot.failed{background:#d0463b}.agent-dot.unknown{background:none;border:1.5px solid #9a9a9e}.agent-state.running{color:#2f7fe0;font-weight:600}.agent-state.failed{color:#d0463b}

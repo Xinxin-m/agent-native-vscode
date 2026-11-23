@@ -13,8 +13,9 @@ Endpoints
   POST /api/assign            {key, project}  (project=null -> ungrouped)
   POST /api/delete_chat       {key}  permanent: source transcript(s) + cleaned copy
   POST /api/config            {excluded_cwds: [...]}
-  POST /api/rescan            re-run incremental indexer, enrich, and project grouping
-  POST /api/sync              index-only pass when a client opens, at most once per 5 minutes
+  POST /api/rescan            refresh local and remote history, enrich, and group
+  POST /api/sync              parse-only refresh; include_remote requests a manual scan
+  GET  /api/history_refresh  progress for a manual history refresh
   POST /api/send              {key, message, model?, effort?} resume via claude/codex CLI
   POST /api/open              {path} open file in editor
 """
@@ -43,6 +44,7 @@ FILES = {
 }
 LOCK = threading.Lock()
 SCAN_LOCK = threading.Lock()
+_HISTORY_REFRESH_JOBS = OrderedDict()
 STATE_LOCK = threading.Lock()  # guards _STATE, the cached /api/state bytes
 _STATE = {}
 _STATE_HISTORY = OrderedDict()  # Current and four previous chat-row fingerprints.
@@ -73,19 +75,67 @@ def default_projects():
 # ------------------------------------------------- models the composer offers
 # Claude aliases resolve to the current model of that tier, so they keep working
 # across releases; effort levels are the CLI's own --effort values.
-# Exact versions come from an optional model tiers file (config `models_file`);
-# without one the composer offers the aliases only.
-def claude_models():
+# Exact versions come from the extra models each Claude CLI profile caches from
+# the server (`additionalModelOptionsCache` in .claude.json) and from an optional
+# model tiers file (config `models_file`); newest first within each family.
+CLAUDE_MODEL_CACHES = ("~/.claude.json", "~/.claude-profiles/*/.claude.json")
+CLAUDE_ID = re.compile(r"claude-([a-z]+)-(\d+)(?:-(\d+))?$")
+_MODEL_SOURCES = {}  # path -> ((mtime_ns, size), extracted value)
+
+
+def _model_source(path, extract):
+    """extract(json) for path, re-read only when the file changes."""
     try:
-        path = os.path.expanduser(jload("config", {}).get("models_file") or "")
-        tiers = json.load(open(path)).get("tiers") or {}
+        st = os.stat(path)
+    except OSError:
+        return None
+    hit = _MODEL_SOURCES.get(path)
+    if hit and hit[0] == (st.st_mtime_ns, st.st_size):
+        return hit[1]
+    try:
+        with open(path) as fh:
+            value = extract(json.load(fh))
     except Exception:
-        tiers = {}
+        value = None
+    _MODEL_SOURCES[path] = ((st.st_mtime_ns, st.st_size), value)
+    return value
+
+
+def claude_cached_models():
+    """Model values the Claude CLI was offered, from every profile (only that key is read)."""
+    import glob
     out = []
-    for t in tiers.values():
-        m = re.match(r"claude-([a-z]+)-(\d+)(?:-(\d+))?$", str(t.get("claude") or ""))
-        if m and all(x["id"] != t["claude"] for x in out):
-            out.append({"id": t["claude"], "name": m[1].title() + " " + m[2] + ("." + m[3] if m[3] else "")})
+    for pattern in CLAUDE_MODEL_CACHES:
+        for path in sorted(glob.glob(os.path.expanduser(pattern))):
+            for entry in _model_source(path, lambda d: d.get("additionalModelOptionsCache")) or []:
+                value = entry.get("value") if isinstance(entry, dict) else None
+                if isinstance(value, str) and value not in out:
+                    out.append(value)
+    return out
+
+
+def claude_tier_models():
+    path = _model_source(FILES["config"], lambda d: d.get("models_file"))
+    tiers = _model_source(os.path.expanduser(path), lambda d: d.get("tiers")) if isinstance(path, str) and path else None
+    return [str(t.get("claude")) for t in (tiers or {}).values() if isinstance(t, dict) and t.get("claude")]
+
+
+def claude_models():
+    families = {}  # family -> {version tuple: [id, has 1M variant]}
+    for value in claude_cached_models() + claude_tier_models():
+        base = value[:-4] if value.lower().endswith("[1m]") else value
+        m = CLAUDE_ID.match(base)
+        if not m:
+            continue
+        entry = families.setdefault(m[1], {}).setdefault((int(m[2]), int(m[3] or 0)), [base, False])
+        entry[1] = entry[1] or base != value
+    out = []
+    for family, versions in families.items():
+        for (major, minor), (base, long) in sorted(versions.items(), reverse=True):
+            name = family.title() + " " + str(major) + ("." + str(minor) if CLAUDE_ID.match(base)[3] else "")
+            out.append({"id": base, "name": name})
+            if long:
+                out.append({"id": base + "[1m]", "name": name + " (1M context)"})
     return out + CLAUDE_MODELS
 
 
@@ -141,6 +191,11 @@ def config_exclusions(cfg):
     return [value for value in values if isinstance(value, str) and value.strip()] if isinstance(values, list) else []
 
 
+def display_title(key, meta, generated=None, manual=None):
+    return (manual or meta.get("desktop_title") or generated or meta.get("title_seed")
+            or (meta.get("first_prompt") or "")[:60] or key)
+
+
 def build_state():
     """The /api/state payload without its revision."""
     with LOCK:
@@ -173,8 +228,7 @@ def build_state():
                           "models": m.get("models", {}),
                           **{field: m[field] for field in ('account_id', 'execution_host', 'host_id', 'conversation_key', 'source_key', 'last_run_id', 'parent_key', 'root_key', 'parent_agent_id', 'parent_session_id', 'agent_id', 'agent_label', 'agent_path', 'is_child', 'lineage_source', 'spawned_children', 'source_locations', 'account_attribution') if field in m},
                           "usage": m.get("usage", {}),
-                          "title": (flags.get("titles") or {}).get(k) or e.get("title") or m.get("title_seed")
-                                   or (m.get("first_prompt") or "")[:60] or k,
+                          "title": display_title(k, m, e.get("title"), (flags.get("titles") or {}).get(k)),
                           "description": e.get("description", ""),
                           "keywords": e.get("keywords", []),
                           "topic_hint": e.get("topic_hint", ""),
@@ -225,6 +279,8 @@ def _state_signature():
             sig.append((path, st.st_mtime_ns, st.st_size, st.st_ino))
         except OSError:
             sig.append((path, None))
+    # The Claude list, not its files: .claude.json changes on every session.
+    sig.append(tuple(m["id"] for m in claude_models()))
     return tuple(sig)
 
 
@@ -254,8 +310,8 @@ def chat_body(key):
             return cached
         with open(path) as handle:
             chat = json.load(handle)
-        if title:
-            chat["title"] = title
+        if title or chat.get("desktop_title"):
+            chat["title"] = title or chat["desktop_title"]
         response = {**_serialized_json(chat), "version": version}
         _CHAT_CACHE[path] = response
         _CHAT_CACHE.move_to_end(path)
@@ -373,15 +429,88 @@ def revision_payload():
 
 
 # ---------------------------------------------------------------- actions
-def do_rescan():
-    """Bring the library up to date through the shared pipeline: same stages,
-    order, and lock as the session hooks, but uncapped -- an explicit Rescan
-    should finish the whole backlog rather than a hook-sized slice. Progress
-    goes to data/refresh.log."""
+def history_refresh_status(job_id):
     with SCAN_LOCK:
-        subprocess.run([sys.executable, os.path.join(HERE, "pipeline.py"),
-                        "--reason", "rescan", "--uncapped", "--wait", "--quiet"],
-                       cwd=HERE, capture_output=True, timeout=7200)
+        job = _HISTORY_REFRESH_JOBS.get(job_id)
+        return dict(job) if job else None
+
+
+def start_history_refresh(rescan=False):
+    """Coalesce concurrent manual requests, promoting a Rescan when requested."""
+    with SCAN_LOCK:
+        current = next(reversed(_HISTORY_REFRESH_JOBS.values()), None)
+        if current and current["running"]:
+            current["rescan"] |= rescan
+            return {"ok": True, "started": False, "refresh": dict(current)}
+        job_id = str(time.monotonic_ns())
+        job = {"id": job_id, "running": True, "phase": "local", "rescan": rescan,
+               "local_ready": False, "remote_indexed": False, "errors": []}
+        _HISTORY_REFRESH_JOBS[job_id] = job
+        if len(_HISTORY_REFRESH_JOBS) > 8:
+            _HISTORY_REFRESH_JOBS.popitem(last=False)
+        result = {"ok": True, "started": True, "refresh": dict(job)}
+    threading.Thread(target=do_rescan, args=(job_id,), daemon=True).start()
+    return result
+
+
+def _history_pipeline(reason, mode):
+    try:
+        subprocess.run([sys.executable, os.path.join(HERE, "pipeline.py"), "--reason", reason,
+                        mode, "--wait", "--quiet", "--keep-missing"],
+                       cwd=HERE, capture_output=True, timeout=7200, check=True)
+        return ""
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"History refresh: {reason}: {exc}", file=sys.stderr)
+        return f"{reason} failed. See the refresh log for details."
+
+
+def do_rescan(job_id):
+    job = _HISTORY_REFRESH_JOBS[job_id]
+    try:
+        local_error = _history_pipeline("manual-local-history", "--parse-only")
+        with SCAN_LOCK:
+            job.update(phase="remote", local_ready=not local_error,
+                       errors=[local_error] if local_error else [])
+        remote, remote_errors = {}, []
+        try:
+            import remote_sync
+            remote = remote_sync.sync(run_pipeline=False, wait=True)
+            for source in remote.get("sources", []):
+                if source.get("last_error"):
+                    name = source.get("name") or "Cluster"
+                    print(f"History refresh: {name}: {source['last_error']}", file=sys.stderr)
+                    remote_errors.append(f"{name}: {source['last_error']}")
+        except Exception as exc:
+            print(f"History refresh: remote sync failed: {exc}", file=sys.stderr)
+            remote_errors.append("Cluster history could not be fetched. See the refresh log for details.")
+
+        remote_changed = remote.get("changed", 0) > 0
+        needs_index = remote_changed and remote.get("pipeline") is not True
+        full_completed = False
+        with SCAN_LOCK:
+            job.update(errors=job["errors"] + remote_errors,
+                       remote_indexed=remote_changed and not needs_index)
+        while True:
+            with SCAN_LOCK:
+                full_needed = job["rescan"] and not full_completed
+                if not full_needed and not needs_index:
+                    job.update(phase="done", running=False)
+                    return
+                job["phase"] = "importing"
+            error = (_history_pipeline("rescan", "--uncapped") if full_needed
+                     else _history_pipeline("manual-cluster-history", "--parse-only"))
+            with SCAN_LOCK:
+                if error:
+                    job["errors"] = job["errors"] + [error]
+                elif remote_changed:
+                    job["remote_indexed"] = True
+            needs_index = False
+            full_completed |= full_needed
+    except Exception as exc:
+        print(f"History refresh failed: {exc}", file=sys.stderr)
+        with SCAN_LOCK:
+            job.update(phase="done", running=False,
+                       errors=job["errors"] + ["History refresh failed. See the refresh log for details."])
 
 
 SYNC_EVERY_S = 300
@@ -633,6 +762,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_state(state)
         if u.path == "/api/revision":
             return self._json(revision_payload())
+        if u.path == "/api/history_refresh":
+            job = history_refresh_status((q.get("id") or [""])[0])
+            return self._json({"ok": True, "refresh": job}) if job else self._json(
+                {"ok": False, "error": "This history refresh is no longer available."}, 404)
         if u.path == "/api/chat":
             key = (q.get("key") or [""])[0]
             try:
@@ -796,7 +929,7 @@ class Handler(BaseHTTPRequestHandler):
                     if titles.pop(key, None) is not None:
                         jsave("flags", dict(flags, titles=titles))
                     m = index[key]
-                    title = (jload("enrich", {}).get(key) or {}).get("title") or m.get("title_seed") or (m.get("first_prompt") or "")[:60] or key
+                    title = display_title(key, m, (jload("enrich", {}).get(key) or {}).get("title"))
                 return self._json({"ok": True, "title": title})
             if action not in ("archive", "unarchive", "star", "unstar"):
                 return self._json({"ok": False, "error": "unknown chat-state action"}, 400)
@@ -855,10 +988,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True})
 
         if p == "/api/rescan":
-            threading.Thread(target=do_rescan, daemon=True).start()
-            return self._json({"ok": True, "note": "rescan started"})
+            return self._json(start_history_refresh(rescan=True))
 
         if p == "/api/sync":
+            if body.get("include_remote") is True:
+                return self._json(start_history_refresh())
             return self._json({"ok": True, "started": light_sync("client-open")})
 
         if p == "/api/open":
@@ -900,7 +1034,7 @@ class Handler(BaseHTTPRequestHandler):
 # Each optional module exposes ROUTES {(method, path): handler} and
 # BACKGROUND [(fn, interval_seconds)]. Missing or broken modules are skipped
 # so the core library keeps serving. Contracts: docs/V2-CONTRACTS.md.
-PLUGIN_MODULES = ("live", "accounts", "stream", "usage_history", "remote_sync", "projects", "hosts", "broker", "session_lineage", "commands", "file_service", "preview_server", "search_api", "open_destinations", "conversation_settings", "settings_insights", "session_reference", "host_models", "project_suggestions")
+PLUGIN_MODULES = ("live", "accounts", "stream", "usage_history", "remote_sync", "projects", "hosts", "broker", "session_lineage", "commands", "file_service", "preview_server", "search_api", "open_destinations", "conversation_settings", "settings_insights", "session_reference", "host_models", "project_suggestions", "model_updates")
 PLUGIN_ROUTES = {}
 PLUGIN_BACKGROUND = []
 

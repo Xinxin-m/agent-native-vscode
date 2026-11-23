@@ -609,8 +609,50 @@ def build_cli_launch(host_id, tool, cwd, account_id=None, session_id=None, model
     request = dict(host_id=host_id, machine_id=host['machine_id'], job_id=host.get('job_id'),
                    tool=tool, cwd=cwd, account_id=wanted, session_id=session_id, model=model,
                    effort=effort, protocol=protocol)
-    return {'argv': ssh_command(host, 'run', request), 'cwd': None, 'env': None,
+    return {'argv': ssh_command(host, 'run', request), 'cwd': None, 'env': None, 'host_label': host.get('label') or host_id,
             'host_id': host_id, 'execution_cwd': cwd, 'transport': 'ssh', 'account_id': wanted, 'account_selection': selection}
+
+
+def _choice_error(host, tool, ids, message):
+    error = AmbiguousSessionAccount(message)
+    error.candidates = list(ids)
+    error.host_id, error.host_label = host['id'], host.get('label') or host['id']
+    return error
+
+
+def bind_remote_session(host_id, tool, cwd, session_id):
+    """Choose the account for a remote resume that has no recorded binding.
+
+    Evidence order: the host helper's exact transcript owner; else the only
+    signed-in eligible account; else the only configured eligible account
+    (the helper still refuses before exec unless its store holds the
+    transcript). Anything else raises AmbiguousSessionAccount for a user choice.
+    """
+    import hosts
+    host = hosts.get_host(host_id)
+    validate_request(tool, cwd, session_id, None, None, 'exec')
+    if not host.get('can_execute') or not host.get('machine_id'):
+        raise ValueError('Execution host is offline, unconfigured or needs an explicit probe')
+    usable = [a for a in host.get('accounts') or [] if a.get('tool') == tool and not a.get('disabled') and a.get('eligible') is not False]
+    ids = [a['id'] for a in usable]
+    if 'resolve' in (host.get('capabilities') or []):
+        request = dict(host_id=host_id, machine_id=host['machine_id'], job_id=host.get('job_id'), tool=tool, cwd=cwd, session_id=session_id)
+        result = subprocess.run(ssh_command(host, 'resolve', request), stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=20)
+        if result.returncode or len(result.stdout) > 65536:
+            raise ValueError((result.stderr.strip() or 'Could not check the session owner on ' + host_id)[-400:])
+        owner = json.loads(result.stdout)
+        if owner.get('account_id') in ids:
+            return {'account_id': owner['account_id'], 'reason': 'transcript_owner_on_host'}
+        found = [a for a in owner.get('candidates') or [] if a in ids]
+        if not found and owner.get('code') == 'missing':
+            raise ValueError('No account on ' + (host.get('label') or host_id) + ' holds this conversation transcript')
+        raise _choice_error(host, tool, found or ids, 'Choose which account on ' + (host.get('label') or host_id) + ' owns this conversation')
+    signed_in = [a['id'] for a in usable if a.get('logged_in') is True]
+    if len(signed_in) == 1:
+        return {'account_id': signed_in[0], 'reason': 'only_signed_in_account_on_host'}
+    if len(usable) == 1 and usable[0].get('logged_in') is not False:
+        return {'account_id': ids[0], 'reason': 'only_account_on_host'}
+    raise _choice_error(host, tool, ids, 'Choose which account on ' + (host.get('label') or host_id) + ' owns this conversation')
 
 
 def machine_identity():
@@ -783,7 +825,7 @@ def inventory():
         catalogs = {provider: command_catalog(provider)['commands'] for provider in ('claude', 'codex')}
     except ImportError:
         catalogs = {}
-    return dict(identity, protocol=PROTOCOL, capabilities=['run', 'inventory', 'stop', 'models'], accounts=accounts, sessions=sessions, commands=catalogs,
+    return dict(identity, protocol=PROTOCOL, capabilities=['run', 'inventory', 'stop', 'models', 'resolve', 'login'], accounts=accounts, sessions=sessions, commands=catalogs,
                 active_accounts=_local_accounts().get('state', {}).get('active', {}))
 
 
@@ -910,6 +952,85 @@ def discover_models(request, identity):
             child.kill()
             child.wait()
 
+def resolve_session_owner(request):
+    """Host side: the profile whose own store holds this exact transcript."""
+    tool, cwd, session_id = request.get('tool'), request.get('cwd'), request.get('session_id')
+    validate_request(tool, cwd, session_id, None, None, 'exec')
+    if not session_id:
+        raise ValueError('Session identity is required')
+    try:
+        selection = resolve_local_account(tool, None, None, session_id, os.path.realpath(cwd))
+    except AmbiguousSessionAccount as exc:
+        return {'ok': False, 'code': 'ambiguous' if exc.candidates else 'missing', 'candidates': exc.candidates}
+    return {'ok': True, 'account_id': selection['account_id'], 'ownership': selection.get('ownership') or 'transcript_owner'}
+
+
+CLAUDE_AUTH_URL = re.compile(rb'https://claude\.com/cai/oauth/authorize\?[^\s\x1b\x07]+')
+
+
+def remote_login(request):
+    """Host side: native Claude sign-in in an owned PTY.
+
+    Prints one JSON line with the authorization URL, reads the pasted code from
+    stdin, then prints one JSON line with the CLI exit status. Never prints
+    credentials or the CLI's own output.
+    """
+    import pty
+    import select
+    import termios
+    tool = request.get('tool')
+    if tool != 'claude':
+        raise ValueError('Remote sign-in from Library supports Claude only; run codex login on the host')
+    account, _, env = local_profile(tool, request.get('account_id'))
+    try:
+        import clis
+        executable = clis.cli(tool)
+    except ImportError:
+        executable = shutil.which(tool, path=env['PATH']) or ''
+    if not executable or not os.access(executable, os.X_OK):
+        raise ValueError('Selected CLI is not installed on this host')
+    env.update(BROWSER=shutil.which('false') or '/bin/false', TERM='dumb')
+    master, slave = pty.openpty()
+    attrs = termios.tcgetattr(slave)
+    attrs[3] &= ~termios.ECHO
+    termios.tcsetattr(slave, termios.TCSANOW, attrs)
+    proc = subprocess.Popen([executable, 'auth', 'login'], stdin=slave, stdout=slave, stderr=slave, env=env, close_fds=True)
+    os.close(slave)
+
+    def drain(seconds, until=None):
+        buf, deadline = b'', time.monotonic() + seconds
+        while time.monotonic() < deadline and proc.poll() is None:
+            if select.select([master], [], [], .2)[0]:
+                try:
+                    buf = (buf + os.read(master, 8192))[-65536:]
+                except OSError:
+                    break
+                if until and until(buf):
+                    return buf
+        return buf
+    try:
+        buf = drain(30, lambda b: bool(CLAUDE_AUTH_URL.search(b)) and b'Paste code' in b)
+        match = CLAUDE_AUTH_URL.search(buf)
+        if not match:
+            raise ValueError('Claude sign-in could not start on this host')
+        print(json.dumps({'account_id': account, 'authorization_url': match.group().decode('ascii'), 'code_required': True}), flush=True)
+        signal.alarm(600)
+        code = sys.stdin.readline().strip()
+        signal.alarm(0)
+        if not code:
+            raise ValueError('Sign-in was cancelled')
+        os.write(master, (code + '\n').encode())
+        drain(90)
+        if proc.poll() is None:
+            raise ValueError('Claude did not finish sign-in on this host')
+        print(json.dumps({'account_id': account, 'result': proc.returncode}), flush=True)
+    finally:
+        if proc.poll() is None:
+            proc.terminate()  # only this owned sign-in child
+            proc.wait(timeout=5)
+        os.close(master)
+
+
 def main():
     try:
         operation = sys.argv[1] if len(sys.argv) > 1 else ''
@@ -918,7 +1039,7 @@ def main():
             print(json.dumps(inventory()))
             signal.alarm(0)
             return
-        if operation not in ('run', 'stop', 'stop-status', 'models') or len(sys.argv) != 3 or len(sys.argv[2]) > 32768:
+        if operation not in ('run', 'stop', 'stop-status', 'models', 'resolve', 'login') or len(sys.argv) != 3 or len(sys.argv[2]) > 32768:
             raise ValueError('Expected inventory or run request')
         request = json.loads(base64.urlsafe_b64decode(sys.argv[2]))
         if operation in ('stop', 'stop-status'):
@@ -931,6 +1052,14 @@ def main():
             raise ValueError('Execution host or allocation changed; probe it again')
         if operation == 'models':
             print(json.dumps(discover_models(request, current)))
+            return
+        if operation == 'resolve':
+            signal.alarm(15)
+            print(json.dumps(resolve_session_owner(request)))
+            signal.alarm(0)
+            return
+        if operation == 'login':
+            remote_login(request)
             return
         launch = local_launch(**{k: request.get(k) for k in ('tool', 'cwd', 'account_id', 'session_id', 'model', 'effort', 'protocol')})
         os.chdir(launch['cwd'])

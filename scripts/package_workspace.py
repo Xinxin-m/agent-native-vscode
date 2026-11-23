@@ -14,7 +14,7 @@ REPO=Path(__file__).resolve().parent
 if REPO.name == "scripts":
     REPO=REPO.parent
 ROOT=REPO/"app" if (REPO/"app/server.py").is_file() else REPO
-MODULES='project_suggestions label_model json_cache session_reference sessions_cli attention_watch quota_failover auth_failure auth_recovery accounts automation broker classify clis commands conversation_settings doctor enrich file_service cross_host_transfer notices host_connector host_models hosts indexer live open_destinations pipeline preview_server projects remote_files remote_sync search_api search_chats server session_lineage session_start_refresh stream usage_history settings_insights workspace_groups project_review'.split()
+MODULES='project_suggestions label_model json_cache session_reference sessions_cli attention_watch quota_failover auth_failure auth_recovery accounts automation broker classify clis commands conversation_settings doctor enrich file_service cross_host_transfer notices host_connector host_models model_updates hosts indexer live open_destinations pipeline preview_server projects remote_files remote_sync search_api search_chats server session_lineage session_start_refresh stream usage_history settings_insights workspace_groups project_review'.split()
 EXACT=['README.md','LICENSE','docs/RELEASE.md','.gitignore','web/settings-insights.js','web/settings-insights.css',*(name+'.py' for name in MODULES),'install.sh','scripts/install_daily_label.sh','scripts/prune_bundles.py','run.sh','package_workspace.py','start_project_map.py','data/config.example.json','workbench/package.json','workbench/package-lock.json','workbench/tsconfig.json','workbench/vite.config.ts','workbench/index.html']
 SOURCE_SUFFIXES={'.js','.ts','.tsx','.css','.svg','.d.ts','.json'}
 

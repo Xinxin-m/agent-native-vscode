@@ -83,6 +83,24 @@ def recover(obj,body):
     import accounts,broker,host_connector
     run,key,meta,chat,failure,message,error_index=source(obj,body)
     action=body.get('action');provider=meta['source'];account=(run or {}).get('account_id') or meta.get('account_id') or failure.get('account_id')
+    host=meta.get('host_id') or meta.get('node') or 'mac'
+    def request_for(kind,extra):
+        marker=(run or {}).get('id') or key+':'+str(error_index)+':'+failure['raw']
+        return 'recover-'+uuid.uuid5(uuid.NAMESPACE_URL,marker+':'+str(kind)+':'+str(extra.get('account_id') or extra.get('provider') or '')).hex
+    remote=host not in ('mac','local')
+    if action=='login' and remote:
+        # The remote account signs in on its own host; never start this Mac's login of the same id.
+        if not account:raise ValueError('Choose the account that owns this chat first')
+        try:login=accounts.start_remote_login(host,account,provider)
+        except RuntimeError as error:raise ValueError(str(error)) from error
+        return {'ok':True,'account_id':account,'host_id':host,'login':login}
+    if action=='login_code':
+        if not remote or not account:raise ValueError('Enter the code in the sign-in card that started it')
+        done=obj.store.find_request(request_for('retry',{}))
+        if done and done.get('status')!='failed':return {'ok':True,'run':done,'events':obj.store.events(done['id'])}
+        try:accounts.submit_login_code(host+':'+account,body.get('login_id'),body.get('code'))
+        except RuntimeError as error:raise ValueError(str(error)) from error
+        action='retry'  # signed in: continue the same message once (stable request id below)
     if action=='login':
         if not account:raise ValueError('Choose the account in Accounts first; session ownership is unknown')
         result=accounts.start_login(account,when_idle=True)
@@ -91,21 +109,27 @@ def recover(obj,body):
         login.setdefault('needs_code',login.get('code_required',provider=='claude' and bool(login.get('login_id'))))
         login.setdefault('status','pending' if login.get('login_id') else 'started')
         return {'ok':True,'account_id':account,'login':login}
-    if action not in ('retry','account','handoff'):raise ValueError('Unknown recovery action')
+    if action not in ('retry','account','handoff','bind'):raise ValueError('Unknown recovery action')
     if not message:raise ValueError('The failed user message is unavailable; your draft is preserved')
+    if action=='bind':
+        choices=[c.get('id') for c in failure.get('candidates') or []]
+        if failure.get('kind')!='account_required' or body.get('account_id') not in choices:raise ValueError('Choose one of the listed accounts')
+        account=body['account_id']
     if not account and action!='handoff':raise ValueError('Session account is unknown; choose it in Accounts first')
     # Existing native/logical ownership locks reject concurrent requests. A stable
     # request id also makes a double click idempotent after a fast failed retry.
-    marker=(run or {}).get('id') or key+':'+str(error_index)+':'+failure['raw']
-    request_id=body.get('request_id') or 'recover-'+uuid.uuid5(uuid.NAMESPACE_URL,marker+':'+str(action)+':'+str(body.get('account_id') or body.get('provider') or '')).hex
+    request_id=body.get('request_id') or request_for(action,body)
     prior=obj.store.find_request(request_id)
     if prior and (body.get('request_id') or prior.get('status') != 'failed'):
         return {'ok':True,'run':prior,'events':obj.store.events(prior['id'])}
     if prior:
         request_id += '-' + uuid.uuid4().hex
     assert_idle(obj,key,meta,chat)
-    if error_index is not None and any(t.get('role')=='user' for t in chat.get('turns',[])[error_index+1:]):
+    if not run and error_index is not None and any(t.get('role')=='user' for t in chat.get('turns',[])[error_index+1:]):
         raise ValueError('A newer user turn follows this failure; return to that chat')
+    same=lambda r:(run.get('key') and r.get('key')==run['key']) or (run.get('conversation_key') and r.get('conversation_key')==run['conversation_key'])
+    if run and any(r['id']!=run['id'] and r.get('recovery_of') not in (run['id'],key) and r.get('status')!='failed' and r.get('created_at','')>run.get('created_at','') and same(r) for r in obj.store.list()):
+        raise ValueError('A newer message follows this failure; return to that chat')
     target=body.get('provider') if action=='handoff' else provider
     if action=='handoff' and target not in ('claude','codex'):raise ValueError('Choose Claude or Codex for handoff')
     selected=body.get('account_id') if action=='account' else account
@@ -127,6 +151,10 @@ def recover(obj,body):
              'attachments':list((run or {}).get('submitted_attachments', (run or {}).get('attachments') or [])) if action!='handoff' else []}
     if action=='handoff':
         payload['through_turn']=error_index-1 if error_index is not None else len(chat.get('turns') or [])-1
+    if remote:
+        import hosts
+        if not hosts.get_host(host).get('can_execute'):
+            hosts.probe_host(host)  # one explicit bounded probe; launch still requires it to pass
     def load(k):
         if k==key:return chat
         return stream._jload(str(Path(stream.CHATS)/(broker.safe_id(k)+'.json')),{})

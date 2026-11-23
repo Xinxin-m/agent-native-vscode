@@ -13,5 +13,5 @@ export interface WorkbenchContextValue {
   notify:(message:string)=>void; refresh:()=>Promise<void>;
   setPreferences:(patch:Partial<Preferences>)=>void;
   updateTitle:(resource:Resource,title:string)=>void;
-  history?:(panelId:string)=>void; renameChat?:(key:string,title:string)=>Promise<string>;
+  history?:(panelId:string)=>void; replace?:(panelId:string|undefined,resource:Resource)=>void; renameChat?:(key:string,title:string)=>Promise<string>;
 }

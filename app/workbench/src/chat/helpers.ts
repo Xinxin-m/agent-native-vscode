@@ -34,4 +34,4 @@ export function restoreNativeSelections(state:any,defaults:any,metadata:any={}){
  return changes;
 }
 export const nativeOwner=(state:any,meta:any)=>state.nativeAccount||nativeAccount(meta);
-export const needsHandoff=(state:any,key:string|undefined,provider:string,meta:any)=>{const host=meta.execution_host||meta.host_id||String(meta.node||'mac').split('+')[0];return Boolean(key&&((meta.is_child&&meta.native_resumable===false)||state.provider!==provider||(state.account&&nativeOwner(state,meta)&&state.account!==nativeOwner(state,meta))||(meta.cwd&&state.cwd!==meta.cwd)||(state.host_id&&state.host_id!==host)))};
+export const needsHandoff=(state:any,key:string|undefined,provider:string,meta:any)=>{const host=meta.execution_host||meta.host_id||String(meta.node||'mac').split('+')[0];return Boolean(key&&((meta.is_child&&meta.native_resumable!==true)||state.provider!==provider||(state.account&&nativeOwner(state,meta)&&state.account!==nativeOwner(state,meta))||(meta.cwd&&state.cwd!==meta.cwd)||(state.host_id&&state.host_id!==host)))};

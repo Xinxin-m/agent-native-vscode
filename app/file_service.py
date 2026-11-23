@@ -60,6 +60,41 @@ def local_host(host):
     return 'mac'
 
 
+def explicit_file_links(text):
+    for link in re.findall(r'\]\\?\((<[^>\n]+>|[^)\n]+?)\\?\)', text):
+        try:
+            parsed = urlsplit(link.removeprefix('<').removesuffix('>'))
+        except ValueError:
+            continue
+        if parsed.scheme not in ('', 'file') or parsed.netloc or not parsed.path:
+            continue
+        yield re.sub(r':\d+(?::\d+)?$', '', unquote(parsed.path))
+
+
+def reference_host(host, path):
+    """Pick the host that holds an explicitly linked file.
+
+    A remote chat keeps its own host. A Mac chat keeps the Mac when the file is
+    here; otherwise the file belongs to the one configured remote host whose
+    workspaces contain the path (from hosts config, never a hard-coded prefix).
+    """
+    if host not in ('mac', 'local', None, '') or os.path.exists(path):
+        return host
+    import hosts
+    def covers(folder):
+        folder = str(folder or '').rstrip('/')
+        return bool(folder) and (path == folder or path.startswith(folder + '/'))
+    owners = [record['id'] for record in hosts.host_records()
+              if record.get('transport') not in (None, 'local') and record.get('configured')
+              and record.get('read_alias')
+              and any(covers(w) for w in (record.get('workspaces') or []) + [record.get('default_cwd')])]
+    if len(owners) == 1:
+        return owners[0]
+    if owners:
+        raise FileError('remote_unsupported', 'Several configured hosts list this folder; open the file from a chat on that host.', 501)
+    return host
+
+
 def parts(path):
     if not isinstance(path, str) or '\x00' in path or '\\' in path:
         raise FileError('invalid_path', 'Invalid file path')
@@ -363,15 +398,12 @@ class FileService:
         candidate = os.path.abspath(os.path.join(chat.get('cwd') or '', str(path)))
         evidence = chat.get('files_changed') or []
         paths = list(evidence) if isinstance(evidence, dict) else [e.get('path') or e.get('file') if isinstance(e, dict) else e for e in evidence]
-        # Explicit local links in conversation text are also transcript evidence.
+        # Explicit file links in conversation text are also transcript evidence.
         text = '\n'.join(str(t.get('text') or '') for t in chat.get('turns') or [])
-        for link in re.findall(r'\]\(([^)]+)\)', text):
-            parsed = urlsplit(link)
-            if parsed.scheme or parsed.netloc or not parsed.path:
-                continue
-            paths.append(unquote(parsed.path))
+        paths.extend(explicit_file_links(text))
         if candidate not in [os.path.abspath(os.path.join(chat.get('cwd') or '', str(p))) for p in paths if p]:
             raise FileError('outside_root', 'Path is not an explicit file reference in this conversation', 403)
+        host = reference_host(host, candidate)
         fid = uuid.uuid4().hex
         if host != 'mac':
             import remote_files

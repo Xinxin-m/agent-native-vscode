@@ -9,5 +9,23 @@ function prepare(state,key,defaults,conversationKey=key){if(state.pending)return
 function accepted(state){if(state.text===(state.pendingText??state.pending?.message))state.text='';const sent=new Set(state.pending?.attachments||[]);state.attachments=(state.attachments||[]).filter(a=>!sent.has(a.id));state.pending=null;delete state.pendingText;}
 function fileTarget(href,cwd,host){if(!['mac','local'].includes(host)||typeof href!=='string'||href.length>8192||/[\x00-\x1f]/.test(href))return null;try{if(href.startsWith('file:')){const u=new URL(href);if(u.hostname)return null;href=decodeURIComponent(u.pathname)+u.hash;}else if(/^[a-z][a-z0-9+.-]*:/i.test(href))return null;else href=decodeURIComponent(href);const match=href.match(/(?::(\d+)(?::\d+)?|#L(\d+))$/);const line=match?Number(match[1]||match[2]):1;if(match)href=href.slice(0,match.index);if(href.startsWith('//')||!href||(!path.isAbsolute(href)&&!path.isAbsolute(cwd||'')))return null;return{path:path.resolve(cwd||'/',href),line:Math.max(1,line)};}catch{return null;}}
 function visibleRoot(chat){return !chat.is_child&&!chat.parent_key&&(!chat.root_key||chat.root_key===chat.key)&&!chat.automation;}
+function clusterWorkbenchTarget(href,cwd,chatKey){
+ if(!chatKey)return null;
+ const fragment=typeof href==='string'?href.match(/#page=(\d+)$/):null;
+ const target=fileTarget(fragment?href.slice(0,fragment.index):href,cwd,'mac');
+ if(!target||!path.isAbsolute(target.path))return null;
+ return {kind:'file',...target,...(fragment?{page:Math.max(1,Number(fragment[1]))}:{}),meta:{chat_key:chatKey}};
+}
 function attachmentMime(data){const hex=data.subarray(0,12).toString('hex');if(hex.startsWith('89504e470d0a1a0a'))return 'image/png';if(hex.startsWith('ffd8ff'))return 'image/jpeg';if(['GIF87a','GIF89a'].includes(data.subarray(0,6).toString('ascii')))return 'image/gif';if(data.subarray(0,4).toString('ascii')==='RIFF'&&data.subarray(8,12).toString('ascii')==='WEBP')return 'image/webp';return 'application/octet-stream';}
-module.exports={visibleRoot,attachmentMime,endpoint,request,terminal,replay,pending,prepare,accepted,fileTarget};
+// Agent tree (ORG-12): subagent status comes from the server's transcript evidence (`activity`).
+// Running branches first (a parent ranks with its most active descendant), newest first within a group.
+function agentStatus(n){if(n.activity==='running')return 'running';if(n.activity==='failed'||(!n.activity&&['failed','error'].includes(n.status)))return 'failed';if(['finished','stopped'].includes(n.activity)||['complete','completed','done','interrupted'].includes(n.status))return 'finished';return 'unknown';}
+function orderTree(tree){if(!tree||!Array.isArray(tree.nodes))return tree;const byKey=new Map(tree.nodes.map(n=>[n.key,n])),kids=new Map(),childKeys=new Set();
+ for(const e of tree.edges||[]){if(!byKey.has(e.child_key))continue;childKeys.add(e.child_key);if(!kids.has(e.parent_key))kids.set(e.parent_key,[]);kids.get(e.parent_key).push(e.child_key);}
+ const rank=new Map(),score=(key,path=new Set())=>{if(rank.has(key))return rank.get(key);if(path.has(key))return 2;const s=agentStatus(byKey.get(key)),own=s==='running'?0:2,next=new Set(path).add(key);const value=Math.min(own,...(kids.get(key)||[]).map(k=>score(k,next)));rank.set(key,value);return value;};
+ const sort=keys=>[...keys].sort((a,b)=>score(a)-score(b)||String(byKey.get(b).ts_last||'').localeCompare(String(byKey.get(a).ts_last||'')));
+ const out=[],seen=new Set(),walk=key=>{if(seen.has(key))return;seen.add(key);const n=byKey.get(key);out.push({...n,agent_status:agentStatus(n)});for(const k of sort(kids.get(key)||[]))walk(k);};
+ for(const key of sort(tree.nodes.filter(n=>!childKeys.has(n.key)).map(n=>n.key)))walk(key);
+ for(const n of tree.nodes)if(!seen.has(n.key))out.push({...n,agent_status:agentStatus(n)});
+ return {...tree,nodes:out};}
+module.exports={visibleRoot,orderTree,agentStatus,attachmentMime,endpoint,request,terminal,replay,pending,prepare,accepted,fileTarget,clusterWorkbenchTarget};

@@ -128,7 +128,7 @@ def main():
             continue
 
         meta = enrich.get(key, {})
-        title = titles.get(key) or meta.get("title") or chat.get("title_seed") or "(untitled)"
+        title = titles.get(key) or chat.get("desktop_title") or meta.get("title") or chat.get("title_seed") or "(untitled)"
         desc = meta.get("description", "")
         keywords = " ".join(meta.get("keywords", []))
         body = "\n".join(t.get("text", "") for t in chat.get("turns", [])

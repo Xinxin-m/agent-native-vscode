@@ -28,6 +28,7 @@ but deletion is opt-in so a bad filter setting cannot quietly throw work away.
 import json, os, re, sys, glob, time, fcntl, stat
 import datetime
 import hashlib
+from pathlib import Path
 
 # Bumped whenever meta_of() gains a field the rest of the pipeline reads, so
 # already-indexed chats are re-parsed once instead of keeping stale metadata.
@@ -40,6 +41,9 @@ LINEAGE_FIELDS = ('agent_id', 'parent_agent_id', 'parent_session_id', 'parent_ke
                   'root_key', 'root_session_id', 'is_child', 'agent_label',
                   'agent_path', 'spawned_children', 'lineage_source',
                   'provider_account_id', 'usage_host')
+DESKTOP_LINEAGE_SOURCE = "claude_desktop_task"
+DESKTOP_LINEAGE_FIELDS = ("parent_key", "parent_session_id", "parent_agent_id",
+                          "root_key", "is_child", "lineage_source")
 EXECUTION_FIELDS = ('account_id', 'execution_host', 'host_id', 'conversation_key',
                     'source_key', 'source_session_id', 'source_provider', 'source_turn',
                     'context_omitted_chars', 'last_run_id', 'quota_failover_from')
@@ -85,6 +89,8 @@ CHATS = os.path.join(DATA, "chats")
 INDEX = os.path.join(DATA, "index.json")
 CONFIG = os.path.join(DATA, "config.json")
 HOME = os.path.expanduser("~")
+CLAUDE_DESKTOP_SESSIONS = Path(HOME) / "Library/Application Support/Claude/claude-code-sessions"
+NATIVE_SESSION_ID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", re.I)
 
 DEFAULT_CONFIG = {
     "claude_projects_root": os.path.join(HOME, ".claude/projects"),
@@ -830,6 +836,85 @@ def source_roots(cfg):
     return roots
 
 
+def claude_desktop_metadata():
+    """Join display titles and explicit Desktop delegations to native CLI keys."""
+    records = []
+    for path in CLAUDE_DESKTOP_SESSIONS.glob("*/*/local_*.json"):
+        if path.is_symlink():
+            continue
+        try:
+            with path.open(encoding="utf-8") as handle:
+                record = json.load(handle)
+                modified = os.fstat(handle.fileno()).st_mtime_ns
+        except (OSError, ValueError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        sid = record.get("cliSessionId")
+        if not isinstance(sid, str) or not NATIVE_SESSION_ID.fullmatch(sid):
+            continue
+        records.append((modified, path, "claude-" + sid.lower(), record))
+
+    sessions, current_by_key = {}, {}
+    for _, path, key, record in sorted(records):
+        account = path.parent.parent
+        desktop_id = record.get("sessionId")
+        if desktop_id == path.stem:
+            sessions[(account, desktop_id)] = key
+        current_by_key[key] = (account, record)
+
+    titles, parents = {}, {}
+    for key, (account, record) in current_by_key.items():
+        title = record.get("title")
+        if isinstance(title, str) and title.strip():
+            titles[key] = title.strip()
+        spawn = record.get("spawnedFrom")
+        if (not isinstance(spawn, dict) or spawn.get("sideSession") is not True
+                or not spawn.get("taskId") or spawn.get("userFork") or spawn.get("btw")):
+            continue
+        parent_id = spawn.get("sessionId")
+        parent = sessions.get((account, parent_id)) if isinstance(parent_id, str) else None
+        if parent and parent != key:
+            parents[key] = parent
+    return titles, parents
+
+
+def is_local_claude(meta):
+    return meta.get("source") == "claude" and "mac" in meta.get("node", "mac").split("+")
+
+
+def reconcile_desktop_lineage(index, desktop_parents):
+    """Rebuild only Desktop's edges, including recoverable missing parents."""
+    for meta in index.values():
+        if meta.get("lineage_source") == DESKTOP_LINEAGE_SOURCE:
+            for field in DESKTOP_LINEAGE_FIELDS:
+                meta.pop(field, None)
+    native_parents = {}
+    for key, meta in index.items():
+        parent = meta.get("parent_key")
+        root = meta.get("root_key")
+        if parent or (root and root != key):
+            native_parents[key] = parent or root
+    candidate_parents = {}
+    for key, parent in desktop_parents.items():
+        meta = index.get(key)
+        if (meta and is_local_claude(meta) and key not in native_parents
+                and not any(meta.get(field) for field in ("is_child", "parent_session_id", "parent_agent_id"))):
+            candidate_parents[key] = parent
+    parents = {**native_parents, **candidate_parents}
+    for key, parent in candidate_parents.items():
+        seen = {key}
+        cursor = parent
+        while cursor and cursor in index and cursor not in seen:
+            seen.add(cursor)
+            cursor = parents.get(cursor)
+        if cursor in seen:  # Reject a corrupt cycle; missing parents have tree placeholders.
+            continue
+        parent_sid = parent.removeprefix("claude-")
+        index[key].update(parent_key=parent, parent_session_id=parent_sid, parent_agent_id=parent_sid,
+                          is_child=True, lineage_source=DESKTOP_LINEAGE_SOURCE)
+
+
 def configured_profiles():
     """Read profile paths only; credentials and quota are never inspected here."""
     try:
@@ -1065,16 +1150,32 @@ def main():
         if os.path.exists(cpath):
             os.remove(cpath)
 
+    desktop_titles, desktop_parents = claude_desktop_metadata()
+    reconcile_desktop_lineage(index, desktop_parents)
     resolve_lineage(index)
     # Keep drill-in transcripts consistent with the index after resolving
     # explicit intermediate parents (without rewriting turn bodies).
     for key, meta in index.items():
+        desktop_title = desktop_titles.get(key.lower()) if is_local_claude(meta) else None
+        if desktop_title:
+            meta["desktop_title"] = desktop_title
+        else:
+            meta.pop("desktop_title", None)
         cpath = os.path.join(CHATS, key + '.json')
         try:
             with open(cpath) as fh:
                 chat = json.load(fh)
             fields = {k: meta[k] for k in LINEAGE_FIELDS if k in meta}
-            if any(chat.get(k) != v for k, v in fields.items()):
+            obsolete = ()
+            if chat.get("lineage_source") == DESKTOP_LINEAGE_SOURCE:
+                obsolete = tuple(k for k in DESKTOP_LINEAGE_FIELDS if k in chat and k not in fields)
+            if obsolete or chat.get("desktop_title") != desktop_title or any(chat.get(k) != v for k, v in fields.items()):
+                for field in obsolete:
+                    chat.pop(field)
+                if desktop_title:
+                    chat["desktop_title"] = desktop_title
+                else:
+                    chat.pop("desktop_title", None)
                 chat.update(fields)
                 atomic_json_dump(chat, cpath)
         except (OSError, ValueError):

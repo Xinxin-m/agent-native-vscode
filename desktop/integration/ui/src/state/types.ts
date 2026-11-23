@@ -13,4 +13,5 @@ export interface WorkbenchContextValue {
   notify:(message:string)=>void; refresh:()=>Promise<void>;
   setPreferences:(patch:Partial<Preferences>)=>void;
   updateTitle:(resource:Resource,title:string)=>void;
+  replace?:(panelId:string|undefined,resource:Resource)=>void;
 }
