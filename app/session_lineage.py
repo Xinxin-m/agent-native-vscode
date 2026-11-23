@@ -139,6 +139,23 @@ def _cached_resume(key, meta):
     return {}
 
 
+STATES = ('working', 'waiting', 'idle', 'finished', 'stopped', 'failed', 'unknown')
+
+
+def node_state(node):
+    """One word per node, from the sidebar's live_status first, so the tree and the sidebar row
+    agree. A sub-agent has no process: its transcript evidence (activity) decides when it is not live."""
+    live = node.get('live_status')
+    if live in ('waiting', 'working', 'idle'):
+        return live
+    activity = node.get('activity')
+    if activity == 'running':
+        return 'working'
+    if activity in ('finished', 'stopped', 'failed', 'unknown'):
+        return activity
+    return 'failed' if node.get('status') in ('failed', 'error') else 'finished'
+
+
 def session_tree(req, query, body):
     key = (query or {}).get('key') or ''
     snap = _snapshot(key)
@@ -154,6 +171,9 @@ def session_tree(req, query, body):
         selected.setdefault(key, index[key])
     nodes, edges, missing = [], [], set()
     live = agent_activity._live()
+    import sidebar
+    statuses = sidebar.current_statuses()
+    seen, views = sidebar.load_seen(DATA, create=False), _load('views', {})
     fields = ('id', 'source', 'title_seed', 'model_main', 'models', 'ts_first',
               'ts_last', 'status', 'node', 'execution_host', 'host_id', 'cwd', 'account_id', 'usage') + LINEAGE_FIELDS
     for node_key, meta in selected.items():
@@ -168,6 +188,12 @@ def session_tree(req, query, body):
                 node.update(agent_activity.child_activity(meta, index, live=live))
             except Exception as exc:  # evidence is advisory; never fail the tree
                 node.update(activity='unknown', activity_evidence='Activity check failed: ' + type(exc).__name__)
+            # The same mark the sidebar uses: a running child is working, a settled one has none.
+            node['live_status'] = 'working' if node.get('activity') == 'running' else None
+        else:
+            node['live_status'] = statuses.get(node_key)
+        node['unseen'] = sidebar.is_unseen(dict(meta, key=node_key), seen, views)  # the sidebar row's blue dot
+        node['state'] = node_state(node)
         nodes.append(node)
         parent = meta.get('parent_key')
         if parent and parent != node_key:
@@ -178,7 +204,11 @@ def session_tree(req, query, body):
         nodes.append({'key': parent, 'root_key': root, 'missing': True,
                       'title': 'Transcript unavailable', 'project_id': project_id})
     nodes.sort(key=lambda n: (n.get('ts_first') or '', n['key']))
-    return {'key': key, 'root_key': root, 'nodes': nodes, 'edges': edges,
+    counts = dict.fromkeys(STATES, 0)
+    for node in nodes:
+        if node.get('state'):
+            counts[node['state']] += 1
+    return {'key': key, 'root_key': root, 'nodes': nodes, 'edges': edges, 'counts': counts,
             'missing_parent_keys': sorted(missing)}
 
 

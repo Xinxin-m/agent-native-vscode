@@ -21,7 +21,6 @@
 .agent-map-row.is-selected{background:var(--accent-soft,#2b6fd622)}
 .agent-map-node{flex:1;min-width:0;display:flex;align-items:flex-start;gap:9px;text-align:left;padding:7px 6px 7px 8px;border:0;border-radius:5px;background:none;color:inherit;cursor:pointer;font:inherit}
 .agent-map-node:focus-visible{outline:2px solid var(--accent,#3b82f6);outline-offset:-2px}
-.agent-map-node[aria-current=page] strong:after{content:'';display:inline-block;width:5px;height:5px;border-radius:50%;margin-left:6px;vertical-align:middle;background:var(--accent,#3b82f6)}
 .agent-map-node:disabled{opacity:.55;cursor:default}
 .agent-map-text{min-width:0;flex:1}
 .agent-map-node strong{display:block;font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -30,17 +29,7 @@
 .agent-map-row:hover .agent-map-more,.agent-map-row:focus-within .agent-map-more,.agent-map-row.is-selected .agent-map-more{opacity:1}
 .agent-map-more:hover{background:var(--hover,#0001);color:var(--ink)}
 /* Running is blue, waiting amber, failed red; finished and unknown are gray (unknown hollow). */
-.agent-map-dot{flex:none;width:8px;height:8px;margin-top:5px;border-radius:50%;background:#9a9a9e;box-sizing:border-box}
-.agent-map-dot.running{background:#2f7fe0;box-shadow:0 0 0 3px #2f7fe033;animation:agent-map-pulse 1.6s ease-in-out infinite}
-.agent-map-dot.waiting{background:#d9a03a}
-.agent-map-dot.failed{background:#d0463b}
-.agent-map-dot.finished{background:#9a9a9e}
-.agent-map-dot.unknown{background:none;border:1.5px solid #9a9a9e}
-.agent-map-state.running{color:#2f7fe0;font-weight:600}
-.agent-map-state.waiting{color:#b8822a;font-weight:600}
-.agent-map-state.failed{color:#c0392b}
-@keyframes agent-map-pulse{50%{box-shadow:0 0 0 1px #2f7fe022}}
-@media (prefers-reduced-motion:reduce){.agent-map-dot.running{animation:none}}
+
 .agent-map-chat{min-width:0;min-height:0;display:flex;flex-direction:column;background:var(--paper)}
 .agent-map-chat>.wb-conversation{flex:1;min-height:0}
 .agent-map-chat .chat-quiet-tools{padding-left:10px;padding-right:10px}
@@ -61,5 +50,5 @@
  .agent-map.is-inline,.agent-map.is-inline.has-chat{margin:8px 0;height:70vh}
 }
 .agent-map-chat-status{display:inline-flex;align-items:center;gap:6px;flex:none;white-space:nowrap;font-size:11px}
-.agent-map-chat-status .agent-map-dot{margin-top:0}
 .agent-map-chat-status.running{color:#2f7fe0}
+.agent-map-node .mk-slot.compact{align-self:flex-start;height:18px;width:14px;margin-right:6px}

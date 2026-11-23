@@ -25,4 +25,5 @@
 @keyframes library-activity-spin{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){#headerStatus.is-running::before{animation-duration:2.4s}}
 #resumeCost{display:block;margin-bottom:4px}#resumeCost[hidden]{display:none}
-.agent-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:1px;background:#9a9a9e;box-sizing:border-box}.agent-dot.running{background:#2f7fe0}.agent-dot.failed{background:#d0463b}.agent-dot.unknown{background:none;border:1.5px solid #9a9a9e}.agent-state.running{color:#2f7fe0;font-weight:600}.agent-state.failed{color:#d0463b}
+.agent-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:1px;background:transparent;box-sizing:border-box}.agent-dot.running{background:#2f7fe0}.agent-dot.failed{background:#d0463b}.agent-dot.waiting{background:#1b66cc}.agent-dot.new{background:#1e8e4e}.agent-state.running{color:#2f7fe0;font-weight:600}.agent-state.failed{color:#d0463b}
+#refresh.is-refreshing::before{content:'';display:inline-block;width:9px;height:9px;margin-right:6px;border:2px solid currentColor;border-top-color:transparent;border-radius:50%;vertical-align:-1px;animation:library-spin .8s linear infinite}@keyframes library-spin{to{transform:rotate(360deg)}}

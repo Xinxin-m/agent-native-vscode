@@ -28,6 +28,7 @@ import clis  # noqa: E402  (the CLIs are invisible to a service's minimal PATH)
 from automation import automation_kind, effective_projects
 import json_cache
 import notices
+import sidebar
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "data")
@@ -40,6 +41,8 @@ FILES = {
     "projects": os.path.join(DATA, "projects.json"),
     "flags": os.path.join(DATA, "chat_flags.json"),
     "views": os.path.join(DATA, "views.json"),
+    "seen": os.path.join(DATA, "seen.json"),
+    "live": os.path.join(DATA, "live.json"),
     "config": os.path.join(DATA, "config.json"),
 }
 LOCK = threading.Lock()
@@ -207,7 +210,7 @@ def build_state():
         cfg = jload("config", {})
         cfg = cfg if isinstance(cfg, dict) else {}
         excluded = config_exclusions(cfg)
-        cfg = dict(cfg, excluded_cwds=excluded)
+        cfg = dict(cfg, excluded_cwds=excluded, sidebar_list=cfg.get("sidebar_list") if cfg.get("sidebar_list") in sidebar.LISTS else "recent")
         chats = []
         dirs = {}
         for k, m in index.items():
@@ -248,6 +251,7 @@ def build_state():
         project_state["assignments"] = effective_assignments(index, project_state["assignments"])
         from projects import display_state
         project_state = display_state(index, project_state, flags, cfg)
+        sidebar.annotate(chats, DATA, project_state["assignments"], jload("views", {}))
         return {
             "chats": chats,
             "projects": project_state,
@@ -273,7 +277,7 @@ def build_state():
 
 def _state_signature():
     sig = []
-    for path in [FILES[n] for n in ("index", "enrich", "projects", "flags", "views", "config")] + [CODEX_MODELS_CACHE]:
+    for path in [FILES[n] for n in ("index", "enrich", "projects", "flags", "views", "seen", "live", "config")] + [CODEX_MODELS_CACHE]:
         try:
             st = os.stat(path)
             sig.append((path, st.st_mtime_ns, st.st_size, st.st_ino))
@@ -895,6 +899,8 @@ class Handler(BaseHTTPRequestHandler):
                 proj = jload("projects", default_projects())
                 keys = body.get("keys") or [body.get("key")]
                 keys = [key for key in keys if isinstance(key, str)]
+                if body.get("project") and not any(x["id"] == body["project"] for x in proj["projects"]):
+                    raise ValueError("unknown project")
                 from workspace_groups import mark_manual
                 mark_manual(proj, keys)
                 for key in keys:
@@ -974,6 +980,8 @@ class Handler(BaseHTTPRequestHandler):
                 for key in ("auto_approve_tools", "attention_sound"):  # Settings > Agents
                     if isinstance(body.get(key), bool):
                         cfg[key] = body[key]
+                if body.get("sidebar_list") in sidebar.LISTS:  # the list under Projects: recent, starred, archive, unclassified
+                    cfg["sidebar_list"] = body["sidebar_list"]
                 if body.get("agent_questions") in ("defer", "ask"):
                     cfg["agent_questions"] = body["agent_questions"]
                 compact = body.get("auto_compact")
@@ -1034,7 +1042,7 @@ class Handler(BaseHTTPRequestHandler):
 # Each optional module exposes ROUTES {(method, path): handler} and
 # BACKGROUND [(fn, interval_seconds)]. Missing or broken modules are skipped
 # so the core library keeps serving. Contracts: docs/V2-CONTRACTS.md.
-PLUGIN_MODULES = ("live", "accounts", "stream", "usage_history", "remote_sync", "projects", "hosts", "broker", "session_lineage", "commands", "file_service", "preview_server", "search_api", "open_destinations", "conversation_settings", "settings_insights", "session_reference", "host_models", "project_suggestions", "model_updates")
+PLUGIN_MODULES = ("live", "accounts", "stream", "usage_history", "remote_sync", "projects", "hosts", "broker", "session_lineage", "commands", "file_service", "preview_server", "search_api", "open_destinations", "conversation_settings", "settings_insights", "session_reference", "host_models", "project_suggestions", "model_updates", "notifications", "sidebar")
 PLUGIN_ROUTES = {}
 PLUGIN_BACKGROUND = []
 

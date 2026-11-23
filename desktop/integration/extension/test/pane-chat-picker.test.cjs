@@ -54,3 +54,7 @@ test('history excludes subagent and automation chats like the workbench',async()
  const api=async()=>({chats:[{key:'a',title:'Alpha',source:'claude'},{key:'b',title:'Beta',source:'codex',root_key:'b'},{key:'c',is_child:true},{key:'d',parent_key:'a'},{key:'e',parent_agent_id:'x'},{key:'f',parent_session_id:'x'},{key:'g',root_key:'a'},{key:'h',automation:{id:'daily'}}],projects:{}});
  await f.choose(f.vscode,api,()=>{},f.storage);
 });
+test('a session ID, full or prefix, finds the chat: the key is in the matched detail line',async()=>{
+ const f=fixture(({picker,handlers})=>{assert.equal(picker.matchOnDetail,true);assert.deepEqual(Array.from(picker.items,x=>x.detail),['a','b']);picker.selectedItems=[picker.items[0]];handlers.accept();});
+ await f.choose(f.vscode,f.api,()=>{},f.storage);
+});

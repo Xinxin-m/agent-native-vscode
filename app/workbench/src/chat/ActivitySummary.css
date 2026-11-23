@@ -8,7 +8,7 @@
 @media(prefers-reduced-motion:reduce){.activity-summary-dot.is-active{animation-duration:2.4s}}
 
 /* Waiting for input: a hollow amber ring that does not move. Finished: a green check. */
-.activity-summary[data-phase="Waiting for you"] .activity-summary-dot{background:none;border:2px solid #b78123}
+.activity-summary[data-phase="Waiting for you"] .activity-summary-dot{background:var(--status-wait)}
 .activity-summary[data-phase="Finished"] .activity-summary-dot{width:12px;height:12px;background:#348452}
 .activity-summary[data-phase="Finished"] .activity-summary-dot::after{content:"";position:absolute;left:4px;top:2px;width:3px;height:6px;border:solid #fff;border-width:0 1.5px 1.5px 0;transform:rotate(45deg)}
 .activity-summary:is([data-phase="Failed"],[data-phase="Connection interrupted"]) .activity-summary-dot{background:#b5473a}

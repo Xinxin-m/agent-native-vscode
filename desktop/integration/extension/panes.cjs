@@ -9,6 +9,7 @@ function resourceKey(r){
  if(r.kind==='chat'){if(!r.key&&!r.draftId)throw Error('Conversation identity required');return 'chat:'+(r.key||r.draftId);}
  if(r.kind==='file')return 'file:'+(r.host_id||'mac')+':'+(r.path||r.file_id);
  if(r.kind==='files')return 'files:'+(r.root_id||'');
+ if(r.kind==='notifications')return 'notifications:'+(r.meta?.view==='history'?'history':'');
  return r.kind+':'+(r.url||'');
 }
 module.exports={targetColumn,resourceKey};

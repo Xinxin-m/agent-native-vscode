@@ -57,6 +57,23 @@ class AttentionWatch:
             self.sound()
 
 
+class Banners:
+    """One macOS banner per new notification that needs an answer.
+
+    The first poll only learns what is already open, so a restart never repeats old items."""
+    def __init__(self, post):
+        self.post, self.known = post, None
+
+    def process(self, items, config):
+        ids = {item['id'] for item in items if item.get('needs_answer') and item.get('state') == 'open'}
+        new = [item for item in items if item['id'] in ids - (self.known if self.known is not None else ids)]
+        self.known = ids | (self.known or set())
+        if config.get('notification_banners') is False or os.environ.get('CHAT_DASHBOARD_NO_BANNER'):
+            return
+        for item in new:
+            self.post(item.get('title') or 'Needs your answer', item.get('chat_title') or '', item.get('body') or '')
+
+
 def active(data=DATA):
     """True while a watcher holds its lock, so clients leave the chime to it."""
     try:
@@ -84,6 +101,14 @@ def play_sound():
     subprocess.Popen(['/usr/bin/afplay', SOUND], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def post_banner(title, subtitle, text):
+    """A notification banner never activates an app. Values go in as arguments, never into the script."""
+    script = ['on run argv', 'display notification (item 2 of argv) with title "Library" subtitle (item 1 of argv)', 'end run']
+    heading = title + (' - ' + subtitle if subtitle else '')
+    args = ['/usr/bin/osascript'] + [part for line in script for part in ('-e', line)] + [heading[:150], text[:200]]
+    subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def audit(item):
     with (DATA/'approval-actions.jsonl').open('a') as handle:
         handle.write(json.dumps(item)+'\n')
@@ -95,6 +120,7 @@ def main():
         fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
         config = {}
         watcher = AttentionWatch(lambda path, body: request(int(config.get('port',8744)),path,body), play_sound, audit)
+        banners = Banners(post_banner)
         while True:
             try:
                 config = json.loads((DATA/'config.json').read_text())
@@ -102,6 +128,13 @@ def main():
                 watcher.process(value.get('items') or [], config)
             except Exception as error:
                 print(f'Attention watcher: {type(error).__name__}: {error}', flush=True)
+            try:
+                banners.process(request(int(config.get('port',8744)), '/api/notifications').get('items') or [], config)
+            except urllib.error.HTTPError as error:
+                if error.code != 404:  # an older server has no feed yet
+                    print(f'Attention watcher banners: HTTP {error.code}', flush=True)
+            except Exception as error:
+                print(f'Attention watcher banners: {type(error).__name__}: {error}', flush=True)
             time.sleep(1)
 
 

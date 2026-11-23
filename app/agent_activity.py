@@ -196,6 +196,19 @@ def _on_mac(meta):
     return host in ('mac', 'local')
 
 
+def _root_alive(live, meta, root_sid):
+    """True or False from a fresh process list of the child's own host; None without evidence.
+    A remote host counts only while its last probe is current."""
+    if not live or not root_sid:
+        return None
+    host = 'mac' if _on_mac(meta) else (meta.get('execution_host') or meta.get('host_id') or meta.get('node') or '')
+    node = next((n for n in live.get('nodes') or [] if n.get('name') == host), None)
+    if not node or not node.get('ok') or node.get('stale_since'):
+        return None
+    return any(s.get('tool') == 'claude' and s.get('alive') and s.get('session_id') == root_sid
+               and (s.get('node') or 'mac') == host for s in live.get('sessions') or [])
+
+
 def _ago(seconds):
     seconds = max(0, int(seconds))
     return f'{seconds} s ago' if seconds < 120 else f'{seconds // 60} min ago'
@@ -248,11 +261,10 @@ def child_activity(meta, index, now=None, live=None):
     if state == 'open' and age is not None and age < CLAUDE_FRESH_S:
         return _out('running', 'No completion recorded; transcript written ' + _ago(age))
     root_sid = meta.get('root_session_id') or ''
-    if live and root_sid and _on_mac(meta):
-        alive = any(s.get('tool') == 'claude' and s.get('alive') and s.get('session_id') == root_sid
-                    for s in live.get('sessions') or [])
-        if alive:
-            return _out('running', 'No completion recorded; root session process is alive')
+    alive = _root_alive(live, meta, root_sid)
+    if alive is True:
+        return _out('running', 'No completion recorded; root session process is alive')
+    if alive is False:
         return _out('stopped', 'No completion recorded and the root session process has exited')
     return _out('unknown', 'No completion recorded' + ('; transcript last written ' + _ago(age) if age is not None else '; transcript unavailable'))
 

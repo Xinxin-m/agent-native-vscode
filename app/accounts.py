@@ -57,6 +57,7 @@ KC_SERVICE = "Claude Code-credentials"
 API = "https://api.anthropic.com/api/oauth/"
 UA = "claude-code/2.1.282"
 SWITCH_COOLDOWN_S = 600
+LABEL_MAX = 60
 
 LOCK = threading.RLock()
 _last_bg = 0.0
@@ -726,7 +727,8 @@ def payload(d=None):
             "id": a["id"], "tool": a["tool"], "label": a.get("label", ""),
             "email": c.get("email", ""), "org": c.get("org", ""), "plan": c.get("plan", ""),
             "config_dir": a["config_dir"], "is_default": _is_default(a),
-            "logged_in": bool(c.get("logged_in")), "fetched_at": c.get("fetched_at"),
+            "logged_in": bool(c.get("logged_in")), "previously_used": a in d["accounts"],
+            "fetched_at": c.get("fetched_at"),
             "error": c.get("error", ""), "windows": c.get("windows", []),
             "cached_at": c.get("cached_at"), "rollout_at": c.get("rollout_at"),
             "extra": c.get("extra"), "credits": c.get("credits"),
@@ -749,6 +751,34 @@ def payload(d=None):
             "notice_center": notices.summary(os.path.join(DATA, "notices.json")),
             "accounts": [a for a in out if a['logged_in'] and a['email']],
             "pending_accounts": [a for a in out if not (a['logged_in'] and a['email'])]}
+
+
+def picker_list(d=None, model=None, rows=None, pending=None):
+    """The one account list for every model picker: exactly the Accounts tab's rows (one per
+    verified identity, duplicates hidden; then the signed-out accounts used before, with
+    logged_in false), plus what Auto resolves to now. Auto never resolves to a signed-out row."""
+    d = d or load()
+    if rows is None:
+        data = payload(d)
+        rows, pending = data['accounts'], data['pending_accounts']
+    shown = [r for r in rows if not r.get('duplicate_of')]
+    signed_out = [r for r in pending or [] if r.get('previously_used') and not r.get('logged_in') and not r.get('duplicate_of')]
+    by_id = {r['id']: r for r in rows}
+    out = {'ok': True, 'accounts': [{'id': r['id'], 'tool': r['tool'], 'label': r['label'], 'email': r.get('email') or '',
+                                     'logged_in': bool(r.get('logged_in'))} for r in shown + signed_out], 'auto': {}}
+    for tool in ('claude', 'codex'):
+        try:
+            aid = resolve_launch(tool, model, d=d)['account_id']
+            row = by_id.get(aid)
+            row = by_id.get(row.get('duplicate_of')) if row and row.get('duplicate_of') else row  # the shown twin
+            out['auto'][tool] = {'account_id': row['id'], 'label': row['label'], 'email': row['email']} if row else None
+        except Exception:
+            out['auto'][tool] = None
+    return out
+
+
+def _h_picker(req, query, body):
+    return picker_list(model=(query or {}).get('model') or None)
 
 
 def _promote_verified(d, a, record):
@@ -938,21 +968,33 @@ def _slug(s):
     return re.sub(r"[^a-z0-9_-]+", "-", (s or "").strip().lower()).strip("-")
 
 
-def add(tool, label):
+def add(tool, label=None):
+    """New pending profile. Without a label the account is named "Account N";
+    the provider's sign-in page (or sign-up, it offers both) supplies the identity."""
     if tool not in ("claude", "codex"):
         raise ValueError("tool must be claude or codex")
-    slug = _slug(label)
-    if not slug or slug == "default":
-        raise ValueError("label required (not 'default')")
+    if not isinstance(label, str):
+        label = None
     root = "~/.claude-profiles" if tool == "claude" else "~/.codex-profiles"
-    short = f"{root}/{slug}"
-    cdir = os.path.expanduser(short)
-    os.makedirs(cdir, mode=0o700, exist_ok=True)
     with LOCK:
         d = load()
-        aid = f"{tool}-{slug}"
-        if _acct(d, aid):
-            raise ValueError("An account with this label already exists; choose another label")
+        if label and label.strip():
+            label = label.strip()[:LABEL_MAX]
+            slug = _slug(label)
+            if not slug or slug == "default":
+                raise ValueError("label required (not 'default')")
+            aid = f"{tool}-{slug}"
+            if _acct(d, aid):
+                raise ValueError("An account with this label already exists; choose another label")
+        else:
+            n = 2
+            while _acct(d, f"{tool}-account-{n}"):
+                n += 1
+            label, slug = f"Account {n}", f"account-{n}"
+            aid = f"{tool}-{slug}"
+        short = f"{root}/{slug}"
+        cdir = os.path.join(HOME, short[2:])
+        os.makedirs(cdir, mode=0o700, exist_ok=True)
         d.setdefault("pending_accounts", []).append({"id": aid, "tool": tool, "label": label, "config_dir": cdir})
         save(d)
     cmd = (f"CLAUDE_CONFIG_DIR={short} claude auth login" if tool == "claude"
@@ -1053,6 +1095,18 @@ def _open_login_browser(url):
         return False
 
 
+def _auto_verify(session):
+    """A finished Codex sign-in is checked at once, so the account shows as
+    connected without another click (Claude's finishes when the pasted code is
+    submitted, and that request verifies)."""
+    if session['tool'] != 'codex' or session.get('result') != 0 or session.get('error'):
+        return
+    try:
+        verify(session['id'])
+    except (ValueError, OSError, RuntimeError) as error:
+        print(f"accounts: verify after sign-in: {error}")
+
+
 def _browser_login(d, a):
     """Native OAuth in an owned PTY; only the explicit action opens a browser."""
     target, env, stashed = _login_target(d, a)
@@ -1128,6 +1182,7 @@ def _browser_login(d, a):
             os.close(master)
             session['finished_at'] = time.time()
             session['done'].set()
+            _auto_verify(session)
     threading.Thread(target=finish, daemon=True).start()
     opened = _open_login_browser(url)
     session['browser_opened'] = opened
@@ -1242,6 +1297,7 @@ def _codex_browser_login(d, a):
             finally:
                 session['finished_at'] = time.time()
                 session['done'].set()
+                _auto_verify(session)
     threading.Thread(target=finish, daemon=True).start()
     session['browser_opened'] = _open_login_browser(url)
     return {'ok': True, 'id': a['id'], 'login_started': True,
@@ -1436,7 +1492,10 @@ def _start_login(aid, when_idle=False, email_hint=None, require_pending_email=Fa
                 return {'ok': True, 'id': aid, 'login_started': True,
                         **{k: session.get(k) for k in ('login_id', 'authorization_url', 'code_required', 'browser_opened')},
                         'message': 'Sign-in is already open in your browser.'}
-    busy = _login_activity(a)
+    # Nothing to preserve when this profile holds no login: only a signed-in
+    # account being renewed can break a running chat.
+    signed_in = bool((d.get('cache', {}).get(aid) or {}).get('logged_in'))
+    busy = _login_activity(a) if signed_in else None
     if busy:
         if when_idle:
             with _login_lock:
@@ -1504,6 +1563,89 @@ def _terminal_login(d, a):
             "message": "Complete sign-in in Terminal, then Check sign-in." if started else "Terminal could not open. Run this command, then Check sign-in."}
 
 
+def cancel_login(aid):
+    """Stop the sign-in this server started for this account (only that child process),
+    drop its pending state and return the account row. Safe when nothing is pending."""
+    d = load()
+    if not _acct(d, aid):
+        raise ValueError("unknown account")
+    with _login_lock:
+        mine = [(sid, s) for sid, s in _login_sessions.items() if s['id'] == aid]
+        stopped = [s for _, s in mine if not s['done'].is_set()]
+        for s in stopped:
+            s['cancelled'] = True
+            proc = s['process']
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+        for sid, _ in mine:
+            _login_sessions.pop(sid, None)
+        _pending_renewals.pop(aid, None)
+    for s in stopped:
+        if s.get('stashed'):  # the isolated profile folder this sign-in created, nothing in it was adopted
+            folder, root = os.path.realpath(s['target']['config_dir']), os.path.realpath(os.path.join(DATA, 'login-profiles'))
+            if os.path.dirname(folder) == root:
+                shutil.rmtree(folder, ignore_errors=True)
+    data = payload(d)
+    row = next((r for r in data['accounts'] + data['pending_accounts'] if r['id'] == aid), None)
+    return {'ok': True, 'cancelled': bool(stopped), 'account': row}
+
+
+def logout(aid, force=False):
+    """Provider logout for this profile only (its own config dir, never another)."""
+    d = load()
+    a = _acct(d, aid)
+    if not a:
+        raise ValueError("unknown account")
+    if not (d['cache'].get(aid) or {}).get('logged_in'):
+        raise ValueError("This account is already signed out.")
+    busy = _login_activity(a)
+    if busy and not force:
+        raise LoginBusy(busy + ' Signing out can interrupt them.')
+    argv = [_cli('claude'), 'auth', 'logout'] if a['tool'] == 'claude' else [_cli('codex'), 'logout']
+    try:
+        result = subprocess.run(argv, env=_auth_env(d, a), capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        raise RuntimeError(a['tool'].title() + ' could not sign out. Try again.')
+    if result.returncode != 0:
+        raise RuntimeError(a['tool'].title() + ' could not sign out. Try again.')
+    with LOCK:
+        d = load()
+        a = _acct(d, aid)
+        old = d['cache'].get(aid) or {}
+        rec = _fetch_claude(d, a) if a['tool'] == 'claude' else _fetch_codex(d, a)
+        if rec.get('logged_in'):
+            raise RuntimeError('The provider still reports this account as signed in.')
+        # keep who it was, so the row can offer "Sign in again"
+        rec.update(email=rec.get('email') or old.get('email', ''), plan=rec.get('plan') or old.get('plan', ''),
+                   windows=[], fetched_at=int(time.time()))
+        d['cache'][aid] = rec
+        save(d)
+        return dict(payload(d), ok=True)
+
+
+def rename(aid, label):
+    """Display name only; the id and profile folder never change."""
+    if not isinstance(label, str) or not label.strip():
+        raise ValueError('Enter a name.')
+    label = label.strip()
+    if len(label) > LABEL_MAX:
+        raise ValueError(f'Use at most {LABEL_MAX} characters.')
+    with LOCK:
+        d = load()
+        a = _acct(d, aid)
+        if not a:
+            raise ValueError('unknown account')
+        if a in d.get('pending_accounts', []) and not a.get('expected_email') and _valid_email(a.get('label')):
+            a['expected_email'] = _valid_email(a['label'])  # the old label was the identity check
+        a['label'] = label
+        save(d)
+        return dict(payload(d), ok=True)
+
+
 def remove(aid):
     with LOCK:
         d = load()
@@ -1563,7 +1705,7 @@ def _h_login(req, query, body):
     body = body or {}
     try:
         return start_login(body.get("id"), when_idle=body.get('when_idle') is True,
-                           email_hint=body.get('email_hint'), require_pending_email=True)
+                           email_hint=body.get('email_hint'))
     except LoginBusy as exc:
         return {"ok": False, "code": "login_busy", "error": str(exc)}, 409
     except LoginEmailRequired as exc:
@@ -1577,6 +1719,31 @@ def _h_login_code(req, query, body):
     try:
         return submit_login_code(body.get('id'), body.get('login_id'), body.get('code'))
     except (ValueError, RuntimeError, OSError) as exc:
+        return {'ok': False, 'error': str(exc)}, 400
+
+
+def _h_login_cancel(req, query, body):
+    try:
+        return cancel_login((body or {}).get('id'))
+    except ValueError as exc:
+        return {'ok': False, 'error': str(exc)}, 404
+
+
+def _h_logout(req, query, body):
+    body = body or {}
+    try:
+        return logout(body.get('id'), force=body.get('force') is True)
+    except LoginBusy as exc:
+        return {'ok': False, 'code': 'logout_busy', 'error': str(exc)}, 409
+    except (ValueError, RuntimeError) as exc:
+        return {'ok': False, 'error': str(exc)}, 400
+
+
+def _h_rename(req, query, body):
+    body = body or {}
+    try:
+        return rename(body.get('id'), body.get('label'))
+    except ValueError as exc:
         return {'ok': False, 'error': str(exc)}, 400
 
 
@@ -1722,10 +1889,14 @@ def background():
 
 ROUTES = {
     ("GET", "/api/accounts"): _h_get,
+    ("GET", "/api/accounts/picker"): _h_picker,
     ("POST", "/api/accounts/refresh"): _h_refresh,
     ("POST", "/api/accounts/add"): _h_add,
     ("POST", "/api/accounts/login"): _h_login,
     ("POST", "/api/accounts/login/code"): _h_login_code,
+    ("POST", "/api/accounts/login/cancel"): _h_login_cancel,
+    ("POST", "/api/accounts/logout"): _h_logout,
+    ("POST", "/api/accounts/rename"): _h_rename,
     ("POST", "/api/accounts/verify"): _h_verify,
     ("POST", "/api/accounts/remove"): _h_remove,
     ("POST", "/api/accounts/switch"): _h_switch,

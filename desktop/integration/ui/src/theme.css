@@ -42,3 +42,15 @@
 .settings-page section,.settings-page header{min-width:0}.settings-page .reading-sample,.settings-page .account-identity{overflow-wrap:anywhere}
 .settings-editor-tools{border-top:1px solid var(--line);padding-top:18px;margin-top:8px}.settings-editor-tools summary{cursor:pointer;font-size:13px;font-weight:550;padding:6px 0}.settings-editor-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:12px}.settings-editor-actions button{padding:10px 12px;text-align:left;font-size:12px;background:var(--rail)}.settings-editor-tools [role=alert]{margin-top:10px}
 @container(max-width:320px){.setting-row{grid-template-columns:minmax(0,1fr);gap:6px;padding:10px 0}.setting-row input[type=checkbox]{justify-self:start}.settings-tabs{gap:3px}.settings-tabs button{padding:8px}.settings-section-heading,.account-heading{flex-wrap:wrap;gap:10px}.settings-editor-actions{grid-template-columns:minmax(0,1fr)}}
+
+/* Redesign 2026-11-22: calmer rail, readable muted text, status tokens. Where the native sidebar uses a Code-OSS variable (native.css) that still wins. */
+:root{--ink:#1d1d1f;--muted:#5f6066;--panel:#ffffff;--paper:#fcfcfb;--rail:#f7f7f5;--line:#e4e4e1;--hover:#ececea;--accent:#1b66cc;--accent-soft:#e8f0fc;--bar:#1b66cc;--status-wait:#1b66cc;--status-new:#1e8e4e;--status-fail:#d32f2f}
+:root[data-theme=dark]{--ink:#ececee;--muted:#a3a3a9;--panel:#232325;--paper:#1e1e20;--rail:#1b1b1d;--line:#323236;--hover:#2c2c2f;--accent:#78b2ff;--accent-soft:#22324a;--bar:#78b2ff;--status-wait:#78b2ff;--status-new:#5ccf8a;--status-fail:#ff6b66}
+.mk-slot{display:grid;place-items:center;width:28px;flex:none;align-self:stretch}
+.mk{display:inline-block;flex:none;width:8px;height:8px;border-radius:50%}
+.mk.wait{background:var(--status-wait)}.mk.new{background:var(--status-new)}.mk.fail{background:var(--status-fail)}
+/* Running: the production turning circle (8 px, accent track at 22 percent, 0.8 s). */
+.mk.work{box-sizing:border-box;border-radius:50%;border:1.5px solid color-mix(in srgb,var(--accent) 22%,transparent);border-top-color:var(--accent);animation:mk-spin .8s linear infinite}
+@keyframes mk-spin{to{transform:rotate(360deg)}}
+[data-page-hidden] .mk.work{animation-play-state:paused}
+.mk-slot.compact{width:12px;align-self:center}

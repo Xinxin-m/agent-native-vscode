@@ -289,6 +289,12 @@ def mutate(body, data=DATA):
                 if re.sub('[^a-z0-9]', '', p['name'].lower()) == 'automationruns': raise CatalogError('Automation runs is reserved')
             elif action == 'group': p['group'] = _text(body.get('group'), 'group name', empty=True)
             elif action == 'mapping': p['workspace_mappings'] = _mappings(body.get('workspace_mappings'))
+            elif action == 'workspace':  # where new chats of this project start; no host or folder needs to be open
+                if body.get('clear') is True:
+                    p.pop('default_workspace', None)
+                else:
+                    row = _mappings([{'host': body.get('host_id'), 'path': body.get('path')}])[0]
+                    p['default_workspace'] = {'host_id': row['host'], 'path': row['path']}
             else: raise CatalogError('Unknown project action')
         snapshot = _save(data, original, value)
         return {**catalog(data), 'snapshot': snapshot}

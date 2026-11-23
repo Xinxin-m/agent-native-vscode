@@ -8,6 +8,7 @@ from pathlib import Path
 import host_connector
 
 HERE=Path(__file__).resolve().parent
+DATA=HERE/'data'  # the synthetic QA server remaps this to its temp folder
 
 
 def _json(path, fallback):
@@ -89,36 +90,34 @@ def local_defaults(provider, meta=None, account=None, model=None):
 def defaults(req,query,body):
     try:
         key=query.get('key') or ''
-        meta={}
-        if key:
-            meta=_json(HERE/'data/index.json',{}).get(key)
-            if not meta:raise ValueError('Unknown native conversation')
+        meta=_json(DATA/'index.json',{}).get(key) if key else None
+        native_found=bool(meta)  # a chat with no indexed transcript (new or synthetic) gets the new-chat defaults
+        meta=meta or {}
         provider=query.get('provider') or meta.get('source') or 'claude'
         if provider not in ('claude','codex'):raise ValueError('Unknown provider')
         native=meta if meta.get('source')==provider and query.get('handoff')!='1' else {}
         host=native.get('execution_host') or native.get('host_id') or query.get('host_id') or native.get('node') or 'mac'
         if '+' in host:host=query.get('host_id') if query.get('host_id') in host.split('+') else host
         if host not in ('mac','local'):
-            return {'defaults':{'provider':provider,'host_id':host,**({'cwd':native['cwd']} if native.get('cwd') else {}),'model':query.get('model') or (native.get('resume') or {}).get('model') or native.get('model_main') or '', 'effort':(native.get('resume') or {}).get('effort') or '','account':native.get('account_id') or query.get('account') or ''}}
+            return {'native':native_found,'defaults':{'provider':provider,'host_id':host,**({'cwd':native['cwd']} if native.get('cwd') else {}),'model':query.get('model') or (native.get('resume') or {}).get('model') or native.get('model_main') or '', 'effort':(native.get('resume') or {}).get('effort') or '','account':native.get('account_id') or query.get('account') or ''}}
         notice=''
         try:
             value=local_defaults(provider,native,query.get('account'),query.get('model'))
         except host_connector.AmbiguousSessionAccount as exc:
             # Profiles that share one login already resolved upstream. Only different
-            # logins reach here; that goes to the notification center, once per chat.
+            # logins reach here.
             value=local_defaults(provider,{k:v for k,v in native.items() if k not in ('id','account_id','account')},None,query.get('model'))
             candidates=list(getattr(exc,'candidates',()))
             value.update(account='',selectedAccount='',account_required=True,account_candidates=candidates)
             value.pop('account_selection',None)
             # Only a transcript no profile can read is a real failure; subagent transcripts never resume natively.
-            if not candidates and not native.get('is_child') and '-agent-' not in key:
-                import notices
-                title=(native.get('title_seed') or 'this chat')[:80]
-                notices.note(HERE/'data/notices.json','account:'+key,f'{provider.title()} chat "{title}" cannot be resumed: no {provider.title()} account on this Mac can read its transcript.')
+            if hasattr(exc,'candidates') and not candidates and not native.get('is_child') and '-agent-' not in key:
+                # Shown inside the chat only; not one of the notification types.
+                notice=f'This chat cannot be resumed: no {provider.title()} account on this Mac can read its transcript.'
         if not value.get('cwd'):
             import hosts
             value['cwd']=hosts.get_host('mac')['default_cwd']
-        return {'defaults':value,**({'notice':notice} if notice else {})}
+        return {'native':native_found,'defaults':value,**({'notice':notice} if notice else {})}
     except (ValueError,OSError) as exc:
         return {'ok':False,'error':str(exc)},400
 

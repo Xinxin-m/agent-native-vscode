@@ -1,6 +1,7 @@
 import {useEffect,useRef,useState} from 'react';
 import {api} from '../api/client';
 import {createSerialWriter,policyDurations} from '../state/workspace';
+import {stoppableIdle} from './sessionControl';
 
 export const durationLabel=(n:number)=>n===12?'12 hours':n===24?'1 day':n%24===0?n/24+' days':n+' hours';
 const SLOW_MS=3000,GIVE_UP_MS=20000;
@@ -29,4 +30,23 @@ export function SessionCleanup(){
   <p className="settings-note">Claude Code only. Never Codex, shared or unverified processes. Never deletes transcripts, tmux sessions or cluster jobs.{last?` Last automatic stop: ${last.name||'an agent'}, ${new Date(last.at*1000).toLocaleString()}.`:''}</p>
   <small className="settings-status" role="status">{status}</small>
  </>;
+}
+
+const outcomeWords:Record<string,string>={stop_requested:'Stopping',skipped:'Skipped',refused:'Not stopped'};
+// The one-click route to stopping: every fresh idle session the server allows. Busy and waiting sessions are never offered.
+export function StopIdleButton({sessions,onDone}:{sessions:any[];onDone?:()=>void}){
+ const [busy,setBusy]=useState(false),[outcomes,setOutcomes]=useState<any[]|null>(null),[error,setError]=useState('');
+ const count=stoppableIdle(sessions).length;
+ async function run(){
+  setBusy(true);setError('');
+  try{const result=await api('/api/live/stop_idle',{});setOutcomes(result.outcomes||[]);onDone?.();}
+  catch(e:any){setError(e.status===404?'Stopping idle sessions is not available on this server.':e.message);}
+  finally{setBusy(false);}
+ }
+ if(!count&&!outcomes&&!error)return null;
+ return <div className="stopbar">
+  {count>0&&<button className="stop-idle" disabled={busy} onClick={()=>void run()}>{busy?'Stopping…':`Stop idle sessions (${count})`}</button>}
+  {error&&<p className="inline-error" role="alert">{error}</p>}
+  {outcomes&&<ul className="stop-outcomes" aria-live="polite">{outcomes.length?outcomes.map((o:any)=><li key={o.id} className={o.state}><strong>{o.name||o.id}</strong><span>{outcomeWords[o.state]||o.state}{o.reason?': '+o.reason:''}</span></li>):<li>Nothing to stop.</li>}</ul>}
+ </div>;
 }

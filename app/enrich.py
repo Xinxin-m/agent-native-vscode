@@ -340,6 +340,16 @@ class Run:
                                    "title": (self.done.get(key) or {}).get("title", ""),
                                    "at": datetime.datetime.now().isoformat(timespec="seconds")}
 
+    def code_classify(self):
+        """Place unplaced chats with 3+ user turns by code (autoclassify.py); no model call."""
+        import autoclassify
+        decisions = autoclassify.code_placements(self.index, self.proj, self.done, self.cfg, _chat)
+        by_id = {p["id"]: p for p in self.proj.get("projects", [])}
+        for row in decisions:
+            self.place(row["key"], by_id[row["project_id"]])
+        autoclassify.log_decisions(os.path.dirname(OUT), decisions)
+        return len(decisions)
+
     def flush_projects(self):
         if self.placed:
             fresh = _load(PROJECTS, None) or self.proj
@@ -564,6 +574,8 @@ def main(argv=None):
     if do_daily and not daily_due:
         print("daily update already ran today (use --force to run again)")
 
+    if cfg.get("auto_classify_code") is True:  # default off until she turns it on in data/config.json
+        print(f"code placement: {run.code_classify()} chats", flush=True)
     first = run.first_candidates(limit or None, forced,
                                  _num(cfg, "single_turn_idle_hours", 24) if daily_due else None,
                                  only_forced=bool(forced) and not (do_first or daily_due)) \

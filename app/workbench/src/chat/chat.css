@@ -47,7 +47,7 @@
 
 .chat-stop{display:inline-flex;align-items:center;gap:6px;min-height:29px;padding:0 9px;color:var(--ink);border:1px solid var(--line);background:var(--panel);font-size:11px;flex-shrink:0}.chat-stop:hover{background:var(--rail)}
 
-.auth-recovery,.auth-warning{margin:12px 0;padding:12px;border:1px solid var(--line,#d5b875);border-radius:8px;background:var(--panel,#fff8e9);color:var(--ink,#272522);font-size:13px;line-height:1.5}.auth-recovery[hidden],.auth-warning[hidden]{display:none}.auth-recovery button,.auth-warning button{margin:6px 8px 0 0;padding:5px 9px;border:1px solid var(--line,#b9ae90);border-radius:5px;background:var(--paper,#fff);color:inherit;cursor:pointer}.auth-recovery pre{white-space:pre-wrap;overflow-wrap:anywhere}.auth-recovery input,.auth-warning input{padding:6px;margin:6px;max-width:90%}.auth-warning p,.auth-recovery p{margin:4px 0}.auth-recovery-dot{display:inline-block;width:7px;height:7px;margin-right:6px;border-radius:50%;background:#b64b23}
+.auth-recovery,.auth-warning{margin:12px 0;padding:12px;border:1px solid var(--line,#d5b875);border-radius:8px;background:var(--panel,#fff8e9);color:var(--ink,#272522);font-size:13px;line-height:1.5}.auth-recovery[hidden],.auth-warning[hidden]{display:none}.auth-recovery button,.auth-warning button{margin:6px 8px 0 0;padding:5px 9px;border:1px solid var(--line,#b9ae90);border-radius:5px;background:var(--paper,#fff);color:inherit;cursor:pointer}.auth-recovery pre{white-space:pre-wrap;overflow-wrap:anywhere}.auth-recovery input,.auth-warning input{padding:6px;margin:6px;max-width:90%}.auth-warning p,.auth-recovery p{margin:4px 0}
 
 
 
@@ -66,7 +66,7 @@
 
 /* An active run remains visible through tool and streaming pauses. */
 .chat-visible-phase.is-running::before{content:"";display:inline-block;box-sizing:border-box;width:9px;height:9px;margin-right:6px;vertical-align:-1px;border-radius:50%;border:1.5px solid color-mix(in srgb,var(--accent) 22%,transparent);border-top-color:var(--accent);animation:library-status-spin .8s linear infinite}
-.chat-visible-phase[data-phase="Waiting for you"]::before{content:"";display:inline-block;box-sizing:border-box;width:8px;height:8px;margin-right:6px;border-radius:50%;border:2px solid #b78123}
+.chat-visible-phase[data-phase="Waiting for you"]::before{content:"";display:inline-block;box-sizing:border-box;width:8px;height:8px;margin-right:6px;border-radius:50%;background:var(--status-wait)}
 .chat-visible-phase[data-phase="Finished"]::before{content:"✓";margin-right:5px;color:#348452;font-weight:700}
 @keyframes library-status-spin{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){.chat-visible-phase.is-running::before{animation-duration:2.4s}}

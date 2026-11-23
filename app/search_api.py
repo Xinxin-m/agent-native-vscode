@@ -1,11 +1,22 @@
 """Bounded, deterministic transcript search. No enrichment or external calls."""
 import json
 from pathlib import Path
+import re
 import time
 
 import file_service as fs
 
 DATA = Path(__file__).resolve().parent / 'data'
+SESSION_ID = re.compile(r'[0-9a-f-]{6,}')
+
+
+def session_id_query(needle):
+    """The lower-cased id text of a session-id query (key prefix dropped), or None."""
+    text = needle.casefold()
+    for prefix in ('claude-', 'codex-'):
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+    return text if SESSION_ID.fullmatch(text) else None
 
 
 def search(data, query):
@@ -32,7 +43,32 @@ def search(data, query):
     deadline = time.monotonic()+3
     folded = needle.casefold()
     truncated = False
-    for key, meta in sorted(index.items(),key=lambda pair:pair[1].get('ts_last') or '',reverse=True):
+    wanted = session_id_query(needle)
+    ordered = sorted(index.items(),key=lambda pair:pair[1].get('ts_last') or '',reverse=True)
+    for key, meta in ordered if wanted else ():
+        # A session ID (full or prefix) finds the chat itself; sub-agents only by their full ID.
+        sid = str(meta.get('id') or '').casefold()
+        if not sid or not (sid == wanted or sid.startswith(wanted) and not meta.get('is_child') and not meta.get('parent_key')):
+            continue
+        cwd = meta.get('cwd') or ''
+        if any(cwd == p or cwd.startswith(p.rstrip('/')+'/') for p in config.get('excluded_cwds',[]) if isinstance(p,str)):
+            continue
+        if query.get('host_id') and query['host_id'] not in str(meta.get('node') or 'mac').split('+'):
+            continue
+        if query.get('account_id') and query['account_id'] != meta.get('account_id'):
+            continue
+        if query.get('provider') and query['provider'] != meta.get('source'):
+            continue
+        if query.get('project_id') and assignments.get(meta.get('root_key') or key) not in project_ids:
+            continue
+        matched_roots.add(key)
+        title = meta.get('title_seed') or (meta.get('first_prompt') or '')[:60] or key
+        rows.append({'key':key,'matched_key':key,'turn_index':0,'match':'session_id',
+                     'snippet':'Session '+str(meta.get('id'))+' \u00b7 '+str(title)[:140],'role':None,
+                     'host_id':meta.get('execution_host') or meta.get('host_id') or meta.get('node'),
+                     'cwd':cwd,'execution_cwd':meta.get('execution_cwd'),
+                     'execution_host':meta.get('execution_host') or meta.get('host_id'),'node':meta.get('node')})
+    for key, meta in ordered:
         # Explicit children are reached through their parent's tree, never search.
         if meta.get('is_child') or meta.get('parent_key') or (meta.get('root_key') and meta['root_key'] != key):
             continue

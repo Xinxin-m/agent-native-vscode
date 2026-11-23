@@ -20,3 +20,11 @@
 .dockview-theme-workbench .dv-split-view-container.dv-vertical>.dv-sash-container>.dv-sash:not(.dv-disabled){background-image:linear-gradient(var(--line),var(--line));background-size:100% 1px;background-position:center;background-repeat:no-repeat}
 .dockview-theme-workbench .dv-sash-container>.dv-sash:not(.dv-disabled)::after{content:"";position:absolute;left:50%;top:50%;width:3px;height:24px;transform:translate(-50%,-50%);border-radius:2px;background:var(--muted);opacity:.45;pointer-events:none}
 .dockview-theme-workbench .dv-split-view-container.dv-vertical>.dv-sash-container>.dv-sash:not(.dv-disabled)::after{width:24px;height:3px}
+/* Phone: tabs share the strip, the inactive ones give way first, so the active tab's name stays whole. */
+@media(max-width:640px){
+ .dockview-theme-workbench .dv-tab{flex:0 1 auto;min-width:64px}
+ .dockview-theme-workbench .dv-tab.dv-inactive-tab{flex-shrink:6}
+ .dockview-theme-workbench .dv-tab.dv-active-tab{flex-shrink:0}
+ .dockview-theme-workbench .dv-tab .workbench-tab{min-width:0;max-width:none;width:100%}
+ .dockview-theme-workbench .dv-tab .tab-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+}

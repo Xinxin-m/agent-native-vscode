@@ -432,9 +432,39 @@ def _with_host_sessions(payload):
         key = row.get('tool', '') + '-' + row.get('session_id', '')
         if not row.get('chat_key') and key in index:
             row['chat_key'] = key
+    now = time.time()
+    for row in sessions:
+        row['live_status'] = session_status(row, now)
+        row.update(index_state(row))
     result = dict(payload, sessions=sessions, nodes=nodes)
     result['idle_review'] = idle_review(result)
     return result
+
+
+def session_status(row, now=None):
+    """waiting | working | idle | None, from the verified process row only (fresh, alive,
+    attributed to one conversation). Never from transcript recency."""
+    now = time.time() if now is None else now
+    if row.get('alive') is not True or row.get('process_only') or not row.get('session_id') or not _fresh(row, now):
+        return None
+    return {'waiting': 'waiting', 'busy': 'working', 'running': 'working', 'working': 'working',
+            'idle': 'idle'}.get(row.get('status'))
+
+
+def _claude_transcript(session_id):
+    roots = [os.path.join(HOME, '.claude', 'projects')] + glob.glob(os.path.join(HOME, '.claude-profiles', '*', 'projects'))
+    return any(glob.glob(os.path.join(root, '*', session_id + '.jsonl')) for root in roots)
+
+
+def index_state(row):
+    """Why a live session has no Library chat. A Desktop session that never received a
+    message has no transcript file at all, so there is nothing to index (research-77,
+    2026-11-22); a transcript that exists is indexed by the live refresh job."""
+    if row.get('chat_key') or row.get('process_only') or not row.get('session_id'):
+        return {}
+    if row.get('tool') == 'claude' and (row.get('node') or 'mac') == 'mac' and not _claude_transcript(row['session_id']):
+        return {'index_state': 'no_transcript', 'index_note': 'No messages yet, so there is no transcript to index.'}
+    return {'index_state': 'not_indexed', 'index_note': 'Transcript found; it is indexed on the next refresh.'}
 
 
 def get_live(req, query, body):
@@ -679,6 +709,63 @@ def post_stop_commit(req, query, body):
 
 ROUTES.update({('POST', '/api/live/stop/preview'): post_stop_preview,
                ('POST', '/api/live/stop/commit'): post_stop_commit})
+
+
+def _idle_skip(row):
+    """Reason this row is not stopped by Stop all idle, or '' when it is a candidate."""
+    if row.get('status') != 'idle' or row.get('alive') is not True:
+        return 'not idle (%s)' % (row.get('status') or 'unknown')
+    if row.get('broker_run_id'):
+        return 'owned by a Library run; stop it from its chat'
+    if row.get('process_only') or row.get('tool') != 'claude' or not row.get('session_id'):
+        return 'shared or unattributed process'
+    if not row.get('stop_allowed'):
+        return row.get('stop_reason') or 'stop not allowed'
+    return ''
+
+
+def stop_idle_sessions(source='manual-all-idle', sessions=None, verify=None, signal_process=None, status_of=None):
+    """Stop every Mac session whose fresh status is idle and whose stop is allowed. Each
+    process identity and its session file are re-verified immediately before SIGTERM, and
+    the status is read again from the session file. Busy, waiting, shared, unattributed,
+    Library-run and ambiguous (duplicate id) rows are skipped. Returns per-session outcomes.
+    Arguments after source are test hooks (fake processes)."""
+    rows = mac_sessions()[0] if sessions is None else sessions
+    verify = verify or _validate_stop_session
+    signal_process = signal_process or (lambda row: os.kill(row['pid'], signal.SIGTERM))
+    status_of = status_of or (lambda row: _jload(os.path.join(HOME, '.claude', 'sessions', str(row['pid']) + '.json'), {}).get('status'))
+    counts = {}
+    for row in rows:
+        counts[row.get('id')] = counts.get(row.get('id'), 0) + 1
+    outcomes = []
+    for row in rows:
+        out = {'id': row.get('id'), 'name': row.get('name'), 'pid': row.get('pid'), 'chat_key': row.get('chat_key', '')}
+        reason = 'ambiguous: several processes share this id' if counts[row.get('id')] > 1 else _idle_skip(row)
+        if reason:
+            outcomes.append(dict(out, state='skipped', reason=reason))
+            continue
+        try:
+            verify(row)
+            if status_of(row) != 'idle':
+                raise ValueError('Agent activity changed before stopping')
+            signal_process(row)
+        except (ValueError, OSError) as exc:
+            outcomes.append(dict(out, state='refused', reason=str(exc)))
+            continue
+        _record_outcome(row, 'stop_requested', source)
+        outcomes.append(dict(out, state='stop_requested', reason=''))
+    return {'ok': True, 'stopped': sum(o['state'] == 'stop_requested' for o in outcomes), 'outcomes': outcomes}
+
+
+def post_stop_idle(req, query, body):
+    origin = req.headers.get('Origin', '') if req is not None else ''
+    host = req.headers.get('Host', '') if req is not None else ''
+    if origin and origin not in ('http://' + host, 'https://' + host):
+        return {'error': 'Cross-origin control request rejected'}, 403
+    return stop_idle_sessions()
+
+
+ROUTES[('POST', '/api/live/stop_idle')] = post_stop_idle
 
 
 # ------------------------------------------------------------- optional stop policy

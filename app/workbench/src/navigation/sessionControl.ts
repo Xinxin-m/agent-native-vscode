@@ -71,3 +71,8 @@ export function slurmLeft(text:string){
  const m=String(text||'').match(/^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/);
  return m?(+(m[1]||0))*86400+(+(m[2]||0))*3600+(+m[3])*60+(+m[4]):null;
 }
+
+/** Rows the "Stop idle sessions" button would act on: fresh, alive, idle and stop-allowed. The server re-checks each one. */
+export function stoppableIdle(sessions:Session[]=[],now=Date.now()/1000){
+ return sessions.filter(s=>s.alive===true&&s.live_status==='idle'&&s.stop_allowed===true&&Number(s.observed_at)>0&&now-Number(s.observed_at)<150);
+}

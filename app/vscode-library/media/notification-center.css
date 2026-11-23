@@ -30,3 +30,16 @@
 .notification-panel-top{inset:55px 8px auto auto;max-height:min(530px,calc(100% - 63px))}
 
 .notification-panel{box-sizing:border-box}
+
+.notification-panel .notification-group{margin:10px 0 0;padding-top:8px;border-top:1px solid var(--line,var(--vscode-panel-border,#8886));font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--muted,var(--vscode-descriptionForeground,#5f6066))}
+.notification-panel .notification-group[hidden]{display:none}
+.notification-panel .notification-title{font-weight:600}
+.notification-panel .notification-title code{font-weight:400;font-size:12px}
+.notification-panel .notification-context{margin-top:2px;font-size:12px;color:var(--muted,var(--vscode-descriptionForeground,#5f6066))}
+.notification-panel .notification-field{box-sizing:border-box;width:100%;margin-top:6px;padding:5px 7px;border:1px solid var(--line,var(--vscode-panel-border,#8886));border-radius:var(--radius,5px);background:transparent;color:inherit;font:inherit}
+.notification-panel .notification-error{color:var(--danger,#d32f2f)}
+.notification-panel .notification-dot{display:inline-block;box-sizing:border-box;width:8px;height:8px;margin-right:6px;border-radius:50%;vertical-align:1px}
+.notification-panel .notification-dot.waiting{background:var(--mk-wait,#1b66cc)}
+.notification-panel .notification-dot.new{background:var(--mk-new,#1e8e4e)}
+.notification-panel .notification-dot.failed{background:var(--mk-fail,#d32f2f)}
+.notification-panel .notification-debug{font-style:italic}

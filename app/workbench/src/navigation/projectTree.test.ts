@@ -15,3 +15,5 @@ describe('workspace-scoped project activity',()=>{
   expect(result.map(p=>p.id)).toEqual(['b','a']);expect(result[0].chats).toHaveLength(1);expect(result[0].active).toBe(true);expect(result[1].active).toBe(false);expect(result[1].last).toBe(stamp(10));
  });
 });
+
+it('a pinned project stays listed (a drop target) even with few chats',()=>{const tree=projectTree([{id:'p',name:'P',pinned:true},{id:'q',name:'Q'}],[{key:'a',ts_last:'2026-11-15'}],{a:'p'});expect(tree.find(p=>p.id==='p')!.active).toBe(true);expect(tree.find(p=>p.id==='q')!.active).toBe(false);});

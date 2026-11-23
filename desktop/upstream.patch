@@ -258,7 +258,7 @@ index 4156d1c9a3f..dd0d9987e26 100644
  	CreateToggleLayoutItem(ToggleStatusbarVisibilityAction.ID, ContextKeyExpr.equals('config.workbench.statusBar.visible', true), localize('statusBar', "Status Bar"), statusBarIcon),
  ]);
 diff --git a/src/vs/workbench/browser/layout.ts b/src/vs/workbench/browser/layout.ts
-index 2e7e9e7cb31..3d3d8137d05 100644
+index 2e7e9e7cb31..fe7570e9ffd 100644
 --- a/src/vs/workbench/browser/layout.ts
 +++ b/src/vs/workbench/browser/layout.ts
 @@ -2275,6 +2275,7 @@ export abstract class Layout extends Disposable implements IWorkbenchLayoutServi
@@ -282,6 +282,24 @@ index 2e7e9e7cb31..3d3d8137d05 100644
  			return; // return: leaving maximised auxiliary bar made this part hidden
  		}
  
+@@ -3123,7 +3128,7 @@ const LayoutStateKeys = {
+ 	}),
+ 
+ 	// Part Sizing
+-	SIDEBAR_SIZE: new InitializationStateKey<number>('sideBar.size', StorageScope.PROFILE, StorageTarget.MACHINE, 300),
++	SIDEBAR_SIZE: new InitializationStateKey<number>('sideBar.size', StorageScope.PROFILE, StorageTarget.MACHINE, 320),
+ 	AUXILIARYBAR_SIZE: new InitializationStateKey<number>('auxiliaryBar.size', StorageScope.PROFILE, StorageTarget.MACHINE, 300),
+ 	PANEL_SIZE: new InitializationStateKey<number>('panel.size', StorageScope.PROFILE, StorageTarget.MACHINE, 300),
+ 
+@@ -3270,7 +3275,7 @@ class LayoutStateModel extends Disposable {
+ 		const auxiliaryBarForceMaximized = this.configurationService.getValue(WorkbenchLayoutSettings.AUXILIARYBAR_FORCE_MAXIMIZED);
+ 		const workbenchState = this.contextService.getWorkbenchState();
+ 		const mainContainerDimension = configuration.mainContainerDimension;
+-		LayoutStateKeys.SIDEBAR_SIZE.defaultValue = Math.min(300, mainContainerDimension.width / 4);
++		LayoutStateKeys.SIDEBAR_SIZE.defaultValue = Math.min(320, mainContainerDimension.width / 4);
+ 		LayoutStateKeys.SIDEBAR_HIDDEN.defaultValue = workbenchState === WorkbenchState.EMPTY || auxiliaryBarForceMaximized === true;
+ 		LayoutStateKeys.AUXILIARYBAR_SIZE.defaultValue = auxiliaryBarForceMaximized ? Math.max(300, mainContainerDimension.width / 2) : Math.min(300, mainContainerDimension.width / 4);
+ 		LayoutStateKeys.AUXILIARYBAR_HIDDEN.defaultValue = (() => {
 @@ -3355,6 +3360,10 @@ class LayoutStateModel extends Disposable {
  			}
  		}
@@ -293,6 +311,15 @@ index 2e7e9e7cb31..3d3d8137d05 100644
  		// Both editor and panel should not be hidden on startup unless auxiliary bar is maximized
  		if (
  			this.getRuntimeValue(LayoutStateKeys.PANEL_HIDDEN) &&
+@@ -3366,7 +3375,7 @@ class LayoutStateModel extends Disposable {
+ 
+ 		// Restrict auxiliary bar size in case of small window dimensions
+ 		if (this.isNew[StorageScope.WORKSPACE] && configuration.mainContainerDimension.width <= DEFAULT_WORKSPACE_WINDOW_DIMENSIONS.width) {
+-			this.setInitializationValue(LayoutStateKeys.SIDEBAR_SIZE, Math.min(300, configuration.mainContainerDimension.width / 4));
++			this.setInitializationValue(LayoutStateKeys.SIDEBAR_SIZE, Math.min(320, configuration.mainContainerDimension.width / 4));
+ 			this.setInitializationValue(LayoutStateKeys.AUXILIARYBAR_SIZE, Math.min(300, configuration.mainContainerDimension.width / 4));
+ 		}
+ 	}
 diff --git a/src/vs/workbench/browser/parts/activitybar/activitybarPart.ts b/src/vs/workbench/browser/parts/activitybar/activitybarPart.ts
 index ae0a09c34ce..a3254e4a618 100644
 --- a/src/vs/workbench/browser/parts/activitybar/activitybarPart.ts
@@ -772,7 +799,7 @@ index df8bd3f41d7..fefcc023fba 100644
 +	return false;
 +});
 diff --git a/src/vs/workbench/browser/parts/editor/editorDropTarget.ts b/src/vs/workbench/browser/parts/editor/editorDropTarget.ts
-index 4e4c281a68e..5b851c96da0 100644
+index 4e4c281a68e..6798dde8ac9 100644
 --- a/src/vs/workbench/browser/parts/editor/editorDropTarget.ts
 +++ b/src/vs/workbench/browser/parts/editor/editorDropTarget.ts
 @@ -4,6 +4,7 @@
@@ -841,7 +868,7 @@ index 4e4c281a68e..5b851c96da0 100644
  					this.update(e);
  				}
  
-@@ -508,6 +524,21 @@ class DropOverlay extends Themable {
+@@ -508,6 +524,22 @@ class DropOverlay extends Themable {
  			return targetGroup;
  		};
  
@@ -854,7 +881,8 @@ index 4e4c281a68e..5b851c96da0 100644
 +                const target = ensureTargetGroup();
 +                this.editorGroupService.activateGroup(target);
 +                const column = this.editorGroupService.getGroups(GroupsOrder.GRID_APPEARANCE).indexOf(target) + 1;
-+                await this.instantiationService.invokeFunction(accessor => accessor.get(ICommandService).executeCommand('library.openResource', resource, column));
++                // The center shows the chat in the current tab; an edge opens it in the new split
++                await this.instantiationService.invokeFunction(accessor => accessor.get(ICommandService).executeCommand('library.openResource', resource, column, typeof splitDirection === 'number' ? undefined : 'current'));
 +                target.focus();
 +            }
 +            return;
@@ -863,7 +891,7 @@ index 4e4c281a68e..5b851c96da0 100644
  		// Check for group transfer
  		if (this.groupTransfer.hasData(DraggedEditorGroupIdentifier.prototype)) {
  			const data = this.groupTransfer.getData(DraggedEditorGroupIdentifier.prototype);
-@@ -694,7 +725,7 @@ class DropOverlay extends Themable {
+@@ -694,7 +726,7 @@ class DropOverlay extends Themable {
  			return;
  		}
  
@@ -872,7 +900,7 @@ index 4e4c281a68e..5b851c96da0 100644
  
  		// An even split shows the size the new group gets: half, within the least sizes of the group and of an editor
  		const vertically = splitDirection === GroupDirection.UP || splitDirection === GroupDirection.DOWN;
-@@ -879,7 +910,7 @@ export class EditorDropTarget extends Themable {
+@@ -879,7 +911,7 @@ export class EditorDropTarget extends Themable {
  		) {
  			const dndContributions = Registry.as<IDragAndDropContributionRegistry>(DragAndDropExtensions.DragAndDropContribution).getAll();
  			const dndContributionKeys = Array.from(dndContributions).map(e => e.dataFormatKey);
@@ -1040,7 +1068,7 @@ index 3d6d8ebfc80..635eecd9ff9 100644
 +.monaco-workbench .part.editor .tabs-container > .tab > .library-tab-group { position: relative; z-index: 5; flex: 0 0 auto; border: 0; border-radius: 5px; padding: 3px 8px; margin: 0 5px; color: var(--vscode-badge-foreground); background: var(--vscode-badge-background); cursor: pointer; font: inherit; }
 +.monaco-workbench .part.editor .tabs-container > .tab > .library-tab-group:focus-visible { outline: 1px solid var(--vscode-focusBorder); }
 diff --git a/src/vs/workbench/browser/parts/editor/multiEditorTabsControl.ts b/src/vs/workbench/browser/parts/editor/multiEditorTabsControl.ts
-index b67d48d0768..14956f088e6 100644
+index b67d48d0768..05973862950 100644
 --- a/src/vs/workbench/browser/parts/editor/multiEditorTabsControl.ts
 +++ b/src/vs/workbench/browser/parts/editor/multiEditorTabsControl.ts
 @@ -4,6 +4,8 @@
@@ -1052,7 +1080,17 @@ index b67d48d0768..14956f088e6 100644
  import { isLinux, isMacintosh, isWindows } from '../../../../base/common/platform.js';
  import { shorten } from '../../../../base/common/labels.js';
  import { EditorResourceAccessor, Verbosity, IEditorPartOptions, SideBySideEditor, DEFAULT_EDITOR_ASSOCIATION, EditorInputCapabilities, IUntypedEditorInput, preventEditorClose, EditorCloseMethod, EditorsOrder, IToolbarActions } from '../../../common/editor.js';
-@@ -174,9 +176,19 @@ export class MultiEditorTabsControl extends EditorTabsControl {
+@@ -32,7 +34,8 @@ import { activeContrastBorder, contrastBorder, editorBackground } from '../../..
+ import { ResourcesDropHandler, DraggedEditorIdentifier, DraggedEditorGroupIdentifier, extractTreeDropData, isWindowDraggedOver } from '../../dnd.js';
+ import { Color } from '../../../../base/common/color.js';
+ import { INotificationService } from '../../../../platform/notification/common/notification.js';
+-import { MergeGroupMode, IMergeGroupOptions } from '../../../services/editor/common/editorGroupsService.js';
++import { MergeGroupMode, IMergeGroupOptions, GroupsOrder } from '../../../services/editor/common/editorGroupsService.js';
++import { ICommandService } from '../../../../platform/commands/common/commands.js';
+ import { addDisposableListener, EventType, EventHelper, Dimension, scheduleAtNextAnimationFrame, findParentWithClass, clearNode, DragAndDropObserver, isMouseEvent, getWindow, ModifierKeyEmitter, $, isHTMLElement, getTotalWidth, getContentWidth } from '../../../../base/browser/dom.js';
+ import { localize } from '../../../../nls.js';
+ import { CONNECTED_EDITOR_TABS_SELECTOR, IEditorGroupMenuIds, IEditorGroupsView, EditorServiceImpl, IEditorGroupView, IInternalEditorOpenOptions, IEditorPartsView, prepareMoveCopyEditors } from './editor.js';
+@@ -174,9 +177,19 @@ export class MultiEditorTabsControl extends EditorTabsControl {
  		@IHostService hostService: IHostService,
  		@IMenuService menuService: IMenuService,
  		@IModelService modelService: IModelService,
@@ -1072,7 +1110,7 @@ index b67d48d0768..14956f088e6 100644
  		// Resolve the correct path library for the OS we are on
  		// If we are connected to remote, this accounts for the
  		// remote OS.
-@@ -655,6 +667,7 @@ export class MultiEditorTabsControl extends EditorTabsControl {
+@@ -655,6 +668,7 @@ export class MultiEditorTabsControl extends EditorTabsControl {
  
  	openEditor(editor: EditorInput, options?: IInternalEditorOpenOptions): boolean {
  		const changed = this.handleOpenedEditors();
@@ -1080,7 +1118,7 @@ index b67d48d0768..14956f088e6 100644
  
  		// Respect option to focus tab control if provided
  		if (options?.focusTabControl) {
-@@ -665,7 +678,9 @@ export class MultiEditorTabsControl extends EditorTabsControl {
+@@ -665,7 +679,9 @@ export class MultiEditorTabsControl extends EditorTabsControl {
  	}
  
  	openEditors(editors: EditorInput[]): boolean {
@@ -1091,7 +1129,7 @@ index b67d48d0768..14956f088e6 100644
  	}
  
  	private handleOpenedEditors(): boolean {
-@@ -810,6 +825,7 @@ export class MultiEditorTabsControl extends EditorTabsControl {
+@@ -810,6 +826,7 @@ export class MultiEditorTabsControl extends EditorTabsControl {
  		const editorLabel = this.tabLabels[fromTabIndex];
  		this.tabLabels.splice(fromTabIndex, 1);
  		this.tabLabels.splice(targetTabIndex, 0, editorLabel);
@@ -1099,7 +1137,18 @@ index b67d48d0768..14956f088e6 100644
  
  		// Redraw tabs in the range of the move
  		this.forEachTab((editor, tabIndex, tabContainer, tabLabelWidget, tabLabel, tabActionBar) => {
-@@ -1789,7 +1805,37 @@ export class MultiEditorTabsControl extends EditorTabsControl {
+@@ -1450,7 +1467,9 @@ export class MultiEditorTabsControl extends EditorTabsControl {
+ 			if (isTab) {
+ 				dropTarget = this.computeDropTarget(e, tabIndex, element);
+ 			} else {
+-				dropTarget = { leftElement: element.lastElementChild as HTMLElement, rightElement: undefined };
++				// The add-tab control, when present, is the last child; mark the last tab instead
++				const lastTab = this.addTabContainer ? this.addTabContainer.previousElementSibling : element.lastElementChild;
++				dropTarget = { leftElement: lastTab as HTMLElement, rightElement: undefined };
+ 			}
+ 		} else {
+ 			dropTarget = undefined;
+@@ -1789,7 +1808,37 @@ export class MultiEditorTabsControl extends EditorTabsControl {
  		}
  	}
  
@@ -1137,7 +1186,19 @@ index b67d48d0768..14956f088e6 100644
  		const isTabSticky = this.tabsModel.isSticky(tabIndex);
  		const options = this.groupsView.partOptions;
  
-@@ -1998,7 +2044,7 @@ export class MultiEditorTabsControl extends EditorTabsControl {
+@@ -1851,6 +1900,11 @@ export class MultiEditorTabsControl extends EditorTabsControl {
+ 			description = tabLabel.description || '';
+ 		}
+ 
++		// Library Code: a Library tab shows 24 characters plus an ellipsis; the tooltip keeps the full title
++		if (name && name.length > 24 && editor.editorId === 'mainThreadWebview-library.conversation') {
++			name = name.slice(0, 24).trimEnd() + '\u2026';
++		}
++
+ 		if (tabLabel.ariaLabel) {
+ 			tabContainer.setAttribute('aria-label', tabLabel.ariaLabel);
+ 			// Set aria-description to empty string so that screen readers would not read the title as well
+@@ -1998,7 +2052,7 @@ export class MultiEditorTabsControl extends EditorTabsControl {
  		// Inactive: only show "Unlock" and secondary actions
  		else {
  			return {
@@ -1146,11 +1207,139 @@ index b67d48d0768..14956f088e6 100644
  				secondary: editorActions.secondary
  			};
  		}
+@@ -2848,6 +2902,18 @@ export class MultiEditorTabsControl extends EditorTabsControl {
+ 			this.treeItemsTransfer.clearData(DraggedTreeItemsIdentifier.prototype);
+ 		}
+ 
++		// A Library chat or file dragged from the sidebar opens as a new tab in this group (the same payload the editor area and edges accept)
++		else if (e.dataTransfer?.types.includes('application/library-resource')) {
++			const payload = e.dataTransfer.getData('application/library-resource');
++			let resource: any;
++			try { resource = payload.length <= 20000 ? JSON.parse(payload) : undefined; } catch { resource = undefined; }
++			if (resource && typeof resource === 'object' && ((resource.kind === 'chat' && (typeof resource.key === 'string' || typeof resource.draftId === 'string')) || (resource.kind === 'file' && typeof resource.path === 'string'))) {
++				const column = this.groupsView.getGroups(GroupsOrder.GRID_APPEARANCE).indexOf(this.groupView) + 1;
++				await this.instantiationService.invokeFunction(accessor => accessor.get(ICommandService).executeCommand('library.openResource', resource, column));
++				this.groupView.focus();
++			}
++		}
++
+ 		// Check for URI transfer
+ 		else {
+ 			const dropHandler = this.instantiationService.createInstance(ResourcesDropHandler, { allowWorkspaceOpen: false });
 diff --git a/src/vs/workbench/browser/parts/globalCompositeBar.ts b/src/vs/workbench/browser/parts/globalCompositeBar.ts
-index d0f5bd1bd21..81db9fd339e 100644
+index d0f5bd1bd21..2bf49e34c4f 100644
 --- a/src/vs/workbench/browser/parts/globalCompositeBar.ts
 +++ b/src/vs/workbench/browser/parts/globalCompositeBar.ts
-@@ -248,7 +248,7 @@ abstract class AbstractGlobalActivityActionViewItem extends CompositeBarActionVi
+@@ -7,7 +7,7 @@ import './media/globalCompositeBar.css';
+ import { localize } from '../../../nls.js';
+ import { ActionBar, ActionsOrientation } from '../../../base/browser/ui/actionbar/actionbar.js';
+ import { ACCOUNTS_ACTIVITY_ID, ACCOUNTS_SHARED_SIGN_IN_GROUP, GLOBAL_ACTIVITY_ID } from '../../common/activity.js';
+-import { IActivityService } from '../../services/activity/common/activity.js';
++import { IActivityService, NumberBadge } from '../../services/activity/common/activity.js';
+ import { IInstantiationService } from '../../../platform/instantiation/common/instantiation.js';
+ import { DisposableStore, Disposable } from '../../../base/common/lifecycle.js';
+ import { IColorTheme, IThemeService } from '../../../platform/theme/common/themeService.js';
+@@ -62,6 +62,7 @@ export class GlobalCompositeBar extends Disposable {
+ 	private readonly globalActivityAction = this._register(new Action(GLOBAL_ACTIVITY_ID));
+ 	private readonly accountAction = this._register(new Action(ACCOUNTS_ACTIVITY_ID));
+ 	private readonly globalActivityActionBar: ActionBar;
++	private readonly accountsIndex: number;
+ 
+ 	private readonly _onDidChange = this._register(new Emitter<void>());
+ 	readonly onDidChange = this._onDidChange.event;
+@@ -74,6 +75,7 @@ export class GlobalCompositeBar extends Disposable {
+ 		@IInstantiationService private readonly instantiationService: IInstantiationService,
+ 		@IStorageService private readonly storageService: IStorageService,
+ 		@IExtensionService private readonly extensionService: IExtensionService,
++		@IProductService productService: IProductService,
+ 	) {
+ 		super();
+ 
+@@ -84,6 +86,10 @@ export class GlobalCompositeBar extends Disposable {
+ 		});
+ 		this.globalActivityActionBar = this._register(new ActionBar(this.element, {
+ 			actionViewItemProvider: (action, options) => {
++				if (action instanceof LibraryNotificationsAction) {
++					return this.instantiationService.createInstance(CompositeBarActionViewItem, action, { ...options, icon: true, colors: this.colors, hoverOptions: this.activityHoverOptions }, () => true);
++				}
++
+ 				if (action.id === GLOBAL_ACTIVITY_ID) {
+ 					return this.instantiationService.createInstance(GlobalActivityActionViewItem, this.contextMenuActionsProvider, { ...options, colors: this.colors, hoverOptions: this.activityHoverOptions }, contextMenuAlignmentOptions);
+ 				}
+@@ -112,8 +118,15 @@ export class GlobalCompositeBar extends Disposable {
+ 			preventLoopNavigation: true
+ 		}));
+ 
++		// Library Code: Notifications sits directly above the account icon
++		this.accountsIndex = GlobalCompositeBar.ACCOUNTS_ACTION_INDEX;
++		if (productService.applicationName.startsWith('library-code')) {
++			this.globalActivityActionBar.push(this._register(this.instantiationService.createInstance(LibraryNotificationsAction)));
++			this.accountsIndex++;
++		}
++
+ 		if (this.accountsVisibilityPreference) {
+-			this.globalActivityActionBar.push(this.accountAction, { index: GlobalCompositeBar.ACCOUNTS_ACTION_INDEX });
++			this.globalActivityActionBar.push(this.accountAction, { index: this.accountsIndex });
+ 		}
+ 
+ 		this.globalActivityActionBar.push(this.globalActivityAction);
+@@ -147,14 +160,14 @@ export class GlobalCompositeBar extends Disposable {
+ 	}
+ 
+ 	private toggleAccountsActivity() {
+-		const accountsVisible = this.globalActivityActionBar.length() === 2;
++		const accountsVisible = this.globalActivityActionBar.length() === 2 + this.accountsIndex;
+ 		if (accountsVisible === this.accountsVisibilityPreference) {
+ 			return;
+ 		}
+ 		if (accountsVisible) {
+-			this.globalActivityActionBar.pull(GlobalCompositeBar.ACCOUNTS_ACTION_INDEX);
++			this.globalActivityActionBar.pull(this.accountsIndex);
+ 		} else {
+-			this.globalActivityActionBar.push(this.accountAction, { index: GlobalCompositeBar.ACCOUNTS_ACTION_INDEX });
++			this.globalActivityActionBar.push(this.accountAction, { index: this.accountsIndex });
+ 		}
+ 		this._onDidChange.fire();
+ 	}
+@@ -168,6 +181,37 @@ export class GlobalCompositeBar extends Disposable {
+ 	}
+ }
+ 
++/**
++ * Library Code: opens the Notifications page. The Library extension's feed poller sets the
++ * `library.notificationsOpen` context key (open items, the feed's `counts.open`), which this action shows as its badge.
++ */
++class LibraryNotificationsAction extends CompositeBarAction {
++
++	private static readonly OPEN = 'library.notificationsOpen';
++
++	constructor(
++		@ICommandService private readonly commandService: ICommandService,
++		@IContextKeyService contextKeyService: IContextKeyService,
++	) {
++		super({ id: 'workbench.actions.library.notifications', name: localize('libraryNotifications', "Notifications"), classNames: ThemeIcon.asClassNameArray(Codicon.bell) });
++		const keys = new Set([LibraryNotificationsAction.OPEN]);
++		const update = () => {
++			const count = Number(contextKeyService.getContextKeyValue(LibraryNotificationsAction.OPEN)) || 0;
++			this.activities = count > 0 ? [{ badge: new NumberBadge(count, n => localize('libraryNotificationsOpen', "{0} open", n)) }] : [];
++		};
++		update();
++		this._register(contextKeyService.onDidChangeContext(e => {
++			if (e.affectsSome(keys)) {
++				update();
++			}
++		}));
++	}
++
++	override async run(): Promise<void> {
++		await this.commandService.executeCommand('library.notifications');
++	}
++}
++
+ abstract class AbstractGlobalActivityActionViewItem extends CompositeBarActionViewItem {
+ 
+ 	constructor(
+@@ -248,7 +292,7 @@ abstract class AbstractGlobalActivityActionViewItem extends CompositeBarActionVi
  		return this.contextMenuActionsProvider();
  	}
  
@@ -1159,7 +1348,7 @@ index d0f5bd1bd21..81db9fd339e 100644
  		const disposables = new DisposableStore();
  		const menu = disposables.add(this.menuService.createMenu(this.menuId, this.contextKeyService));
  		const actions = await this.resolveMainMenuActions(menu, disposables);
-@@ -312,12 +312,20 @@ export class AccountsActivityActionViewItem extends AbstractGlobalActivityAction
+@@ -312,12 +356,20 @@ export class AccountsActivityActionViewItem extends AbstractGlobalActivityAction
  			name: localize('accounts', "Accounts"),
  			classNames: ThemeIcon.asClassNameArray(GlobalCompositeBar.ACCOUNTS_ICON)
  		});
@@ -1181,7 +1370,7 @@ index d0f5bd1bd21..81db9fd339e 100644
  	private registerListeners(): void {
  		this._register(this.authenticationService.onDidRegisterAuthenticationProvider(async (e) => {
  			await this.addAccountsFromProvider(e.id);
-@@ -611,6 +619,15 @@ export class AccountsActivityActionViewItem extends AbstractGlobalActivityAction
+@@ -611,6 +663,15 @@ export class AccountsActivityActionViewItem extends AbstractGlobalActivityAction
  
  		appendCommandGroups(remainingCommandGroups);
  
@@ -1197,7 +1386,7 @@ index d0f5bd1bd21..81db9fd339e 100644
  		return menus;
  	}
  
-@@ -716,13 +733,15 @@ export class GlobalActivityActionViewItem extends AbstractGlobalActivityActionVi
+@@ -716,13 +777,15 @@ export class GlobalActivityActionViewItem extends AbstractGlobalActivityActionVi
  		@IKeybindingService keybindingService: IKeybindingService,
  		@IInstantiationService instantiationService: IInstantiationService,
  		@IActivityService activityService: IActivityService,
@@ -1215,7 +1404,7 @@ index d0f5bd1bd21..81db9fd339e 100644
  		this._register(action);
  		this._register(this.userDataProfileService.onDidChangeCurrentProfile(e => {
  			action.compositeBarActionItem = {
-@@ -740,6 +759,14 @@ export class GlobalActivityActionViewItem extends AbstractGlobalActivityActionVi
+@@ -740,6 +803,14 @@ export class GlobalActivityActionViewItem extends AbstractGlobalActivityActionVi
  		this.updateProfileBadge();
  	}
  
@@ -1230,7 +1419,7 @@ index d0f5bd1bd21..81db9fd339e 100644
  	private updateProfileBadge(): void {
  		if (!this.profileBadge || !this.profileBadgeContent) {
  			return;
-@@ -771,7 +798,7 @@ export class GlobalActivityActionViewItem extends AbstractGlobalActivityActionVi
+@@ -771,7 +842,7 @@ export class GlobalActivityActionViewItem extends AbstractGlobalActivityActionVi
  	}
  
  	protected override computeTitle(): string {
@@ -1239,7 +1428,7 @@ index d0f5bd1bd21..81db9fd339e 100644
  	}
  }
  
-@@ -829,7 +856,9 @@ export class SimpleGlobalActivityActionViewItem extends GlobalActivityActionView
+@@ -829,7 +900,9 @@ export class SimpleGlobalActivityActionViewItem extends GlobalActivityActionView
  		@IKeybindingService keybindingService: IKeybindingService,
  		@IInstantiationService instantiationService: IInstantiationService,
  		@IActivityService activityService: IActivityService,
@@ -1250,7 +1439,7 @@ index d0f5bd1bd21..81db9fd339e 100644
  	) {
  		super(() => simpleActivityContextMenuActions(storageService, false),
  			{
-@@ -840,7 +869,7 @@ export class SimpleGlobalActivityActionViewItem extends GlobalActivityActionView
+@@ -840,7 +913,7 @@ export class SimpleGlobalActivityActionViewItem extends GlobalActivityActionView
  				}),
  				hoverOptions,
  				compact: true,
@@ -1622,7 +1811,7 @@ index 12ab3a958e8..2d84d7f84dc 100644
  .monaco-workbench .part.titlebar > .titlebar-container > .titlebar-center > .window-title {
  	flex: 0 1 auto;
 diff --git a/src/vs/workbench/browser/parts/titlebar/titlebarPart.ts b/src/vs/workbench/browser/parts/titlebar/titlebarPart.ts
-index 9c530bfbee3..32a99fe6283 100644
+index 9c530bfbee3..adb243f696a 100644
 --- a/src/vs/workbench/browser/parts/titlebar/titlebarPart.ts
 +++ b/src/vs/workbench/browser/parts/titlebar/titlebarPart.ts
 @@ -53,7 +53,10 @@ import { IView } from '../../../../base/browser/ui/grid/grid.js';
@@ -1673,12 +1862,15 @@ index 9c530bfbee3..32a99fe6283 100644
  		// Title
  		this.title = append(this.centerContent, $('div.window-title'));
  		this.createTitle();
-@@ -792,6 +817,9 @@ export class BrowserTitlebarPart extends Part implements ITitlebarPart {
+@@ -792,6 +817,12 @@ export class BrowserTitlebarPart extends Part implements ITitlebarPart {
  					actions,
  					(group) => group === 'navigation'
  				);
 +				if (this.librarySidebarToggle) {
-+					actions.primary = actions.primary.filter(action => action.id !== 'workbench.action.toggleSidebarVisibility');
++					const toggle = actions.primary.findIndex(action => action.id === 'workbench.action.toggleSidebarVisibility');
++					if (toggle >= 0) {
++						actions.primary.splice(toggle, 1);
++					}
 +				}
  			}
  

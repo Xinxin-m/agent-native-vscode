@@ -428,3 +428,38 @@ def act(path, body, now=None, account=None):
         if action in ('read', 'archive'):
             return listing(path, now)
         return {'ok': True, 'claimed': claimed, 'duration_seconds': prefs['duration_seconds']}
+
+
+# ---- feed state: read, seen, archive and answer marks of the unified feed (notifications.py)
+# Stored beside the notices in the same file under "feed", keyed by feed item id. Old
+# readers ignore the key, and annotate/act keep it because they rewrite the whole state.
+
+@lru_cache(maxsize=8)
+def _feed_snapshot(path, revision):
+    return _read(path).get('feed', {})
+
+
+def feed_state(path):
+    try:
+        revision = str(os.stat(path).st_mtime_ns)
+    except FileNotFoundError:
+        revision = '0'
+    try:
+        return _feed_snapshot(os.fspath(path), revision)
+    except (OSError, ValueError):
+        return {}
+
+
+def feed_update(path, change, now=None):
+    """Run change(feed_dict) under the store lock and save; old entries are dropped."""
+    now = time.time() if now is None else now
+    with _LOCK:
+        state = _read(path)
+        feed = state.setdefault('feed', {})
+        change(feed)
+        for key, entry in list(feed.items()):
+            marks = [entry.get(f) for f in ('archived_at', 'seen_at', 'shown_at') if entry.get(f)]
+            marks.append((entry.get('answered') or {}).get('at'))
+            if now - max([m for m in marks if m] or [now]) > KEEP_SECONDS:
+                del feed[key]
+        _write(path, state)

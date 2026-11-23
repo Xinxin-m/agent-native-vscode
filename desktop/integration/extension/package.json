@@ -94,6 +94,12 @@
         "title": "Library: Open Project Map"
       },
       {
+        "command": "library.notifications",
+        "title": "Notifications",
+        "category": "Library",
+        "icon": "$(bell)"
+      },
+      {
         "command": "library.accounts",
         "title": "Accounts",
         "category": "Library",

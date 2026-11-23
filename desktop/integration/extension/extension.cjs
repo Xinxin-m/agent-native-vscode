@@ -3,7 +3,7 @@ const vscode=require('vscode');
 const fs=require('node:fs/promises');
 const path=require('node:path');
 const {randomUUID,randomBytes}=require('node:crypto');
-const bridge=require('./bridge.cjs');
+const bridge=require('./bridge.cjs');const {tabTitle,tabIcon}=require('./tab-title.cjs');
 const {createReadCache,createDispatcher,scopeState}=require('./rpc-flow.cjs');
 const {targetColumn,resourceKey}=require('./panes.cjs');
 const agentTabs=require('./agent-tabs.cjs');
@@ -32,7 +32,7 @@ async function choosePaneChat(vscode, api, open, storage){
  const items=(state.chats||[]).filter(historyChat).map(chat=>{
   const source=String(chat.source||chat.provider||'').toLowerCase();
   const provider=source==='claude'?'Claude':source==='codex'?'Codex':source;
-  return {label:chat.title||'Untitled conversation',description:[provider,projects.get(assignments[chat.key])].filter(Boolean).join(' · '),detail:chat.node||chat.host_id||'',chat,provider:source};
+  return {label:chat.title||'Untitled conversation',description:[provider,projects.get(assignments[chat.key])].filter(Boolean).join(' · '),detail:[chat.node||chat.host_id,chat.key].filter(Boolean).join(' · '),chat,provider:source};   // the key in the detail line lets a session ID (full or prefix) find the chat
  });
  const options=[{id:'all',label:'All agents',icon:'list-unordered'},{id:'codex',label:'Codex',icon:'code'},{id:'claude',label:'Claude',icon:'comment-discussion'}];
  const saved=storage.get('paneHistoryProvider','all');let provider=options.some(option=>option.id===saved)?saved:'all',saveQueue=Promise.resolve();
@@ -83,6 +83,7 @@ function activate(context){
  void Promise.resolve().then(()=>api('/api/sync',{})).catch(()=>{});
  const projectMaps=require('./project-map.cjs').create({vscode,context,openSession:key=>open({kind:'chat',key,title:'Conversation'}),theme:()=>preferences.theme==='system'?(vscode.window.activeColorTheme.kind===vscode.ColorThemeKind.Dark?'dark':'light'):preferences.theme});
  const showError=e=>vscode.window.showErrorMessage(e.message||String(e));
+ const notificationPoller=require('./notifications.cjs').create({vscode,api,canAct:()=>vscode.workspace.isTrusted});notificationPoller.start();context.subscriptions.push({dispose:()=>notificationPoller.stop()});
  if(!preferences.interfaceScaleVersion){preferences={...preferences,fontSize:14,interfaceScaleVersion:1};void context.globalState.update('preferences',preferences).catch(showError);}
  void require('./interface-scale.cjs').apply(vscode,preferences.fontSize).catch(showError);
  if(['beige','sage'].includes(preferences.theme))void require('./themes.cjs').apply(vscode,preferences.theme).catch(showError);
@@ -168,9 +169,19 @@ function activate(context){
   if(await revealExisting(vscode,resource,destination||explicitColumn?column:undefined))return;
   if(['sessions','files'].includes(resource.kind)&&await focusTab(vscode,t=>/library\.conversation$/.test(t.input?.viewType||'')&&t.label===resource.title))return;
   if(panels.has(key)){const panel=panels.get(key);if(resource.kind==='files'&&resource.meta?.filesPath)void panel.webview.postMessage({type:'filesContext',resource});panel.reveal(destination||explicitColumn?column:undefined);return;}
-  const panel=vscode.window.createWebviewPanel('library.conversation',resource.title||'New conversation',column,{enableScripts:true,retainContextWhenHidden:true,localResourceRoots:[vscode.Uri.joinPath(context.extensionUri,'media')]});
-  panels.set(key,panel);panel.iconPath=new vscode.ThemeIcon(resource.kind==='chat'?'comment-discussion':resource.kind==='settings'?'settings-gear':resource.kind==='files'?'folder':'library');
+  const panel=vscode.window.createWebviewPanel('library.conversation',resource.kind==='chat'?tabTitle(resource.title,'New conversation'):resource.title||'New conversation',column,{enableScripts:true,retainContextWhenHidden:true,localResourceRoots:[vscode.Uri.joinPath(context.extensionUri,'media')]});
+  panels.set(key,panel);panel.iconPath=new vscode.ThemeIcon(resource.kind==='chat'?'comment-discussion':resource.kind==='settings'?'settings-gear':resource.kind==='notifications'?'bell':resource.kind==='files'?'folder':'library');
   connect(panel,resource.kind,resource,key);
+ }
+ // A chat dropped on the editor center shows in the chat tab that pane shows; that tab keeps a draft or a running turn and opens the chat beside it.
+ // A chat that is already open (also a restored tab not shown yet) is focused where it is.
+ async function openInCurrent(resource,column){
+  const existing=resource?.kind==='chat'&&resource.key&&panels.get(resourceKey(resource));
+  if(existing){existing.reveal(existing.viewColumn);return;}
+  if(resource?.kind==='chat'&&resource.key&&await revealExisting(vscode,resource))return;
+  const current=resource?.kind==='chat'&&resource.key&&!officialChats.enabled()&&!panels.has(resourceKey(resource))&&[...panels.entries()].find(([k,p])=>k.startsWith('chat:')&&p.visible&&p.viewColumn===column)?.[1];
+  if(!current)return open(resource,'tab',column);
+  current.reveal(column);return current.webview.postMessage({type:'dropChat',resource});
  }
  function connect(view,kind,resource,key){
   const webview=view.webview,disposables=[],streams=new Map();views.add(webview);if(kind==='files')fileViews.add(webview);
@@ -187,7 +198,7 @@ function activate(context){
    if(m.action==='filesRoot'){if(kind!=='files'||typeof m.root_id!=='string'||typeof m.title!=='string')throw Error('Invalid workspace');if(panels.get(key)===view)panels.delete(key);resource={...resource,root_id:m.root_id,title:m.title.slice(0,150)};key=resourceKey(resource);panels.set(key,view);view.title=resource.title;return true;}
    if(m.action==='api'){
     bridge.route(m.path,m.body===undefined?'GET':'POST');
-    const inboxAction=m.path==='/api/notices'&&['read','archive'].includes(m.body?.action);
+    const inboxAction=(m.path==='/api/notices'&&['read','archive'].includes(m.body?.action))||m.path==='/api/seen';
     if(m.body!==undefined&&!inboxAction)trusted();
     if(m.path==='/api/conversation/folder'){
      if(m.body?.host_id!=='mac')return api(m.path,m.body);
@@ -213,13 +224,13 @@ function activate(context){
     if(m.busy||kind!=='chat'||panels.has(nextKey)||officialChats.enabled())return open(next,destination,column);
     if(await revealExisting(vscode,next,column))return;
     if(panels.get(key)===view)panels.delete(key);release();
-    panels.set(nextKey,view);view.title=next.title;connect(view,'chat',next,nextKey);
+    panels.set(nextKey,view);view.title=tabTitle(next.title);connect(view,'chat',next,nextKey);
    },context.globalState);
    // Agent tree "Open in current tab" and its back arrow: this chat tab shows another chat, as history does.
    if(m.action==='replace'){const next=m.resource;if(kind!=='chat'||next?.kind!=='chat'||typeof next.key!=='string'||!next.key)throw Error('Only a chat tab can show another chat');const nextKey=resourceKey(next);
     if(panels.has(nextKey)||officialChats.enabled())return open(next,'tab');if(await revealExisting(vscode,next))return true;
-    if(panels.get(key)===view)panels.delete(key);release();panels.set(nextKey,view);view.title=String(next.title||'Conversation').slice(0,150);connect(view,'chat',next,nextKey);return true;}
-   if(m.action==='title'){if('title' in view&&typeof m.title==='string')view.title=m.title.slice(0,150);return true;}
+    if(panels.get(key)===view)panels.delete(key);release();panels.set(nextKey,view);view.title=tabTitle(next.title);connect(view,'chat',next,nextKey);return true;}
+   if(m.action==='title'){if('title' in view&&typeof m.title==='string')view.title=kind==='chat'?tabTitle(m.title):m.title.slice(0,150);if(kind==='chat'&&'iconPath' in view&&'status' in m)view.iconPath=tabIcon(vscode,m.status);return true;}
    if(m.action==='preferences'){const previous=preferences,next={...preferences,...m.value};require('./interface-scale.cjs').zoomLevel(next.fontSize);try{if(previous.fontSize!==next.fontSize)await require('./interface-scale.cjs').apply(vscode,next.fontSize);if(previous.theme!==next.theme)await require('./themes.cjs').apply(vscode,next.theme);await context.globalState.update('preferences',next);}catch(error){await require('./interface-scale.cjs').apply(vscode,previous.fontSize).catch(()=>{});throw error;}preferences=next;for(const w of views)void w.postMessage({type:'preferences',value:preferences});projectMaps.setTheme(preferences.theme==='system'?(vscode.window.activeColorTheme.kind===vscode.ColorThemeKind.Dark?'dark':'light'):preferences.theme);return true;}
    if(m.action==='githubAccounts'){if(kind!=='accounts'&&kind!=='settings')throw Error('Account actions are only available in Accounts.');if(m.connect)trusted();return require('./github-accounts.cjs').list(vscode,Boolean(m.connect));}
    if(m.action==='rename'){trusted();if(typeof m.key!=='string'||!m.key)throw Error('Conversation is unavailable');if(typeof m.title!=='string'||!m.title.trim()||m.title.length>200)throw Error('Enter a title between 1 and 200 characters');const result=await api('/api/chat_state',{action:'rename',key:m.key,title:m.title.trim()});for(const w of views)void w.postMessage({type:'refresh'});return result.title;}
@@ -261,7 +272,7 @@ function activate(context){
  command('library.addWorkspace',addWorkspace);
  command('library.newFile',uri=>{trusted();return require('./file-actions.cjs').createItem(vscode,filesTab,'file',uri).then(refreshFiles);});
  command('library.newFolder',uri=>{trusted();return require('./file-actions.cjs').createItem(vscode,filesTab,'directory',uri).then(refreshFiles);});
- command('library.openResource',(resource,column)=>open(resource,'tab',column));
+ command('library.openResource',(resource,column,place)=>place==='current'?openInCurrent(resource,column):open(resource,'tab',column));
  context.subscriptions.push(agentTabs.watchCodexTurns(vscode));
  const openAgentChat=agentTabs.create(vscode,()=>open({kind:'chat',draftId:randomUUID(),title:'New conversation'}));
  command('_library.openAgentChat',openAgentChat);
@@ -290,6 +301,8 @@ function activate(context){
  command('library.show',()=>layout(false));command('library.development',()=>layout(true));
  command('library.openProjectMap',(project,title)=>chooseProjectMap(vscode,api,open,project,title));
  command('library.accounts',()=>open({kind:'accounts',title:'Accounts'}));
+ // The bell and the toasts open the one notifications surface in an editor group beside the chat (keeps the chat in view); an open one is revealed where it is.
+ command('library.notifications',()=>{const panel=panels.get('notifications:');if(panel){panel.reveal(panel.viewColumn,true);return;}return open({kind:'notifications',title:'Notifications'},undefined,vscode.ViewColumn.Beside);});
  command('library.settings',()=>open({kind:'settings',title:'Settings'}));command('library.projects',()=>open({kind:'projects',title:'Projects'}));
  command('library.openFiles',async uri=>{const location=uri?await require('./file-context.cjs').workspaceFor(vscode,filesTab.rootId,uri):{};return open({kind:'files',title:'Files',...location});});
  if(true){

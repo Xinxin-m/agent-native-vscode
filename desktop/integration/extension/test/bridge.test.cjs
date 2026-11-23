@@ -30,3 +30,13 @@ test('bridge permits the account login code submission only as a write',()=>{
 test('remote model discovery is an explicit metadata request',()=>{assert.equal(bridge.route('/api/models/discover','POST'),'/api/models/discover');assert.throws(()=>bridge.route('/api/models/discover'));assert.throws(()=>bridge.route('/api/models/discover/extra','POST'));});
 
 test('model update check is a write route with a long timeout for CLI installs',()=>{assert.equal(bridge.route('/api/models/refresh','POST'),'/api/models/refresh');assert.throws(()=>bridge.route('/api/models/refresh'));assert.match(require('node:fs').readFileSync(require.resolve('../bridge.cjs'),'utf8'),/'\/api\/models\/refresh'\?750000/);});
+
+test('redesign routes: reads are GET only, writes are POST only, near misses are refused',()=>{
+ const reads=['/api/notifications?archived=1','/api/refresh?id=job1','/api/project_workspace?id=p1','/api/placements?key=claude-1&limit=1','/api/accounts/picker?model=m'];
+ const writes=['/api/notifications/act','/api/seen','/api/view','/api/refresh','/api/live/stop_idle','/api/accounts/logout','/api/accounts/rename','/api/accounts/add','/api/accounts/login','/api/accounts/login/cancel','/api/project_catalog','/api/assign','/api/config'];
+ for(const r of reads){assert.equal(bridge.route(r),r);if(!r.startsWith('/api/refresh'))assert.throws(()=>bridge.route(r,'POST'));}
+ for(const w of writes){assert.equal(bridge.route(w,'POST'),w);}
+ for(const w of ['/api/notifications/act','/api/seen','/api/live/stop_idle','/api/accounts/logout','/api/accounts/rename'])assert.throws(()=>bridge.route(w));
+ for(const bad of ['/api/notifications/other','/api/live/stop_all','/api/accounts/pickers','/api/seen/x','/api/placements/x'])assert.throws(()=>bridge.route(bad,'POST'),bad);
+ assert.throws(()=>bridge.route('/api/notifications/act'));
+});
