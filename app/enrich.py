@@ -32,6 +32,7 @@ breaker). Failures never overwrite an existing label.
 import datetime
 import json
 import os
+import re
 import subprocess  # noqa: F401  (kept importable: tests patch enrich.subprocess.run)
 import sys
 import time
@@ -141,8 +142,98 @@ def _is_automation(meta):
 
 
 # ------------------------------------------------------- deterministic labels
+_BLOCKS = re.compile(r"<(system-reminder|pasted_content|external_[a-z_]+|command-[a-z]+|local-command-[a-z]+)\b[^>]*>.*?</\1>", re.S | re.I)
+_FENCE = re.compile(r"```.*?(```|\Z)", re.S)
+_TAGS = re.compile(r"</?[a-z_][\w-]*(\s[^>]*)?>", re.I)
+_CALLER = re.compile(r"^\s*(claude|codex)\s*:", re.I)
+_ROUTING = re.compile(r"(parent_session_id|parent_provider|target_provider)\s*=", re.I)
+_BOILER = re.compile(r"^(read|open|first read)\b.*\b(first|follow it|in full|section \d+)\b", re.I)
+_PATH = re.compile(r"(https?://\S+|(?<![\w])(~|\.{0,2})/[\w.~@%+-]*(/[\w.~@%+-]+)*/?[\w.-]*|`[^`]*`)")
+_SLASH_CMD = re.compile(r"^/[\w:-]+\s*")
+
+
+def deterministic_title(text, limit=60):
+    """Succinct title from a chat's first user message, no model: caller and routing
+    lines, system-reminder blocks, slash commands, code fences, paths and urls removed;
+    the first sentence, cut at a word boundary within `limit` characters. '' if nothing
+    readable is left."""
+    text = _FENCE.sub(" ", _BLOCKS.sub(" ", str(text or "")))
+    text = _TAGS.sub(" ", text)
+    for raw in text.splitlines():
+        raw = raw.strip()
+        if not raw or _CALLER.match(raw) or _ROUTING.search(raw):
+            continue
+        for line in re.split(r"(?<=[.!?])\s+", raw):
+            if _BOILER.match(line.strip()):
+                continue
+            line = _SLASH_CMD.sub("", line.strip())
+            line = " ".join(_PATH.sub(" ", line).split()).strip(" -*#>|:;,\"'")
+            line = re.sub(r"^(goal|task|context)\s*:\s*|^you are (the|a|an)\s+", "", line, flags=re.I)
+            if len(re.findall(r"[A-Za-z]{2,}", line)) < 2:
+                continue
+            first = line.rstrip(".!?:;, ")
+            if len(first) > limit:
+                first = first[:limit + 1].rsplit(" ", 1)[0] if " " in first[:limit + 1] else first[:limit]
+            first = re.sub(r"(\s+(on|in|of|to|for|and|or|with|the|a|an|at|by|from|that|is|are|now))+$", "", first, flags=re.I)
+            first = first.rstrip(" ,;:-(")
+            return first[:1].upper() + first[1:] if first else ""
+    return ""
+
+
+def _folder_title(meta, noun="Chat"):
+    folder = os.path.basename((meta.get("cwd") or "").rstrip("/"))
+    return f"{noun} in {folder}" if folder else f"Untitled {noun.lower()}"
+
+
+CONTINUED_SUFFIX = " (continued)"
+_HANDOFF_HEADER = re.compile(
+    r"\AContinue work handed off from (claude|codex) session ([\w-]+)\.\r?\n"
+    r"Source Library key: ([\w-]+)\r?\nWorkspace: "
+)
+
+
+def display_title(key, meta, generated=None, manual=None):
+    return (manual or meta.get("desktop_title") or generated or meta.get("title_seed")
+            or deterministic_title(meta.get("first_prompt")) or key)
+
+
+def _title_source(meta, index):
+    if meta.get("source_key"):
+        return meta["source_key"]
+    # Older transcripts may retain the broker's exact header before the index
+    # receives its lineage. Use it for display only and verify both identities.
+    match = _HANDOFF_HEADER.match(meta.get("first_prompt") or "")
+    if match:
+        provider, session_id, key = match.groups()
+        source = index.get(key) or {}
+        if source.get("source") == provider and source.get("id") == session_id:
+            return key
+    return None
+
+
+def conversation_title(key, meta, index, labels, titles):
+    """Resolve recorded handoff ancestry and keep explicit Library renames."""
+    original = display_title(key, meta, (labels.get(key) or {}).get("title"), titles.get(key))
+    if titles.get(key):
+        return original
+    ancestor = _title_source(meta, index)
+    visited = {key}
+    inherited = None
+    while isinstance(ancestor, str) and ancestor in index and ancestor not in visited:
+        visited.add(ancestor)
+        source = index[ancestor]
+        inherited = display_title(ancestor, source, (labels.get(ancestor) or {}).get("title"), titles.get(ancestor))
+        if titles.get(ancestor):
+            break
+        ancestor = _title_source(source, index)
+    if inherited:
+        return inherited.removesuffix(CONTINUED_SUFFIX) + CONTINUED_SUFFIX
+    return original
+
+
 def provisional(meta):
-    seed = (meta.get("title_seed") or "").strip() or _clip(meta.get("first_prompt"), 70) or "Untitled chat"
+    seed = ((meta.get("title_seed") or "").strip() or deterministic_title(meta.get("first_prompt"))
+            or _folder_title(meta))
     return {"title": _clip(seed, 70), "description": "", "keywords": [], "topic_hint": "",
             "is_ops": False, "model": "deterministic", "provisional": True,
             "content_sig": meta.get("content_sig") or ""}
@@ -160,7 +251,8 @@ def local_label(meta, model="deterministic"):
 
 def child_label(meta, root_label=None):
     """Native delegation metadata is sufficient to name child transcripts."""
-    title = meta.get("agent_label") or meta.get("title_seed") or meta.get("agent_path") or "Delegated agent"
+    title = (meta.get("agent_label") or meta.get("title_seed") or deterministic_title(meta.get("first_prompt"))
+             or meta.get("agent_path") or _folder_title(meta, "Agent"))
     return {"title": str(title)[:90], "description": "Delegated transcript within its parent conversation.",
             "keywords": [], "topic_hint": "", "is_ops": bool((root_label or {}).get("is_ops")),
             "model": "deterministic", "lineage_label": True,
@@ -189,9 +281,11 @@ def deterministic_pass(index, done):
                          "keywords": ["automation"], "topic_hint": "Automation runs", "is_ops": True,
                          "model": "deterministic", "content_sig": meta.get("content_sig", "")}
             changed = True
-        elif not usable(prev):
-            done[key] = provisional(meta)
-            changed = True
+        elif not usable(prev) or prev.get("provisional"):
+            fresh = provisional(meta)  # a provisional title follows the first message until a model label replaces it
+            if fresh != prev:
+                done[key] = fresh
+                changed = True
     return changed, children
 
 

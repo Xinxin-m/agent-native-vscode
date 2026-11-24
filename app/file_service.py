@@ -60,15 +60,42 @@ def local_host(host):
     return 'mac'
 
 
-def explicit_file_links(text):
-    for link in re.findall(r'\]\\?\((<[^>\n]+>|[^)\n]+?)\\?\)', text):
+FILE_MENTIONS = re.compile(
+    r'\]\\?\((?P<link><[^>\n]+>|(?:\\[()]|\([^()\n]*\)|[^()\n])+?)\\?\)'
+    r'|(?P<ticks>`+)(?P<code>[^`\n]+)(?P=ticks)'
+    r'|(?<![\w:/])(?P<bare>(?:~/|/)[^\s<>"\'`]+)'
+)
+
+
+def explicit_file_links(text, cwd=''):
+    """Recognize the local path forms the chat renderer exposes as links."""
+    for match in FILE_MENTIONS.finditer(text):
+        link, code, bare = match.group('link', 'code', 'bare')
+        if code and not re.fullmatch(
+            r'(?:/|\.\.?/|~/|file://).+|(?:[\w.@-]+/)*[\w.@-]+\.[\w]+(?::\d+(?::\d+)?)?(?:#.*)?',
+            code,
+        ):
+            continue
+        if bare:
+            bare = bare.rstrip('.,;:!?)}]')
+            if '/' not in bare[1:]:
+                continue
+        value = (link or code or bare).removeprefix('<').removesuffix('>')
+        value = value.replace(r'\(', '(').replace(r'\)', ')')
+        value = re.sub(r':\d+(?::\d+)?(?=[#?]|$)', '', value)
         try:
-            parsed = urlsplit(link.removeprefix('<').removesuffix('>'))
+            parsed = urlsplit(value)
         except ValueError:
             continue
         if parsed.scheme not in ('', 'file') or parsed.netloc or not parsed.path:
             continue
-        yield re.sub(r':\d+(?::\d+)?$', '', unquote(parsed.path))
+        path = re.sub(r':\d+(?::\d+)?$', '', unquote(parsed.path))
+        if path.startswith('~/'):
+            home = re.match(r'^/(?:Users|home)/[^/]+', cwd)
+            if not home:
+                continue
+            path = home[0] + path[1:]
+        yield path
 
 
 def reference_host(host, path):
@@ -387,22 +414,35 @@ class FileService:
                 'next_cursor':str(offset+limit) if len(entries) > offset+limit else None,
                 'truncated':len(entries) >= 10000}
 
-    def reference(self, key, path):
+    def reference(self, key, path, latest_reply=None):
         if not isinstance(key, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,160}', key):
             raise FileError('invalid_path', 'Invalid conversation key')
+        if not isinstance(path, str) or not path or '\x00' in path:
+            raise FileError('invalid_path', 'Invalid file path')
         chat = read_json(self.data / 'chats' / (key + '.json'), {})
-        if not chat:
-            raise FileError('not_found', 'Conversation was not found', 404)
-        host = chat.get('execution_host') or chat.get('host_id') or chat.get('node') or 'mac'
-        host = 'mac' if host in ('mac', 'local', None, '') else host
-        candidate = os.path.abspath(os.path.join(chat.get('cwd') or '', str(path)))
-        evidence = chat.get('files_changed') or []
-        paths = list(evidence) if isinstance(evidence, dict) else [e.get('path') or e.get('file') if isinstance(e, dict) else e for e in evidence]
-        # Explicit file links in conversation text are also transcript evidence.
-        text = '\n'.join(str(t.get('text') or '') for t in chat.get('turns') or [])
-        paths.extend(explicit_file_links(text))
-        if candidate not in [os.path.abspath(os.path.join(chat.get('cwd') or '', str(p))) for p in paths if p]:
-            raise FileError('outside_root', 'Path is not an explicit file reference in this conversation', 403)
+        def resolve(evidence):
+            if not evidence:
+                return None
+            cwd = evidence.get('cwd') or ''
+            candidate = os.path.abspath(os.path.join(cwd, path))
+            changed = evidence.get('files_changed') or []
+            paths = [row.get('path') or row.get('file') if isinstance(row, dict) else row for row in changed]
+            for turn in evidence.get('turns') or []:
+                paths.extend(explicit_file_links(turn.get('text') or '', cwd))
+            if any(candidate == os.path.abspath(os.path.join(cwd, p)) for p in paths if isinstance(p, str) and p):
+                host = evidence.get('execution_host') or evidence.get('host_id') or evidence.get('node') or 'mac'
+                return candidate, 'mac' if host == 'local' else host
+
+        match = resolve(chat)
+        if not match and latest_reply:
+            live = latest_reply(key)
+            match = resolve(live)
+            chat = chat or live
+        if not match:
+            if not chat:
+                raise FileError('not_found', 'Conversation was not found', 404)
+            raise FileError('outside_root', 'This conversation does not include an openable link to that file.', 403)
+        candidate, host = match
         host = reference_host(host, candidate)
         fid = uuid.uuid4().hex
         if host != 'mac':
@@ -822,7 +862,20 @@ def metadata(req, query, body):
 
 @guarded
 def reference(req, query, body):
-    return {'ok':True,'resource':instance().reference(body.get('chat_key'),body.get('path'))}
+    return {'ok':True,'resource':instance().reference(body.get('chat_key'),body.get('path'),latest_reply=latest_broker_reply)}
+
+
+def latest_broker_reply(key):
+    """Use the same streamed assistant text the UI can show before indexing."""
+    import broker
+    store = broker.instance().store
+    run = next((row for row in store.list(key=key) if row.get('key') == key), None)
+    if not run:
+        return {}
+    deltas = (event['data'].get('text', '') for event in store.events(run['id'], limit=512)
+              if event['event'] == 'delta')
+    return {'cwd': run.get('cwd'), 'host_id': run.get('host_id'),
+            'turns': [{'text': run.get('text') or ''}, {'text': ''.join(deltas)}]}
 
 
 @guarded

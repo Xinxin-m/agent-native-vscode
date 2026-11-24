@@ -26,6 +26,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import clis  # noqa: E402  (the CLIs are invisible to a service's minimal PATH)
 from automation import automation_kind, effective_projects
+from enrich import conversation_title, display_title
 import json_cache
 import notices
 import sidebar
@@ -194,17 +195,13 @@ def config_exclusions(cfg):
     return [value for value in values if isinstance(value, str) and value.strip()] if isinstance(values, list) else []
 
 
-def display_title(key, meta, generated=None, manual=None):
-    return (manual or meta.get("desktop_title") or generated or meta.get("title_seed")
-            or (meta.get("first_prompt") or "")[:60] or key)
-
-
 def build_state():
     """The /api/state payload without its revision."""
     with LOCK:
         index = jload("index", {})
         enrich = jload("enrich", {})
         flags = jload("flags", default_flags())
+        titles = flags.get("titles") or {}
         archived = set(flags.get("archived", []))
         starred = set(flags.get("starred", []))
         cfg = jload("config", {})
@@ -231,7 +228,7 @@ def build_state():
                           "models": m.get("models", {}),
                           **{field: m[field] for field in ('account_id', 'execution_host', 'host_id', 'conversation_key', 'source_key', 'last_run_id', 'parent_key', 'root_key', 'parent_agent_id', 'parent_session_id', 'agent_id', 'agent_label', 'agent_path', 'is_child', 'lineage_source', 'spawned_children', 'source_locations', 'account_attribution') if field in m},
                           "usage": m.get("usage", {}),
-                          "title": display_title(k, m, e.get("title"), (flags.get("titles") or {}).get(k)),
+                          "title": conversation_title(k, m, index, enrich, titles),
                           "description": e.get("description", ""),
                           "keywords": e.get("keywords", []),
                           "topic_hint": e.get("topic_hint", ""),
@@ -305,8 +302,12 @@ def chat_body(key):
     path = os.path.join(CHATS, os.path.basename(key) + ".json")
     signature = _chat_signature(path)
     flags = json_cache.latest(FILES["flags"], default_flags())
-    title = (flags.get("titles") or {}).get(key) if isinstance(flags, dict) else None
-    version = (signature, title)
+    titles = (flags.get("titles") or {}) if isinstance(flags, dict) else {}
+    labels = json_cache.latest(FILES["enrich"], {}) or {}
+    index = json_cache.latest(FILES["index"], {}) or {}
+    meta = index.get(key) or {}
+    indexed_title = conversation_title(key, meta, index, labels, titles)
+    version = (signature, indexed_title)
     with _CHAT_LOCK:
         cached = _CHAT_CACHE.get(path)
         if cached and cached["version"] == version:
@@ -314,8 +315,8 @@ def chat_body(key):
             return cached
         with open(path) as handle:
             chat = json.load(handle)
-        if title or chat.get("desktop_title"):
-            chat["title"] = title or chat["desktop_title"]
+        first = next((t.get("text") for t in chat.get("turns", []) if t.get("role") == "user"), "")
+        chat["title"] = conversation_title(key, {**meta, **chat, "first_prompt": first[:300]}, index, labels, titles)
         response = {**_serialized_json(chat), "version": version}
         _CHAT_CACHE[path] = response
         _CHAT_CACHE.move_to_end(path)
@@ -935,7 +936,7 @@ class Handler(BaseHTTPRequestHandler):
                     if titles.pop(key, None) is not None:
                         jsave("flags", dict(flags, titles=titles))
                     m = index[key]
-                    title = display_title(key, m, (jload("enrich", {}).get(key) or {}).get("title"))
+                    title = conversation_title(key, m, index, jload("enrich", {}), titles)
                 return self._json({"ok": True, "title": title})
             if action not in ("archive", "unarchive", "star", "unstar"):
                 return self._json({"ok": False, "error": "unknown chat-state action"}, 400)
