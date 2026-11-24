@@ -14,8 +14,10 @@ REPO=Path(__file__).resolve().parent
 if REPO.name == "scripts":
     REPO=REPO.parent
 ROOT=REPO/"app" if (REPO/"app/server.py").is_file() else REPO
-MODULES='project_suggestions label_model json_cache session_reference sessions_cli attention_watch quota_failover auth_failure auth_recovery accounts automation broker classify clis commands conversation_settings doctor enrich file_service cross_host_transfer notices host_connector host_models model_updates hosts indexer live open_destinations pipeline preview_server projects remote_files remote_sync search_api search_chats server session_lineage session_start_refresh stream usage_history settings_insights workspace_groups project_review'.split()
-EXACT=['README.md','LICENSE','docs/RELEASE.md','.gitignore','web/settings-insights.js','web/settings-insights.css',*(name+'.py' for name in MODULES),'install.sh','scripts/install_daily_label.sh','scripts/prune_bundles.py','run.sh','package_workspace.py','start_project_map.py','data/config.example.json','workbench/package.json','workbench/package-lock.json','workbench/tsconfig.json','workbench/vite.config.ts','workbench/index.html']
+MODULES='project_suggestions label_model json_cache session_reference sessions_cli attention_watch quota_failover auth_failure auth_recovery accounts automation broker classify clis commands conversation_settings doctor enrich file_service cross_host_transfer notices host_connector host_models model_updates hosts indexer live open_destinations pipeline preview_server projects remote_files remote_sync search_api search_chats server session_lineage session_start_refresh stream usage_history settings_insights workspace_groups project_review provider_host agent_activity autoclassify debug_agent live_library live_refresh notifications sidebar'.split()
+EXACT=['README.md','LICENSE','docs/RELEASE.md','.gitignore','web/settings-insights.js','web/settings-insights.css',*(name+'.py' for name in MODULES),'install.sh','scripts/install_daily_label.sh','scripts/prune_bundles.py','scripts/restart_server.py','scripts/check_one_badge.py','run.sh','package_workspace.py','start_project_map.py','data/config.example.json','workbench/package.json','workbench/package-lock.json','workbench/tsconfig.json','workbench/vite.config.ts','workbench/index.html']
+TEST_HELPERS={'accounts_guard.py','enrich_fixture.py'}
+TESTS_NOT_SHIPPED={'test_privacy_scan.py','test_workspace_package.py','test_sent_messages.py'}  # the first two exercise this private-tree packager; the third reads a real local transcript
 SOURCE_SUFFIXES={'.js','.ts','.tsx','.css','.svg','.d.ts','.json'}
 
 
@@ -53,6 +55,7 @@ def files_to_ship(root=ROOT):
         base=REPO if root == ROOT else root
         names += [str(p.relative_to(base)) for p in sorted((base/folder).glob('*.md'))]
     names += [str(p.relative_to(base)) for p in sorted((base/'scripts/harness').glob('*')) if p.suffix in ('.py','.md','.json')]  # harness scripts and their tests
+    names += [str(p.relative_to(root)) for p in sorted((root/'tests').glob('*.py')) if (p.name.startswith('test_') or p.name in TEST_HELPERS) and p.name not in TESTS_NOT_SHIPPED]
     for name in sorted(set(names)):
         path=(REPO/name) if root == ROOT and (name in {"README.md","CONTRIBUTING.md","AGENTS.md","CLAUDE.md","LICENSE","docs/RELEASE.md","docs/AGENT-ONBOARDING.md",".gitignore","package_workspace.py"} or name.startswith(("prompts/","agents/","docs/screenshots/","scripts/harness/"))) else root/name
         if name == "package_workspace.py" and ROOT != REPO:
@@ -62,6 +65,28 @@ def files_to_ship(root=ROOT):
         if not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to((REPO if root == ROOT else root).resolve()):
             raise ValueError('Missing or unsafe allowlisted file: '+name)
         yield name,path
+
+
+# Private defaults that the shared tree reads from the environment instead, as regex rules so
+# this file carries no private text. A rule applies only while the private text is present;
+# the privacy scan still gates the result.
+SANITIZE={
+ 'debug_agent.py':[
+  (r"^RULES = '/[^']*'$","RULES = os.environ.get('LIBRARY_MONITOR_RULES', str(Path.home() / '.library-monitor' / 'monitor' / 'findings.md'))"),
+  (r"^POLICY = '/(?:Users|home)/[^']*/\.claude/hooks/approval_policy\.py'$","POLICY = str(Path.home() / '.claude' / 'hooks' / 'approval_policy.py')")],
+ 'notifications.py':[
+  (r"^MONITOR = '/(?:Users|home)/[^']*'$","MONITOR = os.environ.get('LIBRARY_MONITOR_DIR', str(Path.home() / '.library-monitor'))"),
+  (r"^(MONITOR_URL = .*)$",r"\1\nOWNER_STATE = os.environ.get('LIBRARY_MONITOR_OWNER_STATE', 'for_owner')  # monitor card state that means "+'"waiting on the owner"'),
+  (r"card\.get\('state'\) == 'for_[a-z]+'","card.get('state') == OWNER_STATE")],
+ 'tests/test_notifications.py':[(r"'for_(?!owner')[a-z]+'","'for_owner'")]}
+
+
+def sanitized(name,raw):
+    if name not in SANITIZE:return raw
+    text=raw.decode()
+    for pattern,replacement in SANITIZE.get(name,()):
+        text=re.sub(pattern,replacement,text,flags=re.M)
+    return text.encode()
 
 
 DESKTOP_EXPORT=REPO.parent/'library-code-oss/integration/export_source.py'
@@ -143,7 +168,7 @@ def privacy_scan(entries,terms=None):
 
 def package(output=None,build=False):
     if build:subprocess.run(['npm','run','build'],cwd=ROOT/'workbench',check=True,stdout=subprocess.DEVNULL)
-    entries=[(name,path.read_bytes()) for name,path in files_to_ship()]+desktop_files()
+    entries=[(name,sanitized(name,path.read_bytes())) for name,path in files_to_ship()]+desktop_files()
     entries.append(('skill/SKILL.md',b'''---
 name: chat-dashboard
 description: Install and operate a local Library Workspace and keep its data private.
@@ -156,6 +181,10 @@ Do not send paid chat messages, stop sessions, delete transcripts, or expose the
 Use native provider profile IDs for account routing; never substitute provider UUIDs or infer account ownership from shared transcript directories.
 Before restarting a running service, inspect /api/runs and data/execution/ for active work.
 '''))
+    # A test that mentions private names, hosts or paths stays in the private tree.
+    leaky={f['path'] for f in privacy_scan([e for e in entries if e[0].startswith('tests/')])}
+    excluded_tests=sorted(leaky)
+    entries=[e for e in entries if e[0] not in leaky]
     if not any(name=='web/workbench/index.html' for name,_ in entries):raise ValueError('Build Workbench assets before packaging')
     entries += [('THIRD-PARTY-LICENSES.txt',third_party_licenses()),('web/index.html',b'<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=/workbench"><title>Library Workspace</title><a href="/workbench">Open Workspace</a>')]
     # Keep the runnable tree cohesive: its modules resolve data/assets relative to
@@ -185,7 +214,7 @@ exec bash "$LIBRARY_REPO/app/'''+script+'" "$@"\n'
     out=Path(output) if output else ROOT/'output'/('workspace-package-'+stamp)
     out.mkdir(parents=True,exist_ok=False)
     manifest={'format':1,'created_utc':stamp,'policy':'Explicit backend/source/asset allowlist; no installed user data, profiles, transcripts, QA fixtures or local reports.','files':[{'path':name,'bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest()} for name,raw in sorted(entries)]}
-    scan={'ok':True,'files_scanned':len(entries),'denylist_terms':len(denylist_terms()),'findings':findings,'scope':'Detects private deny-list terms, personal home paths, emails, phone numbers, .edu hostnames and credential-shaped values. An automated scan is not a guarantee that arbitrary private text cannot exist.'}
+    scan={'ok':True,'files_scanned':len(entries),'denylist_terms':len(denylist_terms()),'findings':findings,'tests_withheld_for_private_text':excluded_tests,'scope':'Detects private deny-list terms, personal home paths, emails, phone numbers, .edu hostnames and credential-shaped values. An automated scan is not a guarantee that arbitrary private text cannot exist.'}
     # Inventory and scan stay beside the archive, outside the shipped tree.
     archive=out/'library-workspace.tar.gz'
     import io
