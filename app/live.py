@@ -91,7 +91,7 @@ def last_prompt(session_id, cwd):
     except OSError:
         return None, "", mtime
     for line in reversed(lines):
-        if '"type":"user"' not in line:
+        if '"type":"user"' not in line and '"queued_command"' not in line:
             continue
         try:
             d = json.loads(line)
@@ -100,6 +100,11 @@ def last_prompt(session_id, cwd):
         if d.get("isMeta") or d.get("isSidechain"):
             continue
         c = d.get("message", {}).get("content")
+        a = d.get("attachment") if d.get("type") == "attachment" else None
+        if isinstance(a, dict):  # a message sent while the turn ran
+            if a.get("type") != "queued_command" or a.get("commandMode", "prompt") != "prompt":
+                continue
+            c = a.get("prompt")
         if isinstance(c, list):
             c = " ".join(x.get("text", "") for x in c if isinstance(x, dict) and x.get("type") == "text")
         c = (c or "").strip()

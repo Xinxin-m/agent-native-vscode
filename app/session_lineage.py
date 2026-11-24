@@ -172,14 +172,16 @@ def session_tree(req, query, body):
     nodes, edges, missing = [], [], set()
     live = agent_activity._live()
     import sidebar
-    statuses = sidebar.current_statuses()
+    statuses, failed = sidebar.current_statuses(), sidebar.failed_runs(DATA)
     seen, views = sidebar.load_seen(DATA, create=False), _load('views', {})
     fields = ('id', 'source', 'title_seed', 'model_main', 'models', 'ts_first',
               'ts_last', 'status', 'node', 'execution_host', 'host_id', 'cwd', 'account_id', 'usage') + LINEAGE_FIELDS
+    from enrich import conversation_title
     for node_key, meta in selected.items():
         node = {f: meta[f] for f in fields if f in meta}
         node.update(key=node_key, root_key=root, project_id=project_id,
-                    title=titles.get(node_key) or meta.get('desktop_title') or (enrich.get(node_key) or {}).get('title') or meta.get('agent_label') or meta.get('title_seed') or node_key)
+                    title=conversation_title(node_key, {**meta, 'title_seed': meta.get('agent_label') or meta.get('title_seed')},
+                                             index, enrich, titles))
         # Absent until checked in the background; the broker re-verifies on send.
         node.update(_cached_resume(node_key, meta))
         if meta.get('is_child'):
@@ -190,9 +192,11 @@ def session_tree(req, query, body):
                 node.update(activity='unknown', activity_evidence='Activity check failed: ' + type(exc).__name__)
             # The same mark the sidebar uses: a running child is working, a settled one has none.
             node['live_status'] = 'working' if node.get('activity') == 'running' else None
-        else:
-            node['live_status'] = statuses.get(node_key)
         node['unseen'] = sidebar.is_unseen(dict(meta, key=node_key), seen, views)  # the sidebar row's blue dot
+        if not meta.get('is_child'):  # the sidebar row's one mark: a standing failure clears working
+            node['live_status'], failed_now, _ = sidebar.resolve(statuses.get(node_key), failed.get(node_key), meta.get('ts_last'), node['unseen'])
+            if failed_now:
+                node['live_status'], node['activity'] = None, 'failed'
         node['state'] = node_state(node)
         nodes.append(node)
         parent = meta.get('parent_key')

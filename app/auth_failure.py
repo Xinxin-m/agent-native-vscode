@@ -78,7 +78,8 @@ def classify(provider,raw,account_id=None,at=None,structured=None,account_label=
         'access token could not be refreshed' in both or
         'token_expired' in both or 'refresh_token_reused' in both):kind='auth_expired'
     elif ("you've hit your weekly limit" in both or "you've hit your usage limit" in both or
-          'usagelimitexceeded' in both or 'usage_limit_exceeded' in both or 'usage_limit_reached' in both or 'insufficient_quota' in both):kind='limit_reached'
+          'usagelimitexceeded' in both or 'usage_limit_exceeded' in both or 'usage_limit_reached' in both or
+          'insufficient_quota' in both or 'workspace is out of credits' in text):kind='limit_reached'
     elif ('not logged in' in both or 'unauthorized' in both or 'authentication_failed' in both or
           'authentication_error' in both or 'invalid_api_key' in both):kind='not_logged_in'
     elif ('ratelimitexceeded' in both or 'rate_limit' in both or 'rate limit' in both or 'too many requests' in both):kind='rate_limited'

@@ -111,7 +111,7 @@ def _run_facts(path):
         with open(path) as handle:
             run = json.load(handle)
         facts = (str(run.get('status') or ''), (run.get('key'), run.get('conversation_key')), bool(run.get('recovery_blocked')),
-                 str(run.get('created_at') or ''))
+                 str(run.get('created_at') or ''), str(run.get('finished_at') or run.get('updated_at') or run.get('created_at') or ''))
     except (OSError, ValueError, AttributeError):
         facts = None
     _RUNS[path] = (stamp, facts)
@@ -132,8 +132,9 @@ def _active_runs(data):
     return out
 
 
-def failed_keys(data=DATA):
-    """Chats whose latest broker run failed (the run the feed's failed-run notice points at)."""
+def failed_runs(data=DATA):
+    """{chat key: failure time in seconds} for chats whose latest broker run failed (the run the
+    feed's failed-run notice points at)."""
     latest = {}
     for path in glob.glob(os.path.join(data, 'execution', 'runs', '*', 'run.json')):
         facts = _run_facts(path)
@@ -141,8 +142,31 @@ def failed_keys(data=DATA):
             continue
         for key in facts[1]:
             if key and (key not in latest or facts[3] >= latest[key][0]):
-                latest[key] = (facts[3], facts[0])
-    return {key for key, (_, status) in latest.items() if status == 'failed'}
+                latest[key] = (facts[3], facts[0], facts[4])
+    return {key: _parse(ended) for key, (_, status, ended) in latest.items() if status == 'failed'}
+
+
+def failed_keys(data=DATA):
+    return set(failed_runs(data))
+
+
+# ------------------------------------------------------------------ one status mark per chat
+# User request 2026-11-23: one badge at a time; a chat that failed cannot still be running.
+# Precedence: failed > waiting (needs her) > working (running) > new (finished, not seen) > none.
+# Latest event wins: a failure stands until the transcript moves on (a later turn means she
+# resumed, so the failure is history). A standing failure clears working and waiting, which
+# otherwise come from process rows or run journals that were never updated.
+STATUS_MARKS = ('failed', 'waiting', 'working', 'new')
+FAILURE_SLACK_S = 120  # the failed run writes its own error turn into the transcript
+
+
+def resolve(live_status, failed_at, ts_last, unseen):
+    """(live_status, failed, status_mark) for one chat; the only place the mark is decided."""
+    failed = bool(failed_at) and _parse(ts_last) <= failed_at + FAILURE_SLACK_S
+    if failed and live_status in ('working', 'waiting'):
+        live_status = None
+    mark = 'failed' if failed else live_status if live_status in ('waiting', 'working') else 'new' if unseen else None
+    return live_status, failed, mark
 
 
 def _attention_keys():
@@ -196,18 +220,18 @@ def current_statuses(data=DATA, now=None):
 
 # ------------------------------------------------------------------ chat list fields
 def annotate(chats, data=DATA, assignments=None, views=None, statuses=None, now=None):
-    """Add seen_at, unseen, live_status, failed and project_id to each /api/state chat row."""
+    """Add seen_at, unseen, live_status, failed, status_mark and project_id to each /api/state chat row."""
     seen = load_seen(data, now)
     if statuses is None:
         statuses = current_statuses(data, now)
-    failed = failed_keys(data)
+    failed = failed_runs(data)
     assignments = assignments or {}
     for chat in chats:
         key = chat['key']
         chat['seen_at'] = _iso(seen_time(key, seen, views))
         chat['unseen'] = is_unseen(chat, seen, views)
-        chat['live_status'] = statuses.get(key)
-        chat['failed'] = key in failed and statuses.get(key) not in ('working', 'waiting')
+        chat['live_status'], chat['failed'], chat['status_mark'] = resolve(
+            statuses.get(key), failed.get(key), chat.get('ts_last'), chat['unseen'])
         chat['project_id'] = assignments.get(key) or ''
     return chats
 

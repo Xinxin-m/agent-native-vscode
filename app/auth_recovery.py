@@ -70,9 +70,9 @@ def assert_idle(obj, key, meta, chat):
     path=meta.get('file') or chat.get('file')
     if path and Path(path).is_file() and auth_failure.transcript_failure(meta['source'],path,meta.get('account_id')).get('active'):
         raise ValueError('This native session has a newer active turn; return to its existing chat')
-    rows, _unclassified=live.mac_sessions()  # unclassified is a list of bare PIDs with no session identity
+    rows, _ = live.mac_sessions()  # The second list is bare PIDs without session identity.
     for row in rows:
-        if row.get('alive') is False:
+        if not isinstance(row, dict) or row.get('alive') is False:
             continue
         exact=(key and row.get('chat_key')==key or sid and row.get('session_id')==sid)
         if exact and row.get('status')!='idle':
