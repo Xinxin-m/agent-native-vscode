@@ -19,6 +19,7 @@ from pathlib import Path
 import re
 import signal
 import selectors
+import shutil
 import subprocess
 import sys
 import threading
@@ -240,6 +241,109 @@ def observe_process(run):
     return {'state': 'same' if same else 'reused', 'identity': current}
 
 
+class HostedInput:
+    """Writes provider input into the host's FIFO; close() lets the provider read EOF."""
+
+    def __init__(self, host):
+        self.host = host
+        self.fd = None
+        self.closed = False
+
+    def write(self, text):
+        if self.closed:
+            raise ValueError('I/O operation on closed provider input')
+        if self.fd is None:
+            # Non-blocking open fails at once (ENXIO) when no host holds the FIFO.
+            self.fd = os.open(self.host.dir / 'in.fifo', os.O_WRONLY | os.O_NONBLOCK)
+            os.set_blocking(self.fd, True)
+        data = text.encode()
+        while data:
+            data = data[os.write(self.fd, data):]
+
+    def flush(self):
+        pass
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        if self.host.poll() is None:
+            os.kill(self.host.host_pid, signal.SIGUSR1)
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+
+class HostedProcess:
+    """Popen-like handle on a provider owned by provider_host.py.
+
+    The host, not this service, owns the provider's pipes, so a server restart
+    leaves the provider running; the next service reattaches with a new handle.
+    pid is the provider's (its own process group leader), as with direct launch.
+    """
+
+    def __init__(self, host_dir, pid, host_pid, host_proc=None):
+        self.dir = Path(host_dir)
+        self.pid = pid
+        self.host_pid = host_pid
+        self.host_proc = host_proc  # only when this service started the host
+        self.offset = 0  # bytes of out.jsonl consumed, always at a line end
+        self.returncode = None
+        self.stdin = HostedInput(self)
+        self.stdout = self.stderr = None
+
+    @classmethod
+    def spawn(cls, host_dir, launch):
+        host_dir.mkdir(mode=0o700)
+        with open(host_dir / 'err.log', 'ab') as err:
+            host = subprocess.Popen([sys.executable, str(ROOT / 'provider_host.py'), str(host_dir), *launch['argv']],
+                                    cwd=launch.get('cwd'), env=launch.get('env'), stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=err, start_new_session=True)
+        deadline = time.monotonic() + 15
+        while not (host_dir / 'provider.json').exists():
+            if host.poll() is not None or time.monotonic() > deadline:
+                if host.poll() is None:
+                    host.kill()
+                host.wait()
+                raise OSError('provider host did not start the provider: ' + (host_dir / 'err.log').read_text(errors='replace')[-2000:])
+            time.sleep(.02)
+        return cls(host_dir, json.loads((host_dir / 'provider.json').read_text())['pid'], host.pid, host)
+
+    @staticmethod
+    def _alive(pid):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except OSError:
+            return True
+        return True
+
+    def poll(self):
+        if self.returncode is None:
+            host_running = self.host_proc.poll() is None if self.host_proc else self._alive(self.host_pid)
+            try:
+                self.returncode = json.loads((self.dir / 'exit.json').read_text())['returncode']
+            except FileNotFoundError:
+                if not host_running and not self._alive(self.pid):
+                    self.returncode = -signal.SIGKILL  # host killed before it could record the exit
+        return self.returncode
+
+    def wait(self, timeout=None):
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while self.poll() is None:
+            if deadline is not None and time.monotonic() > deadline:
+                raise subprocess.TimeoutExpired('provider', timeout)
+            time.sleep(.02)
+        if self.host_proc:
+            self.host_proc.wait()
+        return self.returncode
+
+    def send_signal(self, sig):
+        if self.poll() is None:
+            os.kill(self.pid, sig)
+
+
 class RunStore:
     def __init__(self, root, collect_failure=None):
         self.root = Path(root)
@@ -254,6 +358,7 @@ class RunStore:
         self.journal_order = {}
         self.journals = {}
         self.flushed_at = {}
+        self.muted = set()  # runs replaying provider output that is already journaled
         self.revision_prefix = uuid.uuid4().hex
         self.revision_counter = 0
         self.revision = self.revision_prefix + ':0'
@@ -403,10 +508,14 @@ class RunStore:
         if len(json.dumps(trimmed).encode()) > 65536:
             native = data.get('event') or {}
             trimmed = {'provider': data.get('provider'), 'event': {k: native[k] for k in ('type', 'method', 'session_id', 'subtype') if k in native}}
+            if 'offset' in data:
+                trimmed['offset'] = data['offset']
         return {**trimmed, 'journal_truncated': True, 'original_bytes': len(raw), 'original_sha256': hashlib.sha256(raw).hexdigest()}
 
     def emit(self, rid, event, data):
         with self.lock:
+            if rid in self.muted:
+                return None
             run = self._record(rid)
             self._index_journal(rid)
             if event == 'provider_event':
@@ -630,18 +739,31 @@ class Broker:
         self.evidence = {}  # run id -> (journal inode, bytes read, {request id: event line})
         self.config_path = CONFIG
         self.queue_lock = threading.Lock()  # innermost: never take another broker lock while holding it
+        # A hosted provider outlived the previous service: reattach to it. Its
+        # unconfirmed queue items are settled after its output is replayed.
+        reattached = {}
+        for run in store.list():
+            if run.get('status') in TERMINAL:
+                self._remove_host(run)
+            elif run.get('process_host'):
+                attached = self._reattach_control(run)
+                if attached:
+                    reattached[run['id']] = attached
         for path in (store.root / 'queues').glob('*.json'):
             data = stream._jload(str(path), {})
             items = data.get('items') or []
-            if any(i.get('state') == 'delivering' for i in items):
-                for item in items:
-                    if item.get('state') == 'delivering':
-                        item.update(state='failed', updated_at=now(),
-                                    error='The server restarted before the agent confirmed this message.')
+            lost = [i for i in items if i.get('state') == 'delivering' and i.get('run_id') not in reattached]
+            for item in lost:
+                item.update(state='failed', updated_at=now(),
+                            error='The server restarted before the agent confirmed this message.')
+            if lost:
                 stream._jsave(str(path), dict(data, items=items), indent=1)
-        # Processes are children of this service. A service restart cannot safely
-        # replay a side effect, so mark the interrupted run and retain its journal.
+        # Providers launched directly (remote ones, or before provider hosts) were
+        # children of the previous service. A restart cannot safely replay a side
+        # effect, so mark the interrupted run and retain its journal.
         for run in store.list():
+            if run['id'] in reattached:
+                continue
             marker = run.get('quota_failover') or {}
             if marker.get('status') == 'switching':
                 successor = store.find_request('quota-handoff-' + run['id'])
@@ -652,6 +774,88 @@ class Broker:
                 store.update(run['id'], quota_failover=marker)
             if run.get('status') not in TERMINAL or run.get('recovery_blocked'):
                 self._recover(run)
+        for rid, (launch, ctrl) in reattached.items():
+            self.active[rid] = ctrl
+            threading.Thread(target=self._work, args=(rid, launch, ctrl, True), daemon=True).start()
+
+    def _reattach_control(self, run):
+        """(launch, control) for a hosted local provider, or None to recover it as before."""
+        host_dir = Path(run['process_host']['dir'])
+        if (run.get('host_id', 'mac') not in ('mac', 'local') or not (host_dir / 'out.jsonl').exists()
+                or observe_process(run)['state'] == 'unknown'):
+            return None  # an exited provider is still reattached: its output finishes the run
+        try:
+            launch = self._launch(run)
+        except Exception as exc:  # noqa: BLE001 - account or host configuration changed since launch
+            self.store.emit(run['id'], 'recovery', {'blocked': False, 'message': f'Could not reattach: {exc}'})
+            return None
+        identities = set()
+        if run.get('session_id'):
+            identities.add('|'.join(str(run.get(k) or '') for k in ('host_id', 'provider', 'session_id')))
+        if run.get('conversation_key'):
+            identities.add('conversation|' + run['conversation_key'])
+        lockdir = self.store.root / 'locks'
+        lockdir.mkdir(exist_ok=True)
+        lockfiles = []
+        try:
+            for identity in sorted(identities):
+                handle = (lockdir / hashlib.sha256(identity.encode()).hexdigest()).open('a')
+                lockfiles.append(handle)
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            for handle in lockfiles:
+                handle.close()
+            return None
+        proc = HostedProcess(host_dir, run['process_pid'], run['process_host']['pid'])
+        ctrl = {'proc': proc, 'stop': False, 'send_lock': threading.Lock(), 'pending_requests': {}, 'pending_rpc': {},
+                'control_lock': threading.RLock(), 'turn_open': True, 'background': {}, 'turn_texts': [],
+                'turn_id': None, 'protocol': launch['protocol'], 'rpc_seq': 100,
+                'lockfiles': lockfiles, 'lock_identities': identities, 'finished': threading.Event()}
+        return launch, ctrl
+
+    def _remove_host(self, run):
+        """A finished run's provider output lives on in its journal; drop the host files."""
+        host_dir = (run.get('process_host') or {}).get('dir')
+        if host_dir and Path(host_dir).is_dir():
+            shutil.rmtree(host_dir, ignore_errors=True)
+
+    def _journaled_offset(self, rid):
+        """End of the last provider output line already in the journal."""
+        last = int(self.store.get(rid).get('last_seq') or 0)
+        span = 256
+        while True:
+            for event in reversed(self.store.events(rid, max(0, last - span))):
+                if event['event'] == 'provider_event' and 'offset' in event['data']:
+                    return event['data']['offset']
+            if span >= last:
+                return 0
+            span *= 8
+
+    def _end_replay(self, rid, run, ctrl):
+        """Journaled output is replayed: resume journaling, settle queued input, then the run phase."""
+        with ctrl['control_lock']:
+            if not ctrl.pop('replaying', False):
+                return
+            self.store.muted.discard(rid)
+            self.store.emit(rid, 'reattached', {'offset': ctrl['proc'].offset})
+            qkey = run.get('conversation_key') or run.get('key')
+            seen = ctrl.pop('replayed_texts', set())
+            for item in self._queue_items(qkey) if qkey else []:
+                if item.get('state') != 'delivering' or item.get('run_id') != rid:
+                    continue
+                attachments = [self.store.attachment(aid) for aid in item.get('attachments') or []]
+                pending = {'kind': 'queue', 'message': item['text'], 'attachments': attachments,
+                           'queue_item': item['id'], 'queue_key': qkey}
+                if ctrl['protocol'] != 'claude-stream':
+                    self._queue_failed(rid, pending, 'The server restarted before the agent confirmed this message.')
+                    continue
+                wire = self._claude_input({'prompt': item['text'], 'attachment_records': attachments})['message']['content'][0]['text'].strip()
+                if wire in seen:
+                    self._queue_confirmed(rid, pending)
+                else:
+                    ctrl.setdefault('claude_inputs', []).append(dict(pending, wire=wire, results=0))
+                    ctrl['turn_open'] = True
+            self._settle(rid, ctrl)
 
     def _recover(self, run):
         observation = observe_process(run)
@@ -738,6 +942,15 @@ class Broker:
             if attachments and spec['host_id'] not in ('mac', 'local'):
                 raise ValueError('remote attachment staging is not available; upload on the execution host first')
             spec = dict(spec, attachment_records=attachments)
+            if spec.get('handoff') and spec.get('source_key'):
+                from enrich import CONTINUED_SUFFIX, conversation_title
+                index = stream._jload(stream.INDEX, {})
+                source = spec['source_key']
+                if source in index:
+                    labels = stream._jload(str(DATA / 'enrich.json'), {})
+                    titles = stream._jload(str(DATA / 'chat_flags.json'), {}).get('titles') or {}
+                    title = conversation_title(source, index[source], index, labels, titles)
+                    spec['title'] = title.removesuffix(CONTINUED_SUFFIX) + CONTINUED_SUFFIX
             import host_connector
             try:
                 launch = self._launch(spec)  # validation before a run can be accepted
@@ -825,6 +1038,8 @@ class Broker:
                 raise ValueError('native session is busy in another Claude process; wait or stop that session before resuming')
 
     def _send(self, ctrl, obj):
+        if ctrl.get('replaying'):
+            return  # the previous service already sent it
         with ctrl['send_lock']:
             proc = ctrl.get('proc')
             if not proc or proc.poll() is not None:
@@ -1122,7 +1337,7 @@ class Broker:
         unfinished turn. This also works while stdout contains an older backlog.
         """
         if (launch.get('protocol') != 'app-server' or launch.get('transport') == 'ssh'
-                or run.get('host_id', 'mac') not in ('mac', 'local') or ctrl.get('stop')):
+                or run.get('host_id', 'mac') not in ('mac', 'local') or ctrl.get('stop') or ctrl.get('replaying')):
             return
         clock = time.monotonic()
         if clock < ctrl.get('native_check_at', 0):
@@ -1192,6 +1407,31 @@ class Broker:
         seen.add(identity)
         st.text += ('\n\n' if st.text else '') + item['text']
 
+    def _hosted_lines(self, proc, ctrl, stderr, tick):
+        """Follow the host's output file from proc.offset; it never ends before the provider exits."""
+        pending = b''
+        with open(proc.dir / 'out.jsonl', 'rb') as out:
+            out.seek(proc.offset)
+            while not ctrl.get('stop'):
+                tick()
+                exited = proc.poll() is not None
+                chunk = out.read(65536)
+                if not chunk:
+                    if exited:
+                        break
+                    time.sleep(.05)
+                    continue
+                *lines, pending = (pending + chunk).split(b'\n')
+                for line in lines:
+                    if ctrl.get('stop'):
+                        return
+                    proc.offset += len(line) + 1
+                    yield line.decode('utf-8', 'replace')
+        stderr[:] = [(proc.dir / 'err.log').read_bytes()[-16000:].decode('utf-8', 'replace')]
+        if pending.strip() and not ctrl.get('stop'):
+            proc.offset += len(pending)
+            yield pending.decode('utf-8', 'replace')
+
     def _provider_lines(self, proc, ctrl, stderr, tick=lambda: None):
         """Watch the owned leader as well as pipes inherited by descendants.
 
@@ -1199,6 +1439,9 @@ class Broker:
         descendant. Drain a bounded tail after leader exit, retaining UTF-8 and
         complete JSON records. A live provider has no elapsed-time deadline.
         """
+        if isinstance(proc, HostedProcess):
+            yield from self._hosted_lines(proc, ctrl, stderr, tick)
+            return
         decoder = codecs.getincrementaldecoder('utf-8')('replace')
         pending = ''
         exited = False
@@ -1239,33 +1482,54 @@ class Broker:
             if pending.strip() and not ctrl.get('stop'):
                 yield pending
 
-    def _work(self, rid, launch, ctrl):
+    def _work(self, rid, launch, ctrl, reattach=False):
         run = self.store.get(rid)
         st = stream._State(run.get('session_id') or '')
         stderr = []
         terminal = None
+        replay_until = 0
         # Long-running native goals have no implicit elapsed-time deadline.
         # Explicit interruption and configured idle stopping own termination.
         try:
-            self.store.update(rid, status='running', launch_attempted=True)
-            proc = subprocess.Popen(launch['argv'], cwd=launch.get('cwd'), env=launch.get('env'),
-                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    text=True, bufsize=1, start_new_session=True)
+            if reattach:
+                # Rebuild this run's state from the provider's whole output; lines
+                # already journaled are replayed muted and their side effects skipped.
+                proc = ctrl['proc']
+                replay_until = self._journaled_offset(rid)
+                ctrl['replaying'] = True
+                self.store.muted.add(rid)
+            elif launch.get('transport', 'local') == 'local' and launch['protocol'] in ('app-server', 'claude-stream'):
+                self.store.update(rid, status='running', launch_attempted=True)
+                proc = HostedProcess.spawn(self.store._dir(rid) / 'host', launch)
+            else:
+                self.store.update(rid, status='running', launch_attempted=True)
+                proc = subprocess.Popen(launch['argv'], cwd=launch.get('cwd'), env=launch.get('env'),
+                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        text=True, bufsize=1, start_new_session=True)
             ctrl['proc'] = proc
-            ownership = {'process_pid': proc.pid, 'process_identity': process_identity(proc.pid),
-                         'process_transport': launch.get('transport', 'local')}
-            self.store.emit(rid, 'process_started', ownership)
-            self.store.update(rid, **ownership)
-            self.store.emit(rid, 'state', {'status': 'running'})
+            if not reattach:
+                ownership = {'process_pid': proc.pid, 'process_identity': process_identity(proc.pid),
+                             'process_transport': launch.get('transport', 'local')}
+                if isinstance(proc, HostedProcess):
+                    ownership['process_host'] = {'dir': str(proc.dir), 'pid': proc.host_pid}
+                self.store.emit(rid, 'process_started', ownership)
+                self.store.update(rid, **ownership)
+                self.store.emit(rid, 'state', {'status': 'running'})
+            def initialize(obj):
+                try:
+                    self._send(ctrl, obj)
+                except ValueError:
+                    if proc.poll() is None:
+                        raise  # an early exit is reported from the provider's own output
             if ctrl['stop']:
                 self._signal(ctrl, signal.SIGINT)
             elif launch['protocol'] == 'app-server':
-                self._send(ctrl, {'id': 1, 'method': 'initialize', 'params': {
+                initialize({'id': 1, 'method': 'initialize', 'params': {
                     'clientInfo': {'name': 'chat_library', 'title': 'Chat Library', 'version': '1.0'},
-                    'capabilities': {'experimentalApi': False}}})
+                    'capabilities': {'experimentalApi': True}}})
             elif launch['protocol'] == 'claude-stream':
-                self._send(ctrl, {'type': 'control_request', 'request_id': 'initialize',
-                                 'request': {'subtype': 'initialize', 'hooks': {}}})
+                initialize({'type': 'control_request', 'request_id': 'initialize',
+                            'request': {'subtype': 'initialize', 'hooks': {}}})
             else:
                 proc.stdin.write(run['prompt'])
                 proc.stdin.close()
@@ -1275,12 +1539,19 @@ class Broker:
                 if not (run['provider'] == 'claude' and event == 'tool'):
                     self.store.emit(rid, event, data)
             ignored_claude_notification_result = False
-            for line in self._provider_lines(proc, ctrl, stderr, lambda: self._reconcile_native(rid, run, st, ctrl, launch)):
+            def tick():
+                if ctrl.get('replaying') and proc.offset >= replay_until:
+                    self._end_replay(rid, run, ctrl)
+                self._reconcile_native(rid, run, st, ctrl, launch)
+            for line in self._provider_lines(proc, ctrl, stderr, tick):
+                if ctrl.get('replaying') and proc.offset > replay_until:
+                    self._end_replay(rid, run, ctrl)
                 try:
                     ev = json.loads(line)
                 except ValueError:
                     continue
-                self.store.emit(rid, 'provider_event', {'provider': run['provider'], 'event': ev})
+                self.store.emit(rid, 'provider_event', {'provider': run['provider'], 'event': ev,
+                                                        **({'offset': proc.offset} if isinstance(proc, HostedProcess) else {})})
                 if (run.get('operation') == 'remote_control' and ev.get('session_id')
                         and ev['session_id'] != run.get('session_id')):
                     raise ValueError('Remote Control provider reported a different native session; ownership cannot be verified.')
@@ -1375,6 +1646,7 @@ class Broker:
                                 self.store.update(rid, status='remote_idle')
                     if launch['protocol'] == 'claude-stream':
                         self._settle(rid, ctrl)
+            self._end_replay(rid, run, ctrl)
             # Reached only after the user's Stop, an idle close, or provider exit.
             if launch['protocol'] == 'app-server':
                 self._signal(ctrl, signal.SIGTERM)
@@ -1473,9 +1745,11 @@ class Broker:
                     pass
                 for pipe in (proc.stdin, proc.stdout, proc.stderr):
                     try:
-                        pipe.close()
+                        if pipe:
+                            pipe.close()
                     except (OSError, ValueError):
                         pass
+                self._remove_host(self.store.get(rid))
             for handle in ctrl['lockfiles']:
                 handle.close()
             with self.lock:
@@ -1592,10 +1866,19 @@ class Broker:
     def _codex_rpc_locked(self, rid, run, st, ctrl, ev):
         if ev.get('id') == 1 and 'result' in ev:
             self._send(ctrl, {'method': 'initialized', 'params': {}})
-            # Sandbox and approvals come from the account's CODEX_HOME config.toml (2026-11-15):
-            # an unrestricted account may run danger-full-access while workspace-managed
-            # profiles capped by policy use workspace-write + auto_review.
+            ctrl['permission_probe'] = True
+            self._send(ctrl, {'id': 6, 'method': 'permissionProfile/list', 'params': {'cwd': run['cwd']}})
+        elif ev.get('id') == 6 and ctrl.pop('permission_probe', False):
+            # The same app-server that will run the turn resolves requirements
+            # for this account and cwd. Older servers retain their own default.
+            result = ev.get('result') or {}
+            allowed = {row.get('id') for row in result.get('data') or []
+                       if isinstance(row, dict) and row.get('allowed') is True}
+            profile = next((name for name in (':danger-full-access', ':workspace', ':read-only')
+                            if name in allowed), None)
             params = {'cwd': run['cwd']}
+            if profile:
+                params['permissions'] = profile
             if run.get('model'):
                 params['model'] = run['model']
             ctrl['resumed_thread'] = bool(run.get('session_id'))
@@ -1603,13 +1886,18 @@ class Broker:
                 params['threadId'] = run['session_id']
             self._send(ctrl, {'id': 2, 'method': 'thread/resume' if run.get('session_id') else 'thread/start', 'params': params})
         elif ev.get('id') == 2 and 'result' in ev:
-            sid = (ev['result'].get('thread') or {}).get('id')
+            result = ev['result']
+            sid = (result.get('thread') or {}).get('id')
             if not sid:
                 raise ValueError('app-server did not return a thread id')
             ctrl.setdefault('resumed_thread', bool(run.get('session_id')))
             st.sid = sid
-            self.store.update(rid, effective_model=ev['result'].get('model'),
-                              effective_effort=ev['result'].get('reasoningEffort'))
+            active_profile = result.get('activePermissionProfile') or {}
+            self.store.update(rid, effective_model=result.get('model'),
+                              effective_effort=result.get('reasoningEffort'),
+                              effective_permissions=active_profile.get('id') or (result.get('sandbox') or {}).get('type'),
+                              effective_approval_policy=result.get('approvalPolicy'),
+                              effective_approvals_reviewer=result.get('approvalsReviewer'))
             self._bind(rid, run, sid, ctrl)
             # Keep startup open until the authoritative goal receipt arrives.
             # A resumed thread may still have a native goal from an earlier process.
@@ -1860,6 +2148,8 @@ class Broker:
                     (b.get('text') or '' for b in content or [] if isinstance(b, dict) and b.get('type') == 'text'), '')
                 inputs = ctrl.setdefault('claude_inputs', [])
                 match = next((item for item in inputs if item['wire'] == text.strip()), None)
+                if ctrl.get('replaying'):
+                    ctrl.setdefault('replayed_texts', set()).add(text.strip())
                 if match:
                     inputs.remove(match)
                     if match.get('message'):
@@ -1911,7 +2201,7 @@ class Broker:
         Any provider event restarts the countdown.
         """
         with ctrl.setdefault('control_lock', threading.RLock()):
-            if ctrl.get('stop') or ctrl.get('closing'):
+            if ctrl.get('stop') or ctrl.get('closing') or ctrl.get('replaying'):
                 return
             if ctrl.get('remote_disabling') and self._remote_quiescent(ctrl):
                 ctrl['closing'] = True
@@ -2227,7 +2517,7 @@ class Broker:
 
         Never while a steer or queued message is unread or a compaction runs."""
         with ctrl.setdefault('control_lock', threading.RLock()):
-            if (ctrl.get('stop') or ctrl.get('closing') or ctrl.get('remote_disabling')
+            if (ctrl.get('stop') or ctrl.get('closing') or ctrl.get('remote_disabling') or ctrl.get('replaying')
                     or ctrl.get('remote_disconnect_pending') or run.get('operation') == 'compact'):
                 return
             if ctrl.get('auto_compacting'):
@@ -2378,7 +2668,8 @@ class Broker:
             return
         view = self.queue_view(qkey, rid, items=items)
         change = {'action': action, 'item_id': item['id'], 'state': item['state']}
-        if action in ('delivered', 'failed'):
+        # The item travels with every change that takes it out of the queue, so clients keep showing it.
+        if action in ('delivered', 'failed', 'steer'):
             change['item'] = item
         self.store.emit(rid, 'queue', {'key': qkey, 'revision': view['revision'], 'items': view['items'], 'change': change})
 
