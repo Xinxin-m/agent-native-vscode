@@ -2,14 +2,15 @@ import {describe,it,expect} from 'vitest';
 import {stoppableIdle} from './sessionControl';
 import {rowStatus,relativeTime,cutTitle,inSidebarList,statusWords,matchesSessionId,historyChats} from './chats';
 describe('row status priority',()=>{
- it('waiting beats working beats failed beats new; live idle has no mark',()=>{
+ it('failed beats waiting beats working beats new; live idle has no mark',()=>{
   expect(rowStatus('waiting',true)).toBe('waiting');
   expect(rowStatus('working',true)).toBe('working');
   expect(rowStatus('idle',true)).toBe('new');
   expect(rowStatus(null,true)).toBe('new');
   expect(rowStatus('idle',false)).toBe(null);
   expect(rowStatus('idle',true,{failed:true})).toBe('failed');
-  expect(rowStatus('working',false,{failed:true})).toBe('working');
+  expect(rowStatus('working',false,{failed:true})).toBe('failed');
+  expect(rowStatus('waiting',true,{failed:true,running:true})).toBe('failed');
   expect(Object.keys(statusWords).sort()).toEqual(['failed','new','waiting','working']);
   expect(rowStatus(null,false)).toBe(null);
  });

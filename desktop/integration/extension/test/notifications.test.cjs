@@ -165,9 +165,31 @@ test('a failed-run item offers its recovery options as toast buttons; a refused 
  assert.deepEqual(g.shown.at(-1),{kind:'warn',message:'A newer message exists in this chat.',titles:[]});
 });
 
-test('the bell opens the one notifications surface beside the chat; History is its own tab',()=>{
+test('the bell opens Notifications as a tab in the active group; History is its own tab',()=>{
  const {resourceKey}=require('../panes.cjs'),host=require('node:fs').readFileSync(require('node:path').join(__dirname,'../extension.cjs'),'utf8');
  assert.equal(resourceKey({kind:'notifications',title:'Notifications'}),'notifications:');
  assert.equal(resourceKey({kind:'notifications',title:'History',meta:{view:'history'}}),'notifications:history');
- assert.match(host,/command\('library\.notifications',\(\)=>\{const panel=panels\.get\('notifications:'\);if\(panel\)\{panel\.reveal\(panel\.viewColumn,true\);return;\}return open\(\{kind:'notifications',title:'Notifications'\},undefined,vscode\.ViewColumn\.Beside\);\}\);/);
+ assert.match(host,/command\('library\.notifications',\(\)=>\{const panel=panels\.get\('notifications:'\);if\(panel\)\{panel\.reveal\(panel\.viewColumn\);return;\}return open\(\{kind:'notifications',title:'Notifications'\},'tab'\);\}\);/);
+ assert.doesNotMatch(host,/ViewColumn\.Beside/);
+});
+test('Cmd+L opens Notifications in the secondary side bar, or hides the bar when Notifications is showing',()=>{
+ const fs=require('node:fs'),path=require('node:path'),pkg=JSON.parse(fs.readFileSync(path.join(__dirname,'../package.json'),'utf8')),c=pkg.contributes;
+ const host=fs.readFileSync(path.join(__dirname,'../extension.cjs'),'utf8'),boot=fs.readFileSync(path.join(__dirname,'../../ui/src/native/boot.ts'),'utf8');
+ const cmdL=c.keybindings.filter(k=>k.mac==='cmd+l');
+ assert.deepEqual(cmdL.map(k=>[k.command,k.key,k.when]),[['library.toggleNotificationsSidebar','ctrl+l',undefined]]);
+ assert.match(host,/registerCommand\('library\.toggleNotificationsSidebar',\(\)=>vscode\.commands\.executeCommand\(notificationsView\?\.visible\?'workbench\.action\.closeAuxiliaryBar':'library\.notificationsSidebar\.focus'\)\)/);
+ assert.deepEqual(c.viewsContainers.secondarySidebar,[{id:'library-notifications',title:'Notifications',icon:'$(bell)'}]);
+ assert.deepEqual(c.views['library-notifications'],[{id:'library.notificationsSidebar',name:'Notifications',type:'webview'}]);
+ assert.match(host,/registerWebviewViewProvider\('library\.notificationsSidebar',\{resolveWebviewView\(view\)\{notificationsView=view;.*?connect\(view,'notifications',\{kind:'notifications',meta:\{view:'sidebar'\}\},'notifications:sidebar'\);\}\}/);
+ // A focused webview swallows keys, so the UI forwards Cmd+L to the same command.
+ assert.match(boot,/'terminal':'toggleSecondarySidebar'/);
+ assert.match(host,/m\.action==='toggleSecondarySidebar'\)return vscode\.commands\.executeCommand\('library\.toggleNotificationsSidebar'\)/);
+ assert.ok(require('../rpc-flow.cjs')&&/'toggleSecondarySidebar'/.test(fs.readFileSync(path.join(__dirname,'../rpc-flow.cjs'),'utf8')));
+});
+test('an old server answering a new route with an HTML 404 rejects with status 404 and code not_json',async()=>{
+ const http=require('node:http'),bridge=require('../bridge.cjs');
+ const server=http.createServer((req,res)=>{res.writeHead(404,{'Content-Type':'text/html'});res.end('<html>Not found</html>')});
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));
+ try{await assert.rejects(bridge.request('http://127.0.0.1:'+server.address().port+'/','/api/notifications'),e=>e.status===404&&e.data?.code==='not_json');}
+ finally{server.close()}
 });

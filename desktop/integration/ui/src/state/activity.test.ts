@@ -19,3 +19,9 @@ describe("live activity evidence",()=>{
 describe("failed (round 3)",()=>{
  it("is the latest run failing, else the server's failed flag; never while a run is active",()=>{const d={chats:[{key:resource.key,failed:true}]};expect(chatActivity(resource,d).failed).toBe(true);expect(chatActivity(resource,{chats:[{key:resource.key}]},[{id:"r",key:resource.key,status:"failed"}],[],{}).failed).toBe(true);expect(chatActivity(resource,d,[{id:"r",key:resource.key,status:"running"}],[],{}).failed).toBe(false);});
 });
+
+import {rowStatus} from '../navigation/chats';
+it('a chat that was running and then failed shows one mark: failed, until the transcript moves on',()=>{const resource:any={kind:'chat',key:'chat'},session={chat_key:'chat',alive:true,status:'busy',observed_at:Date.now()/1000},run={id:'r',key:'chat',status:'failed',created_at:'2026-11-23T07:03:35Z',finished_at:'2026-11-23T07:03:38Z',failure:{kind:'limit_reached'}};
+ const mark=(ts_last:string)=>{const a=chatActivity(resource,{chats:[{key:'chat',ts_last,live_status:'working',unseen:true}]},[run],[],{},[session]);return rowStatus(a.live,a.unread,{...a,failed:a.failed||a.recovery});};
+ expect(mark('2026-11-23T07:03:38Z')).toBe('failed');
+ expect(mark('2026-11-23T20:28:59Z')).toBe('working');});

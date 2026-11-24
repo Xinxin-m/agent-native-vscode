@@ -1,5 +1,5 @@
 import {describe,it,expect,vi} from 'vitest';
-import {emptyRun,replayEvents,runOutput,refreshRun,loadEarlierEvents} from './runs';
+import {emptyRun,replayEvents,runOutput,refreshRun,loadEarlierEvents,ingestRun,subscribeRun} from './runs';
 import {createConversationStore} from './conversations';
 import {sharedRunPatch} from '../chat/sharedRuns';
 describe('bounded initial journal replay',()=>{
@@ -18,6 +18,27 @@ describe('bounded initial journal replay',()=>{
    return new Response(JSON.stringify({run:{id:'tail-pagination',status:'running',text:'Full output',last_seq:5001},events:earlier?[{seq:4998,event:'tool',data:{name:'Earlier tool'}}]:initial?[{seq:5001,event:'tool_result',data:{content:'kept result'}}]:[],events_truncated_before:initial?5001:earlier?null:null}));
   });
   try{let state=await refreshRun('tail-pagination');expect(state.truncatedBefore).toBe(5001);state=await refreshRun('tail-pagination');expect(state.truncatedBefore).toBe(5001);expect(calls).toHaveLength(2);state=await loadEarlierEvents('tail-pagination');expect(calls[2]).toContain('before=5001');expect(state.events.map(e=>e.seq)).toEqual([4998,5001]);expect(state.cursor).toBe(5001);expect(state.truncatedBefore).toBeNull();expect(runOutput(state)).toBe('Full output')}finally{vi.unstubAllGlobals()}
+ });
+ it('keeps a long-open live run at the same journal size a fresh load gets',()=>{
+  // A fresh load receives the newest 2000 events. A tab left open while the run streams must not keep more.
+  let state=replayEvents(emptyRun('long'),[],{id:'long',status:'running',text:'',last_seq:0});
+  for(let seq=1;seq<=6000;seq++){state=replayEvents(state,[{seq,event:seq%3?'provider_event':'delta',data:{text:'x'}}]);if(seq%1000===0)state=replayEvents(state,[],{id:'long',status:'running',text:'x'.repeat(seq/3),last_seq:seq});}
+  state=replayEvents(state,[{seq:6001,event:'delta',data:{text:'!'}}]);
+  expect(state.events.length).toBeLessThanOrEqual(2001);expect(state.events.at(-1)?.seq).toBe(6001);
+  expect(state.truncatedBefore).toBe(state.events[0].seq);expect(runOutput(state)).toBe('x'.repeat(2000)+'!');
+ });
+ it('never drops events the output snapshot does not cover',()=>{
+  let state=emptyRun('nosnap');for(let seq=1;seq<=3000;seq++)state=replayEvents(state,[{seq,event:'delta',data:{text:'y'}}]);
+  expect(state.events.length).toBe(3000);expect(runOutput(state)).toBe('y'.repeat(3000));
+ });
+ it('renders a burst of streamed events once, not once per event',()=>{
+  // The event stream arrives in bursts of hundreds; one render per event blocked the page for seconds.
+  vi.useFakeTimers();vi.stubGlobal('localStorage',{getItem:()=>null,setItem:()=>{},length:0,key:()=>null});
+  try{let renders=0;const stop=subscribeRun('burst',()=>renders++);
+   for(let seq=1;seq<=300;seq++)ingestRun({id:'burst',status:'running'},[{seq,event:'delta',data:{text:'x'}}]);
+   expect(renders).toBeLessThanOrEqual(1);vi.advanceTimersByTime(150);expect(renders).toBe(2);
+   ingestRun({id:'burst',status:'completed'},[]);vi.advanceTimersByTime(150);expect(renders).toBe(3);stop();
+  }finally{vi.useRealTimers();vi.unstubAllGlobals()}
  });
  it('summary reconciliation preserves drafts, attachments and unconfirmed request identity',()=>{
   const values=new Map<string,string>(),disk={getItem:(key:string)=>values.get(key)||null,setItem:(key:string,value:string)=>{values.set(key,value)}},store=createConversationStore(disk);

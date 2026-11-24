@@ -33,7 +33,7 @@
 /* Sidebar A (2026-11-22): one list, two-line rows, one 28 px mark column so titles share one left edge. */
 .sidebar{padding:0 8px;gap:0}
 .sidebar .sidebar-header{min-height:44px;padding:0;gap:2px}
-.sidebar .sidebar-header .icon-button,.sidebar .sidebar-header-actions .icon-button,.sidebar .sidebar-header .sidebar-toggle{width:28px;height:28px;border-radius:var(--r-s,6px)}
+.sidebar .sidebar-header .icon-button,.sidebar .sidebar-header .sidebar-toggle{width:28px;height:28px;border-radius:var(--r-s,6px)}
 .sidebar .sidebar-header .sidebar-modes button{padding:0 9px;height:28px;font-size:12.5px}
 .sidebar .icon-button.is-spinning svg{animation:mk-spin .9s linear infinite}
 .sidebar .sidebar-scroll{padding-bottom:12px}
@@ -108,3 +108,15 @@
 .sidebar .search-modes small{margin-left:auto;margin-right:7px}
 /* Menu rows share one text edge whether or not a row has an icon. */
 .context-menu:has(button>svg) :is(button,summary):not(:has(>svg)):not(:has(>.menu-check)):not(details button){padding-left:32px}
+
+/* Round 5 (item 48): the search, refresh and new chat icons sit at the right of the first heading row of a tab, never in the tab row. */
+.sidebar{container:sidebar/inline-size}
+.sidebar .sidebar-row-actions{display:flex;align-items:center;gap:1px;flex:none;margin-left:auto}
+.sidebar .section-label>.sidebar-row-actions:last-child{margin-right:2px}
+.sidebar .section-label .sidebar-row-actions .icon-button{width:28px;height:28px;margin:0;border-radius:var(--r-s,6px);color:var(--muted)}
+.sidebar .section-label .sidebar-row-actions .icon-button:hover{color:var(--ink);background:var(--hover)}
+.sidebar .section-label .sidebar-row-actions .icon-button[aria-expanded=true]{background:var(--hover);color:var(--ink)}
+.sidebar .projects-label{flex:none}
+.sidebar .projects-label .section-heading{font-size:12px;font-weight:600;color:var(--muted);padding:2px 0}
+.sidebar .projects-label .section-heading:hover{color:var(--ink)}
+.sidebar .projects-label~.search-field{margin-bottom:6px}

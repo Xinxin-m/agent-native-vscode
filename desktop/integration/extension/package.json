@@ -100,6 +100,11 @@
         "icon": "$(bell)"
       },
       {
+        "command": "library.toggleNotificationsSidebar",
+        "title": "Toggle Notifications Side Bar",
+        "category": "Library"
+      },
+      {
         "command": "library.accounts",
         "title": "Accounts",
         "category": "Library",
@@ -181,6 +186,13 @@
           "title": "Chats",
           "icon": "library.svg"
         }
+      ],
+      "secondarySidebar": [
+        {
+          "id": "library-notifications",
+          "title": "Notifications",
+          "icon": "$(bell)"
+        }
       ]
     },
     "views": {
@@ -190,13 +202,20 @@
           "name": "Chats",
           "type": "webview"
         }
+      ],
+      "library-notifications": [
+        {
+          "id": "library.notificationsSidebar",
+          "name": "Notifications",
+          "type": "webview"
+        }
       ]
     },
     "menus": {
       "editor/title": [
         {
           "command": "library.arrange",
-          "group": "1_library@1"
+          "group": "z_library@1"
         }
       ],
       "view/title": [],
@@ -398,9 +417,14 @@
         "mac": "cmd+t"
       },
       {
-        "command": "library.show",
+        "command": "library.toggleNotificationsSidebar",
         "key": "ctrl+l",
         "mac": "cmd+l"
+      },
+      {
+        "command": "library.show",
+        "key": "ctrl+alt+l",
+        "mac": "cmd+alt+l"
       },
       {
         "command": "library.groupChatsByProject",

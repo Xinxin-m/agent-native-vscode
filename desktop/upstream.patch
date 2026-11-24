@@ -258,31 +258,18 @@ index 4156d1c9a3f..dd0d9987e26 100644
  	CreateToggleLayoutItem(ToggleStatusbarVisibilityAction.ID, ContextKeyExpr.equals('config.workbench.statusBar.visible', true), localize('statusBar', "Status Bar"), statusBarIcon),
  ]);
 diff --git a/src/vs/workbench/browser/layout.ts b/src/vs/workbench/browser/layout.ts
-index 2e7e9e7cb31..fe7570e9ffd 100644
+index 2e7e9e7cb31..8fad7e43c51 100644
 --- a/src/vs/workbench/browser/layout.ts
 +++ b/src/vs/workbench/browser/layout.ts
 @@ -2275,6 +2275,7 @@ export abstract class Layout extends Disposable implements IWorkbenchLayoutServi
  
  	setAuxiliaryBarMaximized(maximized: boolean): boolean {
  		if (
-+			maximized ||									// Library Code has no secondary side bar
++			maximized ||									// Library Code never maximizes the secondary side bar
  			this.inMaximizedAuxiliaryBarTransition ||		// prevent re-entrance
  			(maximized === this.isAuxiliaryBarMaximized())	// return early if state is already present
  		) {
-@@ -2389,7 +2390,11 @@ export abstract class Layout extends Disposable implements IWorkbenchLayoutServi
- 	}
- 
- 	private setAuxiliaryBarHidden(hidden: boolean, skipLayout?: boolean): void {
--		if (hidden && this.setAuxiliaryBarMaximized(false) && !this.isVisible(Parts.AUXILIARYBAR_PART)) {
-+		if (!hidden) {
-+			return; // Library Code has no secondary side bar
-+		}
-+
-+		if (hidden &&this.setAuxiliaryBarMaximized(false) && !this.isVisible(Parts.AUXILIARYBAR_PART)) {
- 			return; // return: leaving maximised auxiliary bar made this part hidden
- 		}
- 
-@@ -3123,7 +3128,7 @@ const LayoutStateKeys = {
+@@ -3123,7 +3124,7 @@ const LayoutStateKeys = {
  	}),
  
  	// Part Sizing
@@ -291,7 +278,7 @@ index 2e7e9e7cb31..fe7570e9ffd 100644
  	AUXILIARYBAR_SIZE: new InitializationStateKey<number>('auxiliaryBar.size', StorageScope.PROFILE, StorageTarget.MACHINE, 300),
  	PANEL_SIZE: new InitializationStateKey<number>('panel.size', StorageScope.PROFILE, StorageTarget.MACHINE, 300),
  
-@@ -3270,7 +3275,7 @@ class LayoutStateModel extends Disposable {
+@@ -3270,7 +3271,7 @@ class LayoutStateModel extends Disposable {
  		const auxiliaryBarForceMaximized = this.configurationService.getValue(WorkbenchLayoutSettings.AUXILIARYBAR_FORCE_MAXIMIZED);
  		const workbenchState = this.contextService.getWorkbenchState();
  		const mainContainerDimension = configuration.mainContainerDimension;
@@ -300,18 +287,18 @@ index 2e7e9e7cb31..fe7570e9ffd 100644
  		LayoutStateKeys.SIDEBAR_HIDDEN.defaultValue = workbenchState === WorkbenchState.EMPTY || auxiliaryBarForceMaximized === true;
  		LayoutStateKeys.AUXILIARYBAR_SIZE.defaultValue = auxiliaryBarForceMaximized ? Math.max(300, mainContainerDimension.width / 2) : Math.min(300, mainContainerDimension.width / 4);
  		LayoutStateKeys.AUXILIARYBAR_HIDDEN.defaultValue = (() => {
-@@ -3355,6 +3360,10 @@ class LayoutStateModel extends Disposable {
+@@ -3355,6 +3356,10 @@ class LayoutStateModel extends Disposable {
  			}
  		}
  
-+		// Library Code has no secondary side bar, even if a stored layout had one
++		// Library Code starts with the secondary side bar hidden, even if a stored layout had it open; Cmd+L shows Notifications there
 +		this.setRuntimeValue(LayoutStateKeys.AUXILIARYBAR_HIDDEN, true);
 +		this.setRuntimeValue(LayoutStateKeys.AUXILIARYBAR_WAS_LAST_MAXIMIZED, false);
 +
  		// Both editor and panel should not be hidden on startup unless auxiliary bar is maximized
  		if (
  			this.getRuntimeValue(LayoutStateKeys.PANEL_HIDDEN) &&
-@@ -3366,7 +3375,7 @@ class LayoutStateModel extends Disposable {
+@@ -3366,7 +3371,7 @@ class LayoutStateModel extends Disposable {
  
  		// Restrict auxiliary bar size in case of small window dimensions
  		if (this.isNew[StorageScope.WORKSPACE] && configuration.mainContainerDimension.width <= DEFAULT_WORKSPACE_WINDOW_DIMENSIONS.width) {
@@ -678,7 +665,7 @@ index 19346c2741b..cec4b6c16d6 100644
  			icon: maximizeIcon,
  			toggled: {
 diff --git a/src/vs/workbench/browser/parts/editor/editor.contribution.ts b/src/vs/workbench/browser/parts/editor/editor.contribution.ts
-index 5a31ed48c37..c53e49bd9c7 100644
+index 5a31ed48c37..9d01fa2e0dd 100644
 --- a/src/vs/workbench/browser/parts/editor/editor.contribution.ts
 +++ b/src/vs/workbench/browser/parts/editor/editor.contribution.ts
 @@ -3,6 +3,7 @@
@@ -689,6 +676,17 @@ index 5a31ed48c37..c53e49bd9c7 100644
  import { Registry } from '../../../../platform/registry/common/platform.js';
  import { localize, localize2 } from '../../../../nls.js';
  import { IEditorPaneRegistry, EditorPaneDescriptor } from '../../editor.js';
+@@ -510,8 +511,8 @@ MenuRegistry.appendMenuItem(MenuId.DiffEditorViewSubmenu, {
+ 	when: EditorContextKeys.diffEditorTemporaryInlineMode,
+ });
+ MenuRegistry.appendMenuItem(MenuId.EditorTitle, { command: { id: SHOW_EDITORS_IN_GROUP, title: localize('showOpenedEditors', "Show Opened Editors") }, group: '3_open', order: 10, when: EditorPartModalContext.toNegated() /* not applicable to modal editor */ });
+-MenuRegistry.appendMenuItem(MenuId.EditorTitle, { command: { id: CLOSE_EDITORS_IN_GROUP_COMMAND_ID, title: localize('closeAll', "Close All") }, group: '5_close', order: 10, when: EditorPartModalContext.toNegated() /* not applicable to modal editor */ });
+-MenuRegistry.appendMenuItem(MenuId.EditorTitle, { command: { id: CLOSE_SAVED_EDITORS_COMMAND_ID, title: localize('closeAllSaved', "Close Saved") }, group: '5_close', order: 20, when: EditorPartModalContext.toNegated() /* not applicable to modal editor */ });
++MenuRegistry.appendMenuItem(MenuId.EditorTitle, { command: { id: CLOSE_EDITORS_IN_GROUP_COMMAND_ID, title: localize('closeAll', "Close All") }, group: '0_close', order: 10, when: EditorPartModalContext.toNegated() /* not applicable to modal editor */ });
++MenuRegistry.appendMenuItem(MenuId.EditorTitle, { command: { id: CLOSE_SAVED_EDITORS_COMMAND_ID, title: localize('closeAllSaved', "Close Saved") }, group: '0_close', order: 20, when: EditorPartModalContext.toNegated() /* not applicable to modal editor */ });
+ MenuRegistry.appendMenuItem(MenuId.EditorTitle, { command: { id: TOGGLE_KEEP_EDITORS_COMMAND_ID, title: localize('togglePreviewMode', "Enable Preview Editors"), toggled: ContextKeyExpr.has('config.workbench.editor.enablePreview') }, group: '7_settings', order: 10, when: EditorPartModalContext.toNegated() /* not applicable to modal editor */ });
+ MenuRegistry.appendMenuItem(MenuId.EditorTitle, { command: { id: TOGGLE_MAXIMIZE_EDITOR_GROUP, title: localize('maximizeGroup', "Maximize Group") }, group: '8_group_operations', order: 5, when: ContextKeyExpr.and(EditorPartMaximizedEditorGroupContext.negate(), EditorPartMultipleEditorGroupsContext) });
+ MenuRegistry.appendMenuItem(MenuId.EditorTitle, { command: { id: TOGGLE_MAXIMIZE_EDITOR_GROUP, title: localize('unmaximizeGroup', "Unmaximize Group") }, group: '8_group_operations', order: 5, when: EditorPartMaximizedEditorGroupContext });
 @@ -1258,3 +1259,9 @@ MenuRegistry.appendMenuItem(MenuId.MenubarGoMenu, {
  
  
@@ -1641,7 +1639,7 @@ index 83595a02372..f2724a17058 100644
  			const visibleViewContainer = this.paneCompositePart.getActivePaneComposite();
  			if (visibleViewContainer?.getId() === viewContainer.id) {
 diff --git a/src/vs/workbench/browser/parts/paneCompositePartService.ts b/src/vs/workbench/browser/parts/paneCompositePartService.ts
-index e10cad54ce5..d0df3ba0d7d 100644
+index e10cad54ce5..00afd603f06 100644
 --- a/src/vs/workbench/browser/parts/paneCompositePartService.ts
 +++ b/src/vs/workbench/browser/parts/paneCompositePartService.ts
 @@ -7,6 +7,7 @@ import { Event } from '../../../base/common/event.js';
@@ -1664,8 +1662,8 @@ index e10cad54ce5..d0df3ba0d7d 100644
  	}
  
  	openPaneComposite(id: string | undefined, viewContainerLocation: ViewContainerLocation, focus?: boolean): Promise<IPaneComposite | undefined> {
-+		if (viewContainerLocation === ViewContainerLocation.AuxiliaryBar) {
-+			// Library Code has no secondary side bar: the Library extension opens agent chats as editor tabs instead.
++		if (viewContainerLocation === ViewContainerLocation.AuxiliaryBar && id !== 'workbench.view.extension.library-notifications') {
++			// The secondary side bar holds only Library Notifications; other agent chats open as editor tabs instead.
 +			if (id) {
 +				this.commandService.executeCommand('_library.openAgentChat', id).catch(() => { });
 +			}

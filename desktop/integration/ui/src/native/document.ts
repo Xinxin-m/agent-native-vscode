@@ -9,6 +9,7 @@ import TaskItem from '@tiptap/extension-task-item';
 import {InlineMathWithParens,BlockMathWithBrackets} from './mathExtensions';
 import 'katex/dist/katex.min.css';
 import './document.css';
+import {PINCH_JS} from './pinch';
 declare const acquireVsCodeApi:any;
 const host=acquireVsCodeApi(),boot=(window as any).__DOCUMENT_BOOT__;
 let version=boot.version,editor:Editor,loading=false,inFlight=false,queued:any=null,latestDraft:any=null,saveRequested=false,frontmatter="",markdownBase="";
@@ -34,7 +35,7 @@ function renderHtml(snapshot:any){
  const nonce=crypto.randomUUID(),payload=JSON.stringify({nodes:snapshot.model.nodes.map((n:any)=>({id:n.id,path:n.path,text:n.text})),nonce,readOnly:boot.readOnly}).replace(/</g,'\\u003c');
  const script=`(()=>{const config=${payload};const changed=new Map();for(const item of config.nodes){let n=document;for(const index of item.path)n=n?.childNodes[index];if(!n||n.nodeType!==3||n.nodeValue!==item.text)continue;const span=document.createElement('span');span.textContent=n.nodeValue;span.contentEditable=config.readOnly?'false':'plaintext-only';span.dataset.libraryEditable=item.id;span.style.whiteSpace='pre-wrap';span.setAttribute('aria-label','Edit text');n.replaceWith(span);span.addEventListener('input',()=>{changed.set(item.id,span.textContent);parent.postMessage({type:'html-edit',nonce:config.nonce,changes:[...changed].map(([id,text])=>({id,text}))},'*')});}document.addEventListener('click',e=>{const a=e.target.closest('a');if(a&&e.target.isContentEditable)e.preventDefault()});})()`;
  // No privileged host API exists in this isolated frame. Only validated text IDs leave it.
- frame.srcdoc=snapshot.preview+`<script nonce="${snapshot.nonce}">${script}<\/script>`;
+ frame.srcdoc=snapshot.preview+`<script nonce="${snapshot.nonce}">${script}<\/script><script nonce="${snapshot.nonce}">${PINCH_JS}<\/script>`;
  const listener=(e:MessageEvent)=>{if(e.source===frame.contentWindow&&e.data?.type==='html-edit'&&e.data.nonce===nonce)send({changes:e.data.changes,baseHash:snapshot.model.hash});};window.addEventListener('message',listener);disposeFrame=()=>window.removeEventListener('message',listener);
 }
 const recovered=host.getState()?.draft;if(recovered){latestDraft=recovered;document.getElementById('recover')!.hidden=false;status.textContent='An unsaved draft is available.';}

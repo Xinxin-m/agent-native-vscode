@@ -54,7 +54,7 @@ function createReadCache(send,{now=Date.now,maxEntries=16,sendState,stateGap=500
  }
  return {request,invalidate};
 }
-const parallelActions=new Set(['subscribe','unsubscribe','tabIdentityReady','title','terminal','showChats','toggleSidebar','advancedEditor','confirm','sessionDetails','models','imageResource']);
+const parallelActions=new Set(['subscribe','unsubscribe','tabIdentityReady','title','terminal','toggleSecondarySidebar','toggleSidebar','advancedEditor','confirm','sessionDetails','models','imageResource']);
 function createDispatcher(handle){
  let mutations=Promise.resolve(),opens=Promise.resolve();
  return message=>{

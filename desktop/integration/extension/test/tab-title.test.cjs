@@ -7,7 +7,7 @@ test('chat tab title is the full title (tooltip); the core tab bar cuts the labe
  assert.equal(tabTitle('x'.repeat(40)),'x'.repeat(40));
  assert.equal(tabTitle('z'.repeat(200)).length,150);
  assert.equal(tabTitle('  Fix   the\nsidebar  '),'Fix the sidebar');
- assert.equal(tabTitle(''),'Conversation');assert.equal(tabTitle(undefined,'New conversation'),'New conversation');
+ assert.equal(tabTitle(''),'New chat');assert.equal(tabTitle(undefined),'New chat');
  const core=read('../../../vscode/src/vs/workbench/browser/parts/editor/multiEditorTabsControl.ts');
  assert.match(core,/name\.length > 24 && editor\.editorId === 'mainThreadWebview-library\.conversation'\) \{\n\t\t\tname = name\.slice\(0, 24\)\.trimEnd\(\) \+ '\\u2026';/);
  assert.match(core,/title: this\.getHoverTitle\(editor\)/,'tooltip keeps the full title');
@@ -24,6 +24,14 @@ test('every place that names a Library chat tab uses tabTitle',()=>{
  assert.match(host,/m\.action==='title'\)\{if\('title' in view&&typeof m\.title==='string'\)view\.title=kind==='chat'\?tabTitle\(m\.title\)/);
  assert.equal((host.match(/view\.title=tabTitle\(next\.title\)/g)||[]).length,2,'history pick and agent tree replace');
  assert.doesNotMatch(host,/view\.title=next\.title/);
+});
+test('a new chat tab is "New chat" and the first message never becomes its title',()=>{
+ const host=read('../extension.cjs'),conv=read('../../ui/src/chat/Conversation.tsx');
+ assert.doesNotMatch(host,/New conversation/);
+ assert.match(host,/createWebviewPanel\('library\.conversation',resource\.kind==='chat'\?tabTitle\(resource\.title\):/);
+ assert.doesNotMatch(conv,/updateTitle\?\.\(resource,\(result\.run\.message/);
+ assert.doesNotMatch(conv,/title_seed\)wb\.updateTitle/);
+ assert.match(conv,/if\(value\.title\)wb\.updateTitle\?\.\(resource,value\.title\)/);
 });
 test('an open chat tab follows retitling: it re-sends the server title whenever it changes',()=>{
  const ui=read('../../ui/src/native/main.tsx');

@@ -4,6 +4,7 @@ import {ChevronLeft,ExternalLink,MoreHorizontal,X} from 'lucide-react';
 import {api,query} from '../api/client';
 import {StatusMark} from '../ui/StatusMark';
 import {rowStatus} from '../navigation/chats';
+import {firstLine,type UserPrompt} from './userPrompts';
 import './agent-map.css';
 
 export type AgentStatus='running'|'waiting'|'idle'|'finished'|'stopped'|'failed'|'unknown';
@@ -60,9 +61,10 @@ export function agentCounts(items:AgentItem[]){
 const ago=(ts:string)=>{const t=Date.parse(ts);if(!t)return '';const s=Math.max(0,(Date.now()-t)/1000);return s<60?'just now':s<3600?Math.round(s/60)+' min ago':s<86400?Math.round(s/3600)+' h ago':Math.round(s/86400)+' d ago'};
 const chatResource=(node:any)=>({kind:'chat' as const,key:node.key,title:node.title,meta:node});
 type ChatSlot={lead:React.ReactNode;actions:React.ReactNode;status:React.ReactNode};
-export function AgentMap({sessionKey,selected,onOpen,onClose,renderChat,mode='popup'}:{sessionKey:string;selected:string;onOpen:(node:any,where:Exclude<OpenWhere,'preview'>)=>void;onClose:()=>void;renderChat?:(resource:any,slot:ChatSlot)=>React.ReactNode;mode?:'popup'|'inline'}){
+export function AgentMap({sessionKey,selected,onOpen,onClose,renderChat,mode='popup',prompts,onPrompt}:{sessionKey:string;selected:string;onOpen:(node:any,where:Exclude<OpenWhere,'preview'>)=>void;onClose:()=>void;renderChat?:(resource:any,slot:ChatSlot)=>React.ReactNode;mode?:'popup'|'inline';prompts?:UserPrompt[];onPrompt?:(index:number)=>void}){
  const [tree,setTree]=useState<any>(null),[live,setLive]=useState<any>(null),[runs,setRuns]=useState<any[]>([]),[error,setError]=useState('');
  const [retry,setRetry]=useState(0),[preview,setPreview]=useState<any>(null),[menu,setMenu]=useState<{node:any;x:number;y:number;from:HTMLElement|null}|null>(null),[focusKey,setFocusKey]=useState(selected);
+ const [tab,setTab]=useState<'tree'|'prompts'>('tree'),promptList=useRef<HTMLOListElement>(null);
  const titleId=useId(),dialog=useRef<HTMLDivElement>(null),menuRef=useRef<HTMLDivElement>(null),close=useRef(onClose);close.current=onClose;
  const state=useRef({preview,menu});state.current={preview,menu};
  useEffect(()=>{
@@ -101,6 +103,8 @@ export function AgentMap({sessionKey,selected,onOpen,onClose,renderChat,mode='po
  useEffect(()=>{if(mode!=='popup')return;const dismiss=(e:Event)=>{if((e as CustomEvent).detail!=='escape')close.current()};window.addEventListener('workbench-dismiss-popovers',dismiss);return()=>window.removeEventListener('workbench-dismiss-popovers',dismiss)},[mode]);
  useLayoutEffect(()=>{if(!menu||!menuRef.current)return;const box=menuRef.current.getBoundingClientRect();if(box.right>innerWidth-8||box.bottom>innerHeight-8)setMenu(m=>m&&{...m,x:Math.max(8,Math.min(m.x,innerWidth-box.width-8)),y:Math.max(8,Math.min(m.y,innerHeight-box.height-8))});menuRef.current.querySelector<HTMLElement>('[role=menuitem]')?.focus()},[menu?.node?.key,menu?.x,menu?.y]);
  useEffect(()=>{if(!menu)return;const down=(e:PointerEvent)=>{if(!menuRef.current?.contains(e.target as Node))closeMenu(false)};document.addEventListener('pointerdown',down,true);return()=>document.removeEventListener('pointerdown',down,true)},[menu]);
+ // My prompts opens at the newest prompt, at the bottom.
+ useLayoutEffect(()=>{if(tab==='prompts'&&promptList.current)promptList.current.scrollTop=promptList.current.scrollHeight},[tab,prompts?.length]);
  const nodes=tree?.nodes||[],edges=tree?.edges||[];
  const items=orderAgentTree(nodes,edges,node=>agentMapStatus(node,runs,live)),counts=agentCounts(items);
  const flat:any[]=[];const walk=(list:AgentItem[])=>list.forEach(i=>{flat.push(i.node);walk(i.children)});walk(items);
@@ -127,10 +131,12 @@ export function AgentMap({sessionKey,selected,onOpen,onClose,renderChat,mode='po
  const sc:Record<string,number>=tree?.counts?{running:tree.counts.working,waiting:tree.counts.waiting,idle:tree.counts.idle,finished:tree.counts.finished,stopped:tree.counts.stopped,failed:tree.counts.failed,unknown:tree.counts.unknown}:counts;
  const summary=[sc.running&&sc.running+' working',sc.waiting&&sc.waiting+' waiting',sc.idle&&sc.idle+' idle',sc.finished&&sc.finished+' finished',sc.stopped&&sc.stopped+' stopped',sc.failed&&sc.failed+' failed',sc.unknown&&sc.unknown+' unknown'].filter(Boolean).join(', ');
  const treeColumn=<div className="agent-map-tree">
-  <header><div><h2 id={titleId}>Agent tree</h2><p>{tree?summary||'No agents':'Loading…'}</p></div>{mode==='popup'&&<button type="button" className="agent-map-icon" aria-label="Close agent tree" title="Close (Esc)" onClick={onClose}><X size={16}/></button>}</header>
+  <header><div>{prompts?<div className="agent-map-tabs" role="tablist" aria-label="Agent tree views"><button type="button" role="tab" id={titleId} aria-selected={tab==='tree'} onClick={()=>setTab('tree')}>Agent tree</button><button type="button" role="tab" aria-selected={tab==='prompts'} onClick={()=>setTab('prompts')}>My prompts</button></div>:<h2 id={titleId}>Agent tree</h2>}<p>{tab==='prompts'?`${prompts?.length||0} ${prompts?.length===1?'prompt':'prompts'} in this chat`:tree?summary||'No agents':'Loading…'}</p></div>{mode==='popup'&&<button type="button" className="agent-map-icon" aria-label="Close agent tree" title="Close (Esc)" onClick={onClose}><X size={16}/></button>}</header>
+  {tab==='prompts'?(prompts?.length?<ol className="agent-map-scroll agent-map-prompts" ref={promptList} aria-label="My prompts">{prompts.map((p,i)=><li key={i}><button type="button" title={p.text.slice(0,600)} onClick={()=>onPrompt?.(i)}><span>{firstLine(p.text,200)}</span>{p.ts&&Date.parse(p.ts)?<small>{new Date(p.ts).toLocaleString([],{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})}</small>:null}</button></li>)}</ol>:<p className="agent-map-note">No prompts in this chat yet.</p>):<>
   {error&&<p role="alert" className="agent-map-note">{error} <button type="button" onClick={()=>setRetry(v=>v+1)}>Retry</button></p>}
   {!tree&&!error&&<p role="status" className="agent-map-note">Loading agent tree…</p>}
   {tree&&<div className="agent-map-scroll">{items.length?<ul className="agent-map-roots" aria-labelledby={titleId}>{items.map(i=>branch(i,0))}</ul>:<p className="agent-map-note">No explicit agent lineage found.</p>}</div>}
+  </>}
  </div>;
  const previewStatus=preview&&(flat.find(n=>n.key===preview.key)?agentMapStatus(flat.find(n=>n.key===preview.key),runs,live):'unknown');
  const chat=preview&&renderChat?<div className="agent-map-chat" key={preview.key}>{renderChat(chatResource(preview),{
@@ -141,6 +147,6 @@ export function AgentMap({sessionKey,selected,onOpen,onClose,renderChat,mode='po
   <button type="button" role="menuitem" onClick={()=>act(menu.node,'tab')}>Open in new tab</button>
   <button type="button" role="menuitem" onClick={()=>act(menu.node,'current')}>Open in current tab</button>
  </div>;
- const content=<div className={'agent-map'+(mode==='inline'?' is-inline':'')+(chat?' has-chat':'')} role={mode==='popup'?'dialog':'region'} aria-modal={mode==='popup'?true:undefined} aria-labelledby={titleId} ref={dialog} tabIndex={-1} onPointerDown={mode==='inline'?e=>e.stopPropagation():undefined}>{treeColumn}{chat}{menuNode}</div>;
+ const content=<div className={'agent-map'+(mode==='inline'?' is-inline':'')+(chat?' has-chat':'')} role={mode==='popup'?'dialog':'region'} aria-modal={mode==='popup'?true:undefined} aria-label="Agent tree" ref={dialog} tabIndex={-1} onPointerDown={mode==='inline'?e=>e.stopPropagation():undefined}>{treeColumn}{chat}{menuNode}</div>;
  return mode==='popup'?createPortal(<div className="agent-map-overlay" onMouseDown={e=>{if(e.target===e.currentTarget)onClose()}}>{content}</div>,document.body):content;
 }

@@ -1,7 +1,7 @@
 import {AccountWarning} from '../chat/RecoveryCard';
 import {resetCountdown,usageSnapshot} from './quotaReset';
 import {useEffect,useRef,useState} from 'react';
-import {api} from '../api/client';
+import {api,available} from '../api/client';
 import {useWorkbench} from '../state/context';
 import {accountRows,displayName,secondaryEmail,barHot,cleanPercent} from './accountRows';
 import {Plus,RefreshCw,Trash2,Copy} from 'lucide-react';
@@ -18,7 +18,9 @@ export function AccountsPanel({onGitHubAccounts}:{onGitHubAccounts?:(connect?:bo
  const [github,setGithub]=useState<{id:string,label:string}[]|null>(null),[githubError,setGithubError]=useState(''),[githubBusy,setGithubBusy]=useState(false),[loaded,setLoaded]=useState(false);
  async function loadGithub(connect=false){if(!onGitHubAccounts)return;const request=++githubRequest.current;setGithubBusy(true);setGithubError('');try{const response=await onGitHubAccounts(connect);if(!Array.isArray(response?.accounts))throw Error('GitHub returned an invalid account list. Try refreshing.');if(request===githubRequest.current)setGithub(response.accounts);}catch(e:any){if(request===githubRequest.current)setGithubError(e.message||'Could not load GitHub accounts');}finally{if(request===githubRequest.current)setGithubBusy(false);}}
  const {refresh,notify,open}=useWorkbench();const [value,setValue]=useState<any>({accounts:[],pending_accounts:[]}),[busy,setBusy]=useState(''),[error,setError]=useState(''),[adding,setAdding]=useState(false),[tool,setTool]=useState('claude'),[name,setName]=useState(''),[addError,setAddError]=useState(''),[login,setLogin]=useState<any>(null),[code,setCode]=useState(''),[showLink,setShowLink]=useState(false),[emailHint,setEmailHint]=useState('');
- const [editing,setEditing]=useState<{id:string,value:string,error?:string}|null>(null),[note,setNote]=useState<{id:string,text:string,force?:boolean}|null>(null),[noRename,setNoRename]=useState(false),[noLogout,setNoLogout]=useState(false);
+ const [editing,setEditing]=useState<{id:string,value:string,error?:string}|null>(null),[note,setNote]=useState<{id:string,text:string,force?:boolean}|null>(null),[renameMissing,setNoRename]=useState(false),[logoutMissing,setNoLogout]=useState(false);
+ // Read on every render: an older server is known only once /api/state has arrived, which can be after this tab mounts.
+ const noRename=renameMissing||!available('/api/accounts/rename'),noLogout=logoutMissing||!available('/api/accounts/logout');
  const loginRef=useRef<any>(null),skipBlur=useRef(false);loginRef.current=login;
  function accountLogin(row:any){
   if(!row)return null;
@@ -140,7 +142,7 @@ export function AccountsPanel({onGitHubAccounts}:{onGitHubAccounts?:(connect?:bo
    {a.plan&&<span className="plan">{a.plan}</span>}{secondaryEmail(a)&&<div className="em">{secondaryEmail(a)}</div>}
    {editing?.id===a.id&&editing.error&&<div className="inline-error" role="alert">{editing.error}</div>}
    {signedIn?<div className="snap">{[a.org?.toLowerCase()===a.email?.toLowerCase()+"'s organization"?'':a.org,usageSnapshot(a,now).label].filter(Boolean).join(' · ')}</div>:<div className="snap">Signed out</div>}
-  </div><div className="account-actions">{!a.is_default&&!a.global&&<IconButton label={'Remove '+(a.email||a.label)} disabled={!!busy} onClick={()=>remove(a)}><Trash2 size={15}/></IconButton>}{signedIn&&!noLogout?<button disabled={!!busy} onClick={()=>signOut(a)}>Sign out</button>:<button disabled={!!busy} onClick={()=>action(a.id,'login')}>Sign in again</button>}</div></div>
+  </div><div className="account-actions">{!a.is_default&&!a.global&&<IconButton label={'Remove '+(a.email||a.label)} disabled={!!busy} onClick={()=>remove(a)}><Trash2 size={15}/></IconButton>}{signedIn?!noLogout&&<button disabled={!!busy} onClick={()=>signOut(a)}>Sign out</button>:<button disabled={!!busy} onClick={()=>action(a.id,'login')}>Sign in again</button>}</div></div>
   {noteBox(a.id)}{signedIn&&<AccountWarning account={a} accounts={connected} onAccounts={()=>{void load();void refresh()}}/>}{signedIn&&((a.windows||[]).length?<div className="account-quotas">{(a.windows||[]).map((w,i)=><div className="quota" key={w.kind+i}><span>{w.label||w.kind}</span>{w.percent==null?<span/>:<span className="quota-bar" role="img" aria-label={Math.round(w.percent)+'% used'}><i className={barHot(w.percent)?'hot':undefined} style={{width:cleanPercent(w.percent)+'%'}}/></span>}<span className="quota-percent">{w.percent==null?'Unknown':Math.round(w.percent)+'%'}</span><QuotaReset value={w.resets_at} now={now}/></div>)}</div>:<small className="quota-reset">Reset schedule unavailable</small>)}{signedIn&&a.credits?.balance!=null&&<small className="quota-reset">Workspace credits: {a.credits.balance}</small>}{signedIn&&a.error&&<small className="inline-error">{a.error}</small>}{loginBox(a.id)}</div>})}{!rows[provider].length&&<p className="empty-note">No {provider==='claude'?'Claude':'Codex'} accounts yet.</p>}</section>)}
  {onGitHubAccounts&&<section className="account-provider"><h3>GitHub</h3>{githubError?<p role="alert" className="inline-error">{githubError}</p>:github===null?<p>Loading GitHub accounts…</p>:github.length?github.map(a=><div className="account-row" key={a.id}><strong>{a.label}</strong></div>):<p className="empty-note">No connected GitHub accounts.</p>}{github!==null&&!github.length&&<button disabled={githubBusy} onClick={()=>void loadGithub(true)}>Connect GitHub</button>}</section>}
  {login&&![...rows.incomplete,...rows.claude,...rows.codex].some(a=>a.id===login.id)&&loginBox(login.id)}

@@ -45,7 +45,7 @@
 
 /* Redesign 2026-11-22: calmer rail, readable muted text, status tokens. Where the native sidebar uses a Code-OSS variable (native.css) that still wins. */
 :root{--ink:#1d1d1f;--muted:#5f6066;--panel:#ffffff;--paper:#fcfcfb;--rail:#f7f7f5;--line:#e4e4e1;--hover:#ececea;--accent:#1b66cc;--accent-soft:#e8f0fc;--bar:#1b66cc;--status-wait:#1b66cc;--status-new:#1e8e4e;--status-fail:#d32f2f}
-:root[data-theme=dark]{--ink:#ececee;--muted:#a3a3a9;--panel:#232325;--paper:#1e1e20;--rail:#1b1b1d;--line:#323236;--hover:#2c2c2f;--accent:#78b2ff;--accent-soft:#22324a;--bar:#78b2ff;--status-wait:#78b2ff;--status-new:#5ccf8a;--status-fail:#ff6b66}
+:root[data-theme=dark]{--user-bubble:#2d2d31;--ink:#ececee;--muted:#a3a3a9;--panel:#232325;--paper:#1e1e20;--rail:#1b1b1d;--line:#323236;--hover:#2c2c2f;--accent:#78b2ff;--accent-soft:#22324a;--bar:#78b2ff;--status-wait:#78b2ff;--status-new:#5ccf8a;--status-fail:#ff6b66}
 .mk-slot{display:grid;place-items:center;width:28px;flex:none;align-self:stretch}
 .mk{display:inline-block;flex:none;width:8px;height:8px;border-radius:50%}
 .mk.wait{background:var(--status-wait)}.mk.new{background:var(--status-new)}.mk.fail{background:var(--status-fail)}

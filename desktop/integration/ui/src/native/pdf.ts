@@ -36,4 +36,14 @@ document.addEventListener('keydown',e=>{const t=e.target as HTMLElement;if(e.alt
 select.onchange=()=>{mode=select.value as ViewMode;try{localStorage.setItem('pdf-view-mode',mode);}catch{}current=start(current);layout();};
 for(const [id,action] of [['previous',()=>goTo(start(current)-step())],['next',()=>goTo(start(current)+step())],['zoomIn',()=>{zoom=Math.min(4,scale+.2);layout();}],['zoomOut',()=>{zoom=Math.max(.25,scale-.2);layout();}]] as const)document.getElementById(id)!.onclick=action;
 new ResizeObserver(()=>{if(!zoom)layout();}).observe(content);
+// Pinch (Chromium sends ctrl+wheel) zooms the PDF, not the window, and keeps the point under the pointer in place; one layout per frame.
+let pinch:{n:number;fx:number;fy:number;x:number;y:number;target:number}|null=null;
+content.addEventListener('wheel',e=>{if(!e.ctrlKey)return;e.preventDefault();
+ const target=Math.min(4,Math.max(.25,(pinch?.target??scale)*Math.exp(-e.deltaY/100)));
+ if(pinch){pinch.target=target;return;}
+ const box=content.getBoundingClientRect(),hit=[...slots.values()].find(el=>{const r=el.getBoundingClientRect();return e.clientY>=r.top&&e.clientY<=r.bottom;})||slots.values().next().value;if(!hit)return;
+ const r=hit.getBoundingClientRect();pinch={n:Number(hit.dataset.page),fx:(e.clientX-r.left)/r.width,fy:(e.clientY-r.top)/r.height,x:e.clientX-box.left,y:e.clientY-box.top,target};
+ requestAnimationFrame(()=>{const a=pinch!;pinch=null;if(a.target===scale)return;zoom=a.target;layout();const el=slots.get(a.n);if(!el)return;
+  const b=content.getBoundingClientRect(),q=el.getBoundingClientRect();quietUntil=performance.now()+250;content.scrollLeft+=q.left+a.fx*q.width-b.left-a.x;content.scrollTop+=q.top+a.fy*q.height-b.top-a.y;});
+},{passive:false});
 layout();

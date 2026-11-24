@@ -52,3 +52,11 @@
 .agent-map-chat-status{display:inline-flex;align-items:center;gap:6px;flex:none;white-space:nowrap;font-size:11px}
 .agent-map-chat-status.running{color:#2f7fe0}
 .agent-map-node .mk-slot.compact{align-self:flex-start;height:18px;width:14px;margin-right:6px}
+.agent-map-tabs{display:inline-flex;gap:2px;padding:2px;border-radius:7px;background:var(--rail)}
+.agent-map-tabs button{border:0;border-radius:5px;background:none;color:var(--muted);font:inherit;font-size:13px;font-weight:600;padding:4px 10px;cursor:pointer}
+.agent-map-tabs button[aria-selected=true]{background:var(--panel);color:var(--ink);box-shadow:0 1px 2px #0002}
+.agent-map-prompts{margin:0;list-style:none}
+.agent-map-prompts button{display:block;width:100%;text-align:left;border:0;border-radius:5px;background:none;color:var(--ink);font:inherit;font-size:13px;padding:7px 8px;cursor:pointer}
+.agent-map-prompts button:hover{background:var(--hover,#0000000d)}
+.agent-map-prompts button>span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.agent-map-prompts small{display:block;color:var(--muted);font-size:11px;margin-top:2px}

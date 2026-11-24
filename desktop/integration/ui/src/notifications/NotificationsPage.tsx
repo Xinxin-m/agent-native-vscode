@@ -1,16 +1,14 @@
-import {useEffect,useRef} from 'react';
+import {useEffect,useRef,useState} from 'react';
+import {Bug} from 'lucide-react';
 import {useWorkbench} from '../state/context';
-import {useFeed,actMany,includeArchived,isWaiting,isFailed,type Item} from './feed';
+import {useFeed,actMany,act,includeArchived,isWaiting,isFailed,debugActive,historyRows,byDay,type Item,type HistoryTab} from './feed';
 import {NotificationCard} from './NotificationCard';
 import {openItemChat} from './open';
 import './notifications.css';
 
-// The one notifications surface. The bell (core globalCompositeBar.ts) runs library.notifications, which opens
-// this view in an editor group beside the chat; the tab's own close button closes it.
-export function NotificationsPanel({visible=true}:{visible?:boolean}){
- const wb=useWorkbench(),feed=useFeed();
- const sent=useRef(new Set<string>());
- // While the panel is showing, what is open counts as seen; the bell counts open items, so seen does not change it.
+// While a surface shows the open items, they count as seen.
+function useMarkSeen(visible:boolean){
+ const feed=useFeed(),sent=useRef(new Set<string>());
  useEffect(()=>{
   if(!visible)return;
   const ids=feed.items.filter(i=>i.state==='open'&&!i.seen&&!sent.current.has(i.id)).map(i=>i.id);
@@ -18,31 +16,76 @@ export function NotificationsPanel({visible=true}:{visible?:boolean}){
   ids.forEach(id=>sent.current.add(id));
   actMany(ids,'seen').catch(()=>ids.forEach(id=>sent.current.delete(id)));
  },[visible,feed.revision]);
- const items=feed.items.filter(i=>i.state==='open');
- const groups:[string,Item[]][]=[['Waiting for your decision',items.filter(isWaiting)],['Failed',items.filter(isFailed)],['Other',items.filter(i=>!isWaiting(i)&&!isFailed(i))]];
+}
+
+// One click sends a debug agent to every debuggable item of the group that has none running.
+function DebugAll({rows,label}:{rows:Item[];label:string}){
+ const [busy,setBusy]=useState(false),[error,setError]=useState('');
+ const targets=rows.filter(i=>i.debuggable),idle=targets.filter(i=>!debugActive(i));
+ if(!targets.length)return null;
+ async function run(){
+  setBusy(true);setError('');
+  const failed:string[]=[];
+  for(const i of idle){try{await act(i,'debug')}catch(e:any){if(e.status!==409)failed.push(e.message||'Debug did not start')}}
+  if(failed.length)setError(failed.length===1?failed[0]:`${failed.length} debugs did not start: ${failed[0]}`);
+  setBusy(false);
+ }
+ const name='Debug all: '+label.toLowerCase();
+ return <><button type="button" className="ngroup-debug" aria-label={name} title={idle.length?`Debug all (${idle.length})`:'A debug is running for every item'} disabled={busy||!idle.length} onClick={()=>void run()}><Bug size={14}/></button>
+  {error&&<span className="ngroup-error" role="alert">{error}</span>}</>;
+}
+
+// Open items in groups: the Notifications pane and the secondary sidebar show this same list.
+function OpenGroups({onOpenChat}:{onOpenChat:(i:Item)=>void}){
+ const feed=useFeed(),items=feed.items.filter(i=>i.state==='open');
+ const groups:[string,Item[],boolean][]=[['Waiting for your decision',items.filter(isWaiting),true],['Failed',items.filter(isFailed),true],['Other',items.filter(i=>!isWaiting(i)&&!isFailed(i)),false]];
+ return <>
+  {feed.error&&<p className="notifications-note" role="status">Can't reach the Library server. Showing the last list.</p>}
+  {feed.warnings.length>0&&<p className="notifications-note" role="status">Some sources could not be read: {feed.warnings.join('; ')}</p>}
+  {groups.filter(g=>g[1].length).map(([label,rows,debug])=><section key={label} className="ngroup" aria-label={label}>
+   <div className="ngroup-head"><h3>{label}</h3><span className="notifications-count">{rows.length}</span>{debug&&<DebugAll rows={rows} label={label}/>}</div>
+   {rows.map(i=><NotificationCard key={i.id} item={i} variant="page" onOpenChat={onOpenChat}/>)}
+  </section>)}
+  {!items.length&&feed.mode!=='loading'&&<p className="notifications-empty">Nothing needs you.</p>}
+ </>;
+}
+
+// The secondary side bar (Cmd+L): a webview view the extension contributes to the auxiliary bar. Code-OSS draws its title.
+export function NotificationsSidebar({visible=true}:{visible?:boolean}){
+ const wb=useWorkbench();
+ useMarkSeen(visible);
  return <aside className="notifications-panel" aria-label="Notifications">
-  <div className="npanel-head"><h2>Notifications</h2></div>
-  <div className="npanel-list">
-   {feed.error&&<p className="notifications-note" role="status">Can't reach the Library server. Showing the last list.</p>}
-   {feed.warnings.length>0&&<p className="notifications-note" role="status">Some sources could not be read: {feed.warnings.join('; ')}</p>}
-   {groups.filter(g=>g[1].length).map(([label,rows])=><section key={label} className="npanel-group" aria-label={label}><h3>{label}<span className="notifications-count">{rows.length}</span></h3>{rows.map(i=><NotificationCard key={i.id} item={i} onOpenChat={x=>openItemChat(wb,x)}/>)}</section>)}
-   {!items.length&&feed.mode!=='loading'&&<p className="notifications-empty">Nothing needs you.</p>}
-  </div>
+  <div className="npanel-list"><OpenGroups onOpenChat={i=>openItemChat(wb,i)}/></div>
   <div className="npanel-foot"><button type="button" className="npanel-history" onClick={()=>wb.open({kind:'notifications',title:'History',meta:{view:'history'}},'tab')}>History</button></div>
  </aside>;
 }
 
-// History: answered and archived items, opened from the foot of the panel.
-export function NotificationsPage(){
+// The Notifications pane: an editor tab in the active group, opened by the bell and the toast's "Open".
+export function NotificationsPage({visible=true}:{visible?:boolean}){
+ const wb=useWorkbench();
+ useMarkSeen(visible);
+ return <div className="notifications-page"><div className="notifications-inner">
+  <div className="notifications-title"><h1>Notifications</h1><button type="button" className="npanel-history" onClick={()=>wb.open({kind:'notifications',title:'History',meta:{view:'history'}},'tab')}>History</button></div>
+  <div className="notifications-list"><OpenGroups onOpenChat={i=>openItemChat(wb,i)}/></div>
+ </div></div>;
+}
+
+const TABS:[HistoryTab,string][]=[['agents','Agents'],['app','App'],['failed','Failed']];
+// History: answered and archived items, one tab per message type, grouped by day, newest first.
+export function NotificationsHistory(){
  const wb=useWorkbench(),feed=useFeed();
+ const [tab,setTab]=useState<HistoryTab>(()=>{const v=localStorage.getItem('workbench-history-tab');return v==='app'||v==='failed'?v:'agents'});
  useEffect(()=>{includeArchived(true);return()=>includeArchived(false)},[]);
- const rows=feed.items.filter(i=>i.state!=='open');
+ useEffect(()=>{localStorage.setItem('workbench-history-tab',tab)},[tab]);
+ const tabs=TABS.filter(([id])=>id!=='failed'||historyRows(feed.items,'failed').length>0),current=tabs.some(t=>t[0]===tab)?tab:'agents';
+ const days=byDay(historyRows(feed.items,current));
  return <div className="notifications-page"><div className="notifications-inner">
   <h1>History</h1>
+  <div className="notifications-tabs" role="tablist" aria-label="Message type">{tabs.map(([id,label])=><button key={id} type="button" role="tab" aria-selected={current===id} onClick={()=>setTab(id)}>{label}<span className="notifications-count">{historyRows(feed.items,id).length}</span></button>)}</div>
   {feed.error&&<p className="notifications-note" role="status">Can't reach the Library server. Showing the last list.</p>}
-  <div className="notifications-list">
-   {rows.map(i=><NotificationCard key={i.id} item={i} onOpenChat={x=>openItemChat(wb,x)}/>)}
-   {!rows.length&&feed.mode!=='loading'&&<p className="notifications-empty">No answered or archived notifications.</p>}
+  <div className="notifications-list" role="tabpanel">
+   {days.map(([day,rows])=><section key={day} className="nday" aria-label={day}><h3>{day}</h3>{rows.map(i=><NotificationCard key={i.id} item={i} variant="page" onOpenChat={x=>openItemChat(wb,x)}/>)}</section>)}
+   {!days.length&&feed.mode!=='loading'&&<p className="notifications-empty">Nothing here yet.</p>}
   </div>
  </div></div>;
 }

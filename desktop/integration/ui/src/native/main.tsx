@@ -8,7 +8,7 @@ import {createRoot} from 'react-dom/client';
 import {WorkbenchContext,useWorkbench} from '../state/context';
 import {useSeenReporter,useChatActivity} from '../state/activity';
 import {rowStatus} from '../navigation/chats';
-import {api} from '../api/client';
+import {api,noteServerState} from '../api/client';
 import {Conversation} from '../chat/Conversation';
 import {Sidebar} from '../navigation/Sidebar';
 import {WorkspaceScopeProvider} from '../navigation/WorkspaceSelector';
@@ -16,7 +16,7 @@ import {Projects} from '../navigation/Projects';
 import {Recent} from '../navigation/Recent';
 import {Settings} from '../navigation/Settings';
 import {AccountsPage} from '../navigation/AccountsPanel';
-import {NotificationsPage,NotificationsPanel} from '../notifications/NotificationsPage';
+import {NotificationsPage,NotificationsHistory,NotificationsSidebar} from '../notifications/NotificationsPage';
 import {startFeed,useFeed} from '../notifications/feed';
 import {AgentOverview} from '../chat/Overview';
 import {SessionsView} from '../navigation/Sessions';
@@ -28,9 +28,9 @@ import './native.css';
 const boot=(window as any).__LIBRARY_BOOT__,rpc=(window as any).libraryRpc;
 // A chat pane asks only for its own chat; a new chat gets its key after the first send.
 const chatKeys=()=>boot.kind==='chat'?[boot.resource?.key,conversations.peek(conversationIdentity(boot.resource))?.nativeKey].filter(Boolean):undefined;
-// The panel polls the feed and marks items seen only while its tab is showing; its tab name carries the open count, like the bell.
-// The same kind with meta.view "history" is the History tab reached from the panel's foot.
-function NotificationsView(){const history=boot.resource?.meta?.view==='history',[visible,setVisible]=useState(!document.hidden),n=useFeed().counts.open;useEffect(()=>{if(!history)void rpc('title',{title:n?`(${n}) Notifications`:'Notifications'}).catch(()=>{});},[n,history]);useEffect(()=>{const on=()=>setVisible(!document.hidden);document.addEventListener('visibilitychange',on);return()=>document.removeEventListener('visibilitychange',on)},[]);return history?<NotificationsPage/>:<NotificationsPanel visible={visible}/>;}
+// The pane polls the feed and marks items seen only while it is showing; its tab name carries the open count, like the bell.
+// meta.view "history" is the History tab; "sidebar" is the secondary side bar view (its title is Code-OSS's).
+function NotificationsView(){const view=boot.resource?.meta?.view,history=view==='history',sidebar=view==='sidebar',[visible,setVisible]=useState(!document.hidden),n=useFeed().counts.open;useEffect(()=>{if(!history&&!sidebar)void rpc('title',{title:n?`(${n}) Notifications`:'Notifications'}).catch(()=>{});},[n,history]);useEffect(()=>{const on=()=>setVisible(!document.hidden);document.addEventListener('visibilitychange',on);return()=>document.removeEventListener('visibilitychange',on)},[]);return history?<NotificationsHistory/>:sidebar?<NotificationsSidebar visible={visible}/>:<NotificationsPage visible={visible}/>;}
 // A chat tab follows the server: it tells the server the chat is in front of her (visible, focused window only) and keeps its tab name equal to the chat's current title (the host cuts it to 24 characters).
 function ChatTabSync(){const wb=useWorkbench() as any;useSeenReporter(()=>chatKeys()||[],[]);const key=chatKeys()?.[0],title=(wb.data?.chats||[]).find((c:any)=>c.key===key)?.title;useEffect(()=>{if(title)wb.updateTitle?.(boot.resource,title);},[title]);const activity=useChatActivity(boot.resource),status=rowStatus(activity.live,activity.unread,{...activity,failed:activity.failed||activity.recovery});useEffect(()=>{if(key)void rpc('title',{status}).catch(()=>{});},[key,status]);return null;}
 function App(){const [data,setData]=useState<any>(null),[accounts,setAccounts]=useState([]),[hosts,setHosts]=useState([]),[runs,setRuns]=useState([]),[attention,setAttention]=useState([]),[liveSessions,setLive]=useState([]),[error,setError]=useState(''),[toast,setToast]=useState(''),[mode,setMode]=useState('chats'),[preferences,setPrefs]=useState(boot.preferences);
@@ -40,7 +40,7 @@ const [fileResource,setFileResource]=useState(boot.resource);
 useEffect(()=>{const change=(e:any)=>setFileResource(e.detail);window.addEventListener('library-files-context',change);return()=>window.removeEventListener('library-files-context',change)},[]);
 const preferenceRevision=useRef(0),attentionReply=useRef<any>(null);
 const polling=useRef<ReturnType<typeof createNativeRefresh>|null>(null);
-if(!polling.current)polling.current=createNativeRefresh((path,options)=>rpc('api',{path,fresh:options?.fresh===true,since:options?.since,keys:path==='/api/state'?chatKeys():undefined}),{state:setData,accounts:v=>{(window as any).LibraryNotifications?.observe(v);setAccounts(v.accounts||[]);setPendingNoticeAccounts(v.pending_accounts||[])},hosts:v=>setHosts(v.hosts||[]),runs:v=>{(window as any).LibraryNotifications?.observe(v);setRuns(v.runs||[])},attention:v=>{attentionReply.current=v;setAttention(v.items||[])},live:v=>setLive(v.sessions||[]),error:setError});
+if(!polling.current)polling.current=createNativeRefresh((path,options)=>rpc('api',{path,fresh:options?.fresh===true,since:options?.since,keys:path==='/api/state'?chatKeys():undefined}),{state:v=>{noteServerState(v);setData(v)},accounts:v=>{(window as any).LibraryNotifications?.observe(v);setAccounts(v.accounts||[]);setPendingNoticeAccounts(v.pending_accounts||[])},hosts:v=>setHosts(v.hosts||[]),runs:v=>{(window as any).LibraryNotifications?.observe(v);setRuns(v.runs||[])},attention:v=>{attentionReply.current=v;setAttention(v.items||[])},live:v=>setLive(v.sessions||[]),error:setError});
 const refresh=useCallback(()=>polling.current!.refresh(true),[]);
 useEffect(()=>{const controller=polling.current!;controller.setActive(true);const refreshListener=()=>void refresh(),visible=()=>{if(!document.hidden)void controller.refresh()};window.addEventListener('library-refresh',refreshListener);window.addEventListener('library-state',visible);document.addEventListener('visibilitychange',visible);void controller.refresh();const timer=setInterval(visible,5000);return()=>{controller.setActive(false);clearInterval(timer);window.removeEventListener('library-refresh',refreshListener);window.removeEventListener('library-state',visible);document.removeEventListener('visibilitychange',visible)}},[]);
 useEffect(()=>{if(boot.kind==='sidebar'&&data)chimeForAttention(attention,soundEnabled(data.config,attentionReply.current))},[attention,Boolean(data)]);

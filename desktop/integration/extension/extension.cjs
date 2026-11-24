@@ -5,7 +5,7 @@ const path=require('node:path');
 const {randomUUID,randomBytes}=require('node:crypto');
 const bridge=require('./bridge.cjs');const {tabTitle,tabIcon}=require('./tab-title.cjs');
 const {createReadCache,createDispatcher,scopeState}=require('./rpc-flow.cjs');
-const {targetColumn,resourceKey}=require('./panes.cjs');
+const {targetColumn,resourceKey,pdfTargetPane,layoutRects}=require('./panes.cjs');
 const agentTabs=require('./agent-tabs.cjs');
 const {openWorkspaceFolder,showInitialChats,createWorkspaceChoice}=require('./workspace-navigation.cjs');
 const defaults={theme:'dark',fontSize:14,lineHeight:1.65,readingWidth:780,openDefault:'tab',maxAutoPanes:3,defaultProvider:'ask',defaultModels:{},thinking:'collapsed',toolOutput:'folded',composerMax:null,foldComposer:true,sendKey:'enter',whileWorking:'queue',openAtLatest:true,tabGroups:'manual',groupFiles:false,confirmMoves:'some',showHidden:false,liveRefresh:15};
@@ -130,7 +130,14 @@ function activate(context){
   const columns=vscode.window.tabGroups.all.map(g=>g.viewColumn),active=vscode.window.tabGroups.activeTabGroup.viewColumn;
   const dest=destination||(resource.kind==='file'?preferences.openDefault:'tab')||'tab';
   let column=explicitColumn||targetColumn(columns,active,dest,preferences.maxAutoPanes);
-  if(!explicitColumn&&['right','below'].includes(dest)&&(preferences.maxAutoPanes<=0||columns.length<preferences.maxAutoPanes)){
+  const pdf=!destination&&!explicitColumn&&resource.kind==='file'&&/\.pdf$/i.test(resource.path||resource.title||'')&&['tab','right','below','preview'].includes(dest);
+  // A PDF opened without a destination goes beside the current pane (pdfTargetPane, at most 4 panes); an open PDF is focused where it is.
+  async function pdfColumn(uri){
+   const shown=vscode.window.tabGroups.all.find(g=>g.tabs.some(t=>t.input?.uri?.toString()===uri.toString()));if(shown)return shown.viewColumn;
+   const choice=pdfTargetPane(layoutRects(await vscode.commands.executeCommand('vscode.getEditorLayout')),active);if('group' in choice)return choice.group;
+   await vscode.commands.executeCommand('workbench.action.newGroupRight');return vscode.window.tabGroups.activeTabGroup.viewColumn;
+  }
+  if(!pdf&&!explicitColumn&&['right','below'].includes(dest)&&(preferences.maxAutoPanes<=0||columns.length<preferences.maxAutoPanes)){
    await vscode.commands.executeCommand(dest==='below'?'workbench.action.newGroupBelow':'workbench.action.newGroupRight');
    column=vscode.window.tabGroups.activeTabGroup.viewColumn;
   }
@@ -148,6 +155,7 @@ function activate(context){
      const cached=path.join(folder,path.posix.basename(resource.path)||'remote-file');await fs.writeFile(cached,bytes,{flag:'wx'});
      if(!await require('./external-open.cjs').openExternal(vscode.Uri.file(cached).toString(),dest!=='system'))await vscode.env.openExternal(vscode.Uri.file(cached));return;
     }
+    if(pdf)column=await pdfColumn(uri);
     await vscode.commands.executeCommand('vscode.open',uri,{viewColumn:column,preview:dest!=='tab'});return;
    }
    if(typeof resource.path!=='string'||!path.isAbsolute(resource.path)||resource.path.includes('\0'))throw Error('An absolute file path is required');
@@ -155,6 +163,7 @@ function activate(context){
    const uri=vscode.Uri.file(resource.path);
    if(['browser-tab','default-browser','system'].includes(dest)){if(!await require('./external-open.cjs').openExternal(uri.toString(),dest!=='system'))await vscode.env.openExternal(uri);return;}
    await require('./file-context.cjs').workspaceFor(vscode,filesTab.rootId,uri);
+   if(pdf)column=await pdfColumn(uri);
    // Native preview semantics preserve dirty buffers without closing or replacing them.
    await vscode.commands.executeCommand('vscode.open',uri,{viewColumn:column,preview:dest!=='tab',...(resource.line?{selection:new vscode.Range(Math.max(0,resource.line-1),0,Math.max(0,resource.line-1),0)}:{})});return;
   }
@@ -169,7 +178,7 @@ function activate(context){
   if(await revealExisting(vscode,resource,destination||explicitColumn?column:undefined))return;
   if(['sessions','files'].includes(resource.kind)&&await focusTab(vscode,t=>/library\.conversation$/.test(t.input?.viewType||'')&&t.label===resource.title))return;
   if(panels.has(key)){const panel=panels.get(key);if(resource.kind==='files'&&resource.meta?.filesPath)void panel.webview.postMessage({type:'filesContext',resource});panel.reveal(destination||explicitColumn?column:undefined);return;}
-  const panel=vscode.window.createWebviewPanel('library.conversation',resource.kind==='chat'?tabTitle(resource.title,'New conversation'):resource.title||'New conversation',column,{enableScripts:true,retainContextWhenHidden:true,localResourceRoots:[vscode.Uri.joinPath(context.extensionUri,'media')]});
+  const panel=vscode.window.createWebviewPanel('library.conversation',resource.kind==='chat'?tabTitle(resource.title):resource.title||'New chat',column,{enableScripts:true,retainContextWhenHidden:true,localResourceRoots:[vscode.Uri.joinPath(context.extensionUri,'media')]});
   panels.set(key,panel);panel.iconPath=new vscode.ThemeIcon(resource.kind==='chat'?'comment-discussion':resource.kind==='settings'?'settings-gear':resource.kind==='notifications'?'bell':resource.kind==='files'?'folder':'library');
   connect(panel,resource.kind,resource,key);
  }
@@ -239,7 +248,7 @@ function activate(context){
    if(m.action==='models'){trusted();if(m.host_id!=='mac')return api('/api/models/discover',{host_id:m.host_id,provider:m.provider||'claude',account_id:m.account,cwd:m.cwd});return require('./models.cjs').models(await api('/api/accounts'),m.account,m.cwd);}
    if(m.action==='confirm'){if(typeof m.message!=='string'||m.message.length>2000)throw Error('Invalid confirmation');const label=m.button==='Stop'?'Stop':'Continue';return (await vscode.window.showWarningMessage(m.message,{modal:true},label))===label;}
    if(m.action==='terminal')return vscode.commands.executeCommand('workbench.action.terminal.toggleTerminal');
-   if(m.action==='showChats')return vscode.commands.executeCommand('workbench.view.extension.library');
+   if(m.action==='toggleSecondarySidebar')return vscode.commands.executeCommand('library.toggleNotificationsSidebar');
    if(m.action==='toggleSidebar')return vscode.commands.executeCommand('workbench.action.toggleSidebarVisibility');
    if(m.action==='development')return layout(true);
    if(m.action==='config'){if(kind!=='settings')throw Error('Settings are only available in Settings.');return require('./settings-config.cjs').handle(vscode,m);}
@@ -264,6 +273,11 @@ function activate(context){
   disposables.push((view.onDidChangeViewState||view.onDidChangeVisibility).call(view,()=>void webview.postMessage({type:'visibility',visible:view.visible})));
  }
  context.subscriptions.push(vscode.window.registerWebviewViewProvider('library.navigation',{resolveWebviewView(view){connect(view,'sidebar',null,'sidebar');}},{webviewOptions:{retainContextWhenHidden:true}}));
+ // The secondary side bar (Cmd+L) lists what waits for her and what failed; same cards as the Notifications pane.
+ let notificationsView=null;
+ context.subscriptions.push(vscode.window.registerWebviewViewProvider('library.notificationsSidebar',{resolveWebviewView(view){notificationsView=view;view.onDidDispose(()=>{if(notificationsView===view)notificationsView=null});connect(view,'notifications',{kind:'notifications',meta:{view:'sidebar'}},'notifications:sidebar');}},{webviewOptions:{retainContextWhenHidden:true}}));
+ // Cmd+L shows Notifications in the secondary side bar even when another view was last open there, and hides the bar when Notifications is showing.
+ context.subscriptions.push(vscode.commands.registerCommand('library.toggleNotificationsSidebar',()=>vscode.commands.executeCommand(notificationsView?.visible?'workbench.action.closeAuxiliaryBar':'library.notificationsSidebar.focus')));
  context.subscriptions.push(vscode.window.registerWebviewPanelSerializer('library.conversation',{async deserializeWebviewPanel(panel,state){const resource=state?.resource;if(resource){const key=resourceKey(resource);panels.set(key,panel);connect(panel,resource.kind,resource,key);}else{panel.dispose();}}}));
  require('./tab-cleanup.cjs').register(vscode,context);
  require('./tab-project-groups.cjs').register(vscode,context,api);
@@ -274,7 +288,7 @@ function activate(context){
  command('library.newFolder',uri=>{trusted();return require('./file-actions.cjs').createItem(vscode,filesTab,'directory',uri).then(refreshFiles);});
  command('library.openResource',(resource,column,place)=>place==='current'?openInCurrent(resource,column):open(resource,'tab',column));
  context.subscriptions.push(agentTabs.watchCodexTurns(vscode));
- const openAgentChat=agentTabs.create(vscode,()=>open({kind:'chat',draftId:randomUUID(),title:'New conversation'}));
+ const openAgentChat=agentTabs.create(vscode,()=>open({kind:'chat',draftId:randomUUID(),title:'New chat'}));
  command('_library.openAgentChat',openAgentChat);
  const officialChats=agentTabs.official(vscode,context,openAgentChat);
  command('library.arrange',async()=>{const choice=await vscode.window.showQuickPick([{label:'Arrange automatically',command:'library.arrangeAutomatically'},{label:'Split right',command:'workbench.action.newGroupRight'},{label:'Split down',command:'workbench.action.newGroupBelow'},{label:'Stack panes vertically',command:'workbench.action.editorLayoutTwoRows'},{label:'Move whole pane left',command:'workbench.action.moveActiveEditorGroupLeft'},{label:'Move whole pane right',command:'workbench.action.moveActiveEditorGroupRight'},{label:'Move whole pane up',command:'workbench.action.moveActiveEditorGroupUp'},{label:'Move whole pane down',command:'workbench.action.moveActiveEditorGroupDown'}],{title:'Arrange panes',ignoreFocusOut:false});if(!choice)return;await vscode.commands.executeCommand('workbench.action.closeAuxiliaryBar');return vscode.commands.executeCommand(choice.command||'_library.arrangeEditors',choice.preset);});
@@ -296,13 +310,13 @@ function activate(context){
  command('library.splitDown',()=>vscode.commands.executeCommand('workbench.action.newGroupBelow'));
  // The tab-bar plus starts a chat with the active chat's provider, else the default provider, else asks.
  const newChatSources=new Map(),activeLibraryProvider=()=>{for(const [key,panel] of panels)if(panel.active&&panel.viewColumn===vscode.window.tabGroups.activeTabGroup?.viewColumn)return /^chat:(claude|codex)-/.exec(key)?.[1]||newChatSources.get(key);};
- command('library.new',async()=>{const source=await agentTabs.chooseProvider(vscode,context.globalState,activeLibraryProvider());if(!source)return;const draftId=randomUUID();newChatSources.set('chat:'+draftId,source);return open({kind:'chat',draftId,title:'New conversation',meta:{source}});});
+ command('library.new',async()=>{const source=await agentTabs.chooseProvider(vscode,context.globalState,activeLibraryProvider());if(!source)return;const draftId=randomUUID();newChatSources.set('chat:'+draftId,source);return open({kind:'chat',draftId,title:'New chat',meta:{source}});});
  command('library.openChat',()=>choosePaneChat(vscode,api,open,context.globalState));
  command('library.show',()=>layout(false));command('library.development',()=>layout(true));
  command('library.openProjectMap',(project,title)=>chooseProjectMap(vscode,api,open,project,title));
  command('library.accounts',()=>open({kind:'accounts',title:'Accounts'}));
- // The bell and the toasts open the one notifications surface in an editor group beside the chat (keeps the chat in view); an open one is revealed where it is.
- command('library.notifications',()=>{const panel=panels.get('notifications:');if(panel){panel.reveal(panel.viewColumn,true);return;}return open({kind:'notifications',title:'Notifications'},undefined,vscode.ViewColumn.Beside);});
+ // The bell and the toasts' "Open" open Notifications as a tab in the active group; an open one is revealed where it is.
+ command('library.notifications',()=>{const panel=panels.get('notifications:');if(panel){panel.reveal(panel.viewColumn);return;}return open({kind:'notifications',title:'Notifications'},'tab');});
  command('library.settings',()=>open({kind:'settings',title:'Settings'}));command('library.projects',()=>open({kind:'projects',title:'Projects'}));
  command('library.openFiles',async uri=>{const location=uri?await require('./file-context.cjs').workspaceFor(vscode,filesTab.rootId,uri):{};return open({kind:'files',title:'Files',...location});});
  if(true){
@@ -313,7 +327,7 @@ function activate(context){
    void context.globalState.update('unifiedRailV1',true);
   }
   void vscode.commands.executeCommand('workbench.action.closeAuxiliaryBar').catch(()=>{});
-  void showInitialChats(vscode,context.workspaceState,()=>{if(!officialChats.enabled())return open({kind:'chat',draftId:randomUUID(),title:'New conversation'});}).catch(showError);
+  void showInitialChats(vscode,context.workspaceState,()=>{if(!officialChats.enabled())return open({kind:'chat',draftId:randomUUID(),title:'New chat'});}).catch(showError);
  }
  if(require('node:fs').existsSync(path.join(__dirname,'documents.cjs')))require('./documents.cjs').register(context);
 }

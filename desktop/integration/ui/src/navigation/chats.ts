@@ -12,10 +12,11 @@ export function historyChats(chats:any[],provider:string,query:string){const nee
 
 export type RowStatus='waiting'|'working'|'failed'|'new'|null;
 /** One mark per row: running (blue turning circle), waiting for her (blue dot), failed (red dot), a finished result she has not seen (green dot). Live idle has no mark. */
+/** One mark per chat (user request 2026-11-23; server: sidebar.resolve): failed > waiting > working > new. A failed chat is never also running. */
 export function rowStatus(live:string|null|undefined,unseen:boolean|undefined,local:{awaiting?:boolean;running?:boolean;failed?:boolean}={}):RowStatus{
+ if(local.failed)return 'failed';
  if(live==='waiting'||local.awaiting)return 'waiting';
  if(live==='working'||local.running)return 'working';
- if(local.failed)return 'failed';
  if(unseen)return 'new';
  return null;
 }
