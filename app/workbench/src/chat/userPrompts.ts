@@ -1,4 +1,4 @@
-// Her own prompts in the main chat, for the sticky prompt line and the My prompts list.
+// The user's own prompts in the main chat, for the sticky prompt line and the My prompts list.
 export interface UserPrompt {text:string;ts?:string}
 export const isPrompt=(turn:any)=>turn?.role==='user'&&Boolean(String(turn.text||'').trim());
 // Transcript prompts first, then messages she sent that the transcript does not have yet; oldest first.
