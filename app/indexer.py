@@ -165,7 +165,8 @@ def atomic_json_dump(obj, path, indent=None):
     one — index.json was corrupted this way when a SessionStart hook was cut."""
     tmp = path + ".tmp"
     with open(tmp, "w") as fh:
-        json.dump(obj, fh, ensure_ascii=False, indent=indent)
+        # dumps uses the C encoder; json.dump always takes the pure-Python path (about 5x slower).
+        fh.write(json.dumps(obj, ensure_ascii=False, indent=indent))
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, path)
@@ -379,6 +380,17 @@ def parse_claude(path):
                 resume.update(model=model, at=tsv or '', compacted=False, cache_ttl_s=ttl,
                               context_tokens=sum(usage_by_msg[mid][2:]))
         if d.get("isSidechain") and not delegated:
+            continue
+        # A message she sends while a turn runs is recorded as a queued_command attachment.
+        queued = d.get("attachment") if t == "attachment" else None
+        if isinstance(queued, dict) and queued.get("type") == "queued_command" \
+                and queued.get("commandMode", "prompt") == "prompt" \
+                and (queued.get("origin") or {}).get("kind", "human") == "human":
+            txt = clean_user_text(text_blocks(queued.get("prompt")))
+            if txt:
+                turns.append({"role": "user", "text": txt, "ts": tsv or "", "steer": True})
+                status = "working"
+                attention_required = False
             continue
         if t == "user":
             msg = d.get("message") or {}
@@ -606,7 +618,8 @@ def parse_codex_file(path):
                     txt += b.get("text", "")
             txt = txt.strip()
             if role in ("user", "assistant") and txt and not txt.startswith(CODEX_SKIP_PREFIX):
-                raw_items.append((role, txt, tsv or "", p.get("channel") or p.get("phase")))
+                turn_id = (p.get("internal_chat_message_metadata_passthrough") or {}).get("turn_id")
+                raw_items.append((role, txt, tsv or "", p.get("channel") or p.get("phase"), turn_id))
         elif t == "response_item" and pt in ("function_call", "custom_tool_call"):
             name = str(p.get("name") or "").lower()
             if name in ("request_user_input", "askuserquestion"):
@@ -630,12 +643,18 @@ def parse_codex_file(path):
     if not saw_event_user or not saw_event_agent:
         # A live session can have a user event before its first agent event.
         # Preserve available event roles and fall back only for the missing role.
-        for r, tx, ts, channel in raw_items:
+        user_turn_ids = set()
+        for r, tx, ts, channel, turn_id in raw_items:
             if (r == 'user' and saw_event_user) or (r == 'assistant' and saw_event_agent):
                 continue
             turn = {"role": r, "text": tx, "ts": ts}
             if channel:
                 turn["channel"] = channel
+            # A second user message in the same native turn is a steer.
+            if r == 'user' and turn_id:
+                if turn_id in user_turn_ids:
+                    turn["steer"] = True
+                user_turn_ids.add(turn_id)
             if r == "assistant" and is_error_answer(tx):
                 turn["error"] = True
             turns.append(turn)
@@ -711,7 +730,8 @@ def parse_codex_group(sid, paths, thread_names):
 def merge_consecutive(turns):
     out = []
     for t in turns:
-        if out and out[-1]["role"] == t["role"] and out[-1].get("channel") == t.get("channel"):
+        # A message sent while the agent worked is its own turn, never part of the one before.
+        if out and out[-1]["role"] == t["role"] and out[-1].get("channel") == t.get("channel") and not t.get("steer"):
             out[-1]["text"] = (out[-1]["text"] + "\n\n" + t["text"]).strip()
             # a merged turn is only an error turn if every part was one, so a
             # real answer followed by a 529 retry still counts as an answer

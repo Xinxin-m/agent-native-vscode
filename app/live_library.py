@@ -17,16 +17,28 @@ class LiveLibrary:
         self.signatures = {}
         self.revision = 0
         self.live_keys = set()
+        self.index_stat = None
+        self.codex_ids = {}
+        self.index_light = {}
 
-    def snapshot(self, saved, config, live_keys=()):
-        """live_keys: chats with a running process; they are indexed once they have a user turn,
-        even before the first reply."""
+    def refresh(self, saved, config, live_keys=()):
+        """Re-scan transcripts. saved only needs src_sig, files_all, source_locations and
+        the execution fields per chat."""
         self.live_keys = set(live_keys)
         with self.lock:
             now = time.monotonic()
             if now - self.checked >= self.interval:
                 self._refresh(saved, {**indexer.DEFAULT_CONFIG, **config})
                 self.checked = now
+
+    def snapshot(self, saved, config, live_keys=()):
+        """live_keys: chats with a running process; they are indexed once they have a user turn,
+        even before the first reply."""
+        self.refresh(saved, config, live_keys)
+        return self.merge(saved)
+
+    def merge(self, saved):
+        with self.lock:
             result = dict(saved)
             for key, chat in self.records.items():
                 meta = indexer.meta_of(chat)
@@ -34,6 +46,12 @@ class LiveLibrary:
                 result[key] = meta
             indexer.resolve_lineage(result)
             return result
+
+    def _codex_id(self, path):
+        # A rollout file's session id is fixed by its first line; read it once per path.
+        if path not in self.codex_ids:
+            self.codex_ids[path] = indexer.codex_session_id(path)
+        return self.codex_ids[path]
 
     def _refresh(self, saved, cfg):
         units = {}
@@ -62,7 +80,7 @@ class LiveLibrary:
                     sid = os.path.basename(os.path.dirname(os.path.dirname(path))) + '-agent-' + sid.removeprefix('agent-')
                 units.setdefault(('claude-' + sid, 'claude'), set()).add(path)
             for path in glob.glob(os.path.join(xroot, '**', '*.jsonl'), recursive=True) if xroot else []:
-                units.setdefault(('codex-' + indexer.codex_session_id(path), 'codex'), set()).add(path)
+                units.setdefault(('codex-' + self._codex_id(path), 'codex'), set()).add(path)
         for (key, source), found in units.items():
             previous = saved.get(key, {})
             # Include prior copies so resumes merge and cross-host provenance survives.
