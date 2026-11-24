@@ -12,13 +12,28 @@
 .notification-panel .notification-tabs,.notification-panel .notification-actions{display:flex;flex-wrap:wrap;gap:5px}
 .notification-panel .notification-actions:empty{display:none}
 .notification-panel button{cursor:pointer}
-.notification-panel .notification-tabs button,.notification-panel .notification-actions button,.notification-panel .notification-body button{background:transparent;color:inherit;border:1px solid var(--line,var(--vscode-panel-border,#8886));border-radius:var(--radius,5px);padding:4px 7px;font:inherit;max-width:100%;overflow-wrap:anywhere}
+.notification-panel .notification-tabs button,.notification-panel .notification-actions button,.notification-panel .notification-body button{background:transparent;color:inherit;border:1px solid var(--line,var(--vscode-panel-border,#8886));border-radius:6px;min-height:30px;padding:5px 12px;font:inherit;font-size:12.5px;font-weight:500;text-align:left;max-width:100%;overflow-wrap:anywhere}
 .notification-panel .notification-tabs button[aria-pressed=true],.notification-panel button:hover{background:var(--hover,var(--vscode-toolbar-hoverBackground,#8882))}
-.notification-row{position:relative;padding:9px 28px 9px 0;border-bottom:1px solid var(--line,var(--vscode-panel-border,#8886))}
-.notification-row:last-child{padding-bottom:2px;border-bottom:0}
+.notification-row{position:relative;display:flex;flex-direction:column;gap:8px;margin:8px 0 0;padding:12px 28px 12px 16px;overflow:hidden;border:1px solid var(--line,var(--vscode-panel-border,#8886));border-radius:var(--radius,6px)}
+.notification-row.notification-waiting::before,.notification-row.notification-failed::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--mk-wait,#1b66cc)}
+.notification-row.notification-failed::before{background:var(--mk-fail,#d32f2f)}
+.notification-row:has(.notification-top){padding-right:10px}
 .notification-panel .notification-row>.auth-warning{margin:0;padding:0;border:0;background:transparent;color:inherit;font:inherit}
 .notification-panel .notification-row>.auth-warning button{margin:5px 5px 0 0}
-.notification-row .notification-actions{margin-top:6px}
+.notification-row .notification-actions{margin:0}
+.notification-panel .notification-top{display:flex;align-items:flex-start;gap:4px}
+.notification-panel .notification-top .notification-title{flex:1;min-width:0;padding-top:4px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font-size:13.5px;line-height:19px}
+.notification-panel .notification-icons{flex:none;display:flex;gap:2px;margin-right:-2px}
+.notification-panel button.notification-icon,.notification-panel a.notification-icon,.notification-panel .notification-icons .notification-archive{position:static;display:grid;place-items:center;width:28px;height:28px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--muted,var(--vscode-descriptionForeground,#5f6066));font-size:19px;line-height:1;text-decoration:none}
+.notification-panel .notification-icon svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.notification-panel .notification-icon:hover:not(:disabled),.notification-panel .notification-icons .notification-archive:hover{color:var(--ink,var(--vscode-foreground,#262523));background:var(--hover,var(--vscode-toolbar-hoverBackground,#8882))}
+.notification-panel .notification-icon:disabled{opacity:.4;cursor:default}
+.notification-panel .notification-actions button.notification-icon{border:0;padding:0}
+.notification-panel .notification-group-row{display:flex;align-items:center;gap:6px;min-height:28px;margin:12px 0 0;padding-top:4px;border-top:1px solid var(--line,var(--vscode-panel-border,#8886))}
+.notification-panel .notification-group-row[hidden]{display:none}
+.notification-panel .notification-group-row .notification-group{flex:1;margin:0;padding:0;border:0}
+.notification-panel .notification-day{margin:10px 0 0;list-style:none}
+.notification-panel .notification-day h4{margin:0;font-size:12px;font-weight:600;color:var(--ink,var(--vscode-foreground,#262523))}
 .notification-panel .notification-archive{position:absolute;right:0;top:7px;width:26px;height:26px;border:0;border-radius:var(--radius,5px);background:transparent;color:inherit;font-size:19px;line-height:1}
 .workspace-footer:has(>.library-notifications){opacity:1}
 .workspace-footer:has(>.library-notifications)>:not(.library-notifications){opacity:.65}
@@ -33,13 +48,9 @@
 
 .notification-panel .notification-group{margin:10px 0 0;padding-top:8px;border-top:1px solid var(--line,var(--vscode-panel-border,#8886));font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--muted,var(--vscode-descriptionForeground,#5f6066))}
 .notification-panel .notification-group[hidden]{display:none}
-.notification-panel .notification-title{font-weight:600}
+.notification-panel .notification-title{font-weight:600;color:var(--ink,var(--vscode-foreground,#262523))}
 .notification-panel .notification-title code{font-weight:400;font-size:12px}
-.notification-panel .notification-context{margin-top:2px;font-size:12px;color:var(--muted,var(--vscode-descriptionForeground,#5f6066))}
+.notification-panel .notification-context{margin-top:2px;font-size:12px;line-height:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--muted,var(--vscode-descriptionForeground,#5f6066))}
 .notification-panel .notification-field{box-sizing:border-box;width:100%;margin-top:6px;padding:5px 7px;border:1px solid var(--line,var(--vscode-panel-border,#8886));border-radius:var(--radius,5px);background:transparent;color:inherit;font:inherit}
 .notification-panel .notification-error{color:var(--danger,#d32f2f)}
-.notification-panel .notification-dot{display:inline-block;box-sizing:border-box;width:8px;height:8px;margin-right:6px;border-radius:50%;vertical-align:1px}
-.notification-panel .notification-dot.waiting{background:var(--mk-wait,#1b66cc)}
-.notification-panel .notification-dot.new{background:var(--mk-new,#1e8e4e)}
-.notification-panel .notification-dot.failed{background:var(--mk-fail,#d32f2f)}
 .notification-panel .notification-debug{font-style:italic}

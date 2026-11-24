@@ -1,5 +1,5 @@
 import {useSyncExternalStore} from 'react';
-import {api,ApiError} from '../api/client';
+import {api,ApiError,available} from '../api/client';
 
 // One poller for the whole app. The feed is independent of which chats are open.
 export interface Item {
@@ -24,12 +24,13 @@ function fromNotices(value:any):Feed{
 export async function poll(force=false){
  if(busy)return;busy=true;
  try{
-  if(feed.mode==='legacy'){const next=fromNotices(await api('/api/notices'));if(force||next.revision!==feed.revision)set(next);return}
+  if(feed.mode==='legacy'&&!available('/api/notifications')){const next=fromNotices(await api('/api/notices'));if(force||next.revision!==feed.revision)set(next);return}
   const value=await api('/api/notifications'+(wantArchived?'?archived=1':''));
   if(!force&&value.revision===feed.revision&&feed.mode==='live'&&!feed.error)return;
   set({mode:'live',items:value.items||[],counts:{open:0,unseen:0,open_agent:0,open_app:0,...value.counts},settings:{duration_seconds:value.settings?.duration_seconds??3},warnings:value.warnings||[],revision:value.revision,error:''});
  }catch(e:any){
-  if(e instanceof ApiError&&e.status===404&&feed.mode!=='legacy'){busy=false;set({...empty,mode:'legacy'});return poll(true)}
+  // An older server has no feed: build it from /api/notices (the route is tried again after a back-off).
+  if(e instanceof ApiError&&e.status===404&&!available('/api/notifications')){busy=false;if(feed.mode!=='legacy')set({...empty,mode:'legacy'});return poll(true)}
   if(feed.mode==='loading')set({...feed,mode:'live',error:e.message});else if(feed.error!==e.message)set({...feed,error:e.message});
  }finally{busy=false}
 }
@@ -47,10 +48,22 @@ export const waitingCount=(items:Item[])=>items.filter(needsAnswer).length;
 // Blue dot: waits for her decision. Red dot: failed. Nothing else is marked.
 // Same split as the server's debug_agent.py: a failed run (any failure kind) is red; stalled or silent agents wait for her.
 const FAILED_KINDS=['limit_reached','rate_limited','auth_expired','not_logged_in'];
-export const isFailed=(i:Item)=>i.state==='open'&&(FAILED_KINDS.includes(i.kind)||i.kind==='other'&&!!i.run_id);
+export const failedKind=(i:Item)=>FAILED_KINDS.includes(i.kind)||i.kind==='other'&&!!i.run_id;
+export const isFailed=(i:Item)=>i.state==='open'&&failedKind(i);
+export const debugActive=(i:Item)=>!!i.debug&&['queued','running'].includes(i.debug.state);
+
+// History (answered and archived items): one tab per message type, then day groups, newest first.
+export type HistoryTab='agents'|'app'|'failed';
+export const historyRows=(items:Item[],tab:HistoryTab)=>items.filter(i=>i.state!=='open'&&(tab==='failed'?failedKind(i):tab==='agents'?i.source==='agent':i.source==='app'));
+export function byDay(items:Item[],now=new Date()):[string,Item[]][]{
+ const day=(ms:number)=>{const d=new Date(ms);d.setHours(0,0,0,0);return d.getTime()};
+ const today=day(now.getTime()),yesterday=day(today-12*3600000),groups=new Map<number,Item[]>();
+ for(const i of [...items].sort((a,b)=>b.at-a.at)){const k=day(i.at*1000);if(!groups.has(k))groups.set(k,[]);groups.get(k)!.push(i)}
+ return [...groups].map(([k,rows])=>[k===today?'Today':k===yesterday?'Yesterday':new Date(k).toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric',...(new Date(k).getFullYear()!==now.getFullYear()?{year:'numeric'}:{})}),rows]);
+}
 export const isWaiting=(i:Item)=>i.state==='open'&&!isFailed(i)&&(i.needs_answer||i.kind==='waiting');
 
-// The side panel is the one notifications surface; its open state survives a reload.
+// The secondary sidebar (Cmd+L or its toggle, never the bell); its open state survives a reload.
 let panelOpen=(()=>{try{return localStorage.getItem('workbench-notifications-panel')==='open'}catch{return false}})();
 const panelListeners=new Set<()=>void>();
 export function setPanel(open:boolean|((v:boolean)=>boolean)){const next=typeof open==='function'?open(panelOpen):open;if(next===panelOpen)return;panelOpen=next;try{localStorage.setItem('workbench-notifications-panel',next?'open':'closed')}catch{}panelListeners.forEach(l=>l())}

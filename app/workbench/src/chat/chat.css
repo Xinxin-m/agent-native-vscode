@@ -27,11 +27,6 @@
 .chat-reasoning{margin:0 0 35px;border-left:2px solid var(--line);padding:8px 12px;background:color-mix(in srgb,var(--muted) 5%,transparent);color:var(--muted);font-size:.85em}
 .chat-reasoning .chat-role{margin-bottom:4px}
 .chat-turn.is-reasoning .chat-message-body{font-size:.85em}
-.chat-queue{list-style:none;margin:0 0 8px;padding:0;font-size:12px}
-.chat-queue li{padding:6px 10px;margin-bottom:6px;border-left:2px solid var(--line)}
-.chat-queue p{margin:0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.chat-queue small{color:var(--muted)}
-.chat-queue .chat-link-button:disabled{color:var(--muted);cursor:default;text-decoration:none}
 .chat-steer{height:31px;padding:0 10px;border:1px solid var(--line);background:transparent;color:var(--ink);border-radius:calc(var(--radius)*1.5);font:inherit;font-size:12px;cursor:pointer;flex-shrink:0}
 .chat-steer:disabled{color:var(--muted);cursor:default}
 .chat-composer{max-height:100vh;transition:max-height 120ms ease}
@@ -71,3 +66,9 @@
 @keyframes library-status-spin{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){.chat-visible-phase.is-running::before{animation-duration:2.4s}}
 .chat-resume-cost{margin:7px 8px 0;font-size:10.5px;line-height:1.5;color:var(--muted);overflow-wrap:anywhere}
+.chat-turn.is-user>.chat-message-body{background:var(--user-bubble,var(--rail))}
+.chat-sticky-prompt{position:sticky;top:0;height:0;z-index:6}
+.chat-sticky-prompt>button{position:absolute;top:6px;left:50%;transform:translateX(-50%);width:min(calc(var(--reading-width,780px) - 48px),calc(100% - 32px));display:flex;align-items:baseline;gap:10px;padding:7px 14px;border:1px solid var(--line);border-radius:calc(var(--radius)*1.2);background:var(--user-bubble,var(--rail));color:var(--ink);font-size:12px;text-align:left;box-shadow:0 4px 14px #0000001f;cursor:pointer}
+.chat-sticky-prompt>button:hover{background:var(--user-bubble,var(--rail));border-color:var(--accent)}
+.chat-sticky-prompt>button>span:first-child{flex:none;color:var(--muted);font-size:11px;font-weight:550}
+.chat-sticky-prompt>button>span:last-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

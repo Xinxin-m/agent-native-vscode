@@ -1,5 +1,5 @@
 import {useEffect,useRef,useState} from 'react';
-import {api} from '../api/client';
+import {api,available} from '../api/client';
 import {createSerialWriter,policyDurations} from '../state/workspace';
 import {stoppableIdle} from './sessionControl';
 
@@ -40,10 +40,10 @@ export function StopIdleButton({sessions,onDone}:{sessions:any[];onDone?:()=>voi
  async function run(){
   setBusy(true);setError('');
   try{const result=await api('/api/live/stop_idle',{});setOutcomes(result.outcomes||[]);onDone?.();}
-  catch(e:any){setError(e.status===404?'Stopping idle sessions is not available on this server.':e.message);}
+  catch(e:any){if(e.status!==404)setError(e.message);}
   finally{setBusy(false);}
  }
- if(!count&&!outcomes&&!error)return null;
+ if(!available('/api/live/stop_idle')||!count&&!outcomes&&!error)return null;
  return <div className="stopbar">
   {count>0&&<button className="stop-idle" disabled={busy} onClick={()=>void run()}>{busy?'Stopping…':`Stop idle sessions (${count})`}</button>}
   {error&&<p className="inline-error" role="alert">{error}</p>}

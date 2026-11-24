@@ -21,9 +21,9 @@ export function chatActivity(resource:Resource,data:any,runs:any[]=[],attention:
  const row=liveSessions.find(s=>key&&s.chat_key===key&&s.alive&&!s.process_only&&s.live_status&&Number(s.observed_at)>0&&Date.now()/1000-Number(s.observed_at)<150);
  const live:string|null=row?.live_status||chat.live_status||null;
  const finished=!active.length&&exactRuns.some((run:any)=>run.status==='completed'&&timestamp(run.finished_at)>seen);
- // Failed: the latest known run failed, else the server's `failed` flag on the chat row.
- const failed=!active.length&&(latest?latest.status==='failed':chat.failed===true);
- return {failed,recovery:latest?Boolean(latest.failure&&latest.failure.kind!=='other'&&latest.status==='failed'):Boolean(chat.failure&&chat.failure.kind!=='other'),unread:!!key&&chat.unseen===true,finished,running,awaiting,live};
+ // Failed: the latest known run failed and the transcript has not moved on since (same rule as the server's sidebar.resolve), else the server's `failed` flag.
+ const failed=!active.length&&(latest?latest.status==='failed'&&!(timestamp(chat.ts_last)>timestamp(latest.finished_at||latest.updated_at||latest.created_at)+120000):chat.failed===true);
+ return {failed,recovery:latest?Boolean(failed&&latest.failure&&latest.failure.kind!=='other'):Boolean(chat.failure&&chat.failure.kind!=='other'),unread:!!key&&chat.unseen===true,finished,running,awaiting,live};
 }
 export const canMarkChatViewed=(visibility:string,focused:boolean)=>visibility==='visible'&&focused;
 // Tell the server she has this chat in front of her; only a visible, focused window may say so.

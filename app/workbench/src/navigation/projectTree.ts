@@ -5,7 +5,7 @@ export function projectMembers(projects:any[],id:string){
  return ids;
 }
 export function projectTree(projects:any[],all:any[],assignments:Record<string,string>,eligibility:any[]=all){
- const rows=projects.map(p=>{const ids=projectMembers(projects,p.id);const chats=all.filter(c=>!c.archived&&ids.has(assignments[c.key]));return {...p,chats,last:chats[0]?.ts_last||'',active:!p.archived&&(eligibility.filter(c=>!c.archived&&ids.has(assignments[c.key])).length>=5&&chats.length>0&&(p.pinned||Date.now()-Date.parse(chats[0]?.ts_last||'')<7*86400000))};}).sort((a,b)=>String(b.last).localeCompare(String(a.last)));
+ const rows=projects.map(p=>{const ids=projectMembers(projects,p.id);const chats=all.filter(c=>!c.archived&&ids.has(assignments[c.key]));return {...p,chats,last:chats[0]?.ts_last||'',active:!p.archived&&(!!p.pinned||eligibility.filter(c=>!c.archived&&ids.has(assignments[c.key])).length>=5&&chats.length>0&&Date.now()-Date.parse(chats[0]?.ts_last||'')<7*86400000)};}).sort((a,b)=>String(b.last).localeCompare(String(a.last)));
  const output:any[]=[];const seen=new Set();
  function append(p:any,depth:number){if(seen.has(p.id))return;seen.add(p.id);output.push({...p,depth});for(const child of rows.filter(c=>c.parent_id===p.id))append(child,depth+1);}
  for(const p of rows.filter(p=>!rows.some(parent=>parent.id===p.parent_id)))append(p,0);

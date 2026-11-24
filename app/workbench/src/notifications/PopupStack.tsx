@@ -11,8 +11,8 @@ const read=(key:string)=>{try{return new Set<string>(JSON.parse(sessionStorage.g
 const write=(key:string,ids:Set<string>)=>{try{sessionStorage.setItem(key,JSON.stringify([...ids].slice(-200)))}catch{}};
 const narrow=()=>typeof matchMedia==='function'&&matchMedia('(max-width:699px)').matches;
 
-// Mounted once in App. Also owns the tab title count. Hidden while the notifications panel is open (its items are there).
-export function NotificationHost({openPanel}:{openPanel:()=>void}){
+// Mounted once in App. Also owns the tab title count. Hidden while the secondary sidebar is open (its items are there).
+export function NotificationHost({openPane}:{openPane:()=>void}){
  const wb=useWorkbench(),feed=useFeed(),panel=usePanel();
  const [hidden,setHidden]=useState(()=>read('library-popup-hidden')),[mine,setMine]=useState(()=>read('library-popup-mine'));
  const tried=useRef(new Set<string>()),[phone,setPhone]=useState(narrow),[lift,setLift]=useState(0);
@@ -73,7 +73,7 @@ export function NotificationHost({openPanel}:{openPanel:()=>void}){
   const label=agents?`${n} ${n===1?'agent needs':'agents need'} you`:`${n} ${n===1?'notification needs':'notifications need'} you`;
   return <>
    <div className="npopup-bar" ref={ref} role="region" aria-label="Notifications needing your answer">
-    <button type="button" className="npopup-bar-open" onClick={openPanel}><i className="mk wait" aria-hidden="true"/>{label}</button>
+    <button type="button" className="npopup-bar-open" onClick={openPane}><i className="mk wait" aria-hidden="true"/>{label}</button>
     <button type="button" className="npopup-bar-x" aria-label="Dismiss. They stay in Notifications." title="Dismiss. They stay in Notifications." onClick={()=>candidates.forEach(hide)}><X size={15}/></button>
    </div>
   </>;
@@ -81,6 +81,6 @@ export function NotificationHost({openPanel}:{openPanel:()=>void}){
  if(!shown.length)return null;
  return <div className="npopup-stack" ref={ref} style={lift?{bottom:16+lift,maxHeight:`calc(100vh - ${32+lift}px)`}:undefined} role="region" aria-label="Notifications needing your answer">
   {shown.map(i=><NotificationCard key={i.id} item={i} variant="popup" onOpenChat={x=>openItemChat(wb,x)} onHide={hide}/>)}
-  {more>0&&<button type="button" className="npopup-more" onClick={openPanel}>{more} more</button>}
+  {more>0&&<button type="button" className="npopup-more" onClick={openPane}>{more} more</button>}
  </div>;
 }

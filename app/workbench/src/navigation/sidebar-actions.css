@@ -88,7 +88,6 @@
 @media(max-width:640px){
  .app .sidebar{position:absolute;inset:0;width:100%;min-width:0;z-index:50;box-shadow:none;border-right:0;padding:0 10px}
  .sidebar-scrim,.sidebar-resizer{display:none}
- .sidebar .sidebar-header .sidebar-toggle{display:none}
  .sidebar .sidebar-header .icon-button,.sidebar .sidebar-header-actions .icon-button{width:36px;height:36px}
  .sidebar .sidebar-header .sidebar-modes button{height:32px;font-size:13.5px;padding:0 11px}
  .sidebar .chat-row{min-height:52px;padding:8px 0}
@@ -113,3 +112,18 @@
 .sidebar .search-modes small{margin-left:auto;margin-right:7px}
 /* Menu rows share one text edge whether or not a row has an icon. */
 .context-menu:has(button>svg) :is(button,summary):not(:has(>svg)):not(:has(>.menu-check)):not(details button){padding-left:32px}
+/* Round 5 (item 48): the search, refresh and new chat icons sit at the right of the first heading row of a tab, never in the tab row. */
+.app .sidebar{container:sidebar/inline-size}
+.sidebar .sidebar-row-actions{display:flex;align-items:center;gap:1px;flex:none;margin-left:auto}
+.sidebar .section-label>.sidebar-row-actions:last-child{margin-right:2px}
+.sidebar .section-label .sidebar-row-actions .icon-button{width:28px;height:28px;margin:0;border-radius:var(--r-s,6px);color:var(--muted)}
+.sidebar .section-label .sidebar-row-actions .icon-button:hover{color:var(--ink);background:var(--hover)}
+.sidebar .section-label .sidebar-row-actions .icon-button[aria-expanded=true]{background:var(--hover);color:var(--ink)}
+.sidebar .projects-label{flex:none}
+.sidebar .projects-label .section-heading{font-size:12px;font-weight:600;color:var(--muted);padding:2px 0}
+.sidebar .projects-label .section-heading:hover{color:var(--ink)}
+.sidebar .projects-label~.search-field{margin-bottom:6px}
+.sidebar .live-label .section-actions{margin-left:auto}
+.sidebar .live-label .section-actions+.sidebar-row-actions{margin-left:8px}
+@container sidebar (max-width:340px){.sidebar .live-label{flex-wrap:wrap;height:auto;row-gap:2px}.sidebar .live-label .section-actions{order:3;flex-basis:100%;margin-left:0}.sidebar .live-label .section-actions+.sidebar-row-actions{margin-left:auto}}
+.sidebar .live-label .section-actions button{white-space:nowrap}

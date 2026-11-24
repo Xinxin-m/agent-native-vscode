@@ -52,3 +52,11 @@ export function filePreviewGroup(groups:GroupPosition[],sourceId:string,directio
  if(limit>0&&groups.length>=limit)return ordered[Math.min(limit,groups.length)-1]?.id;
  return adjacentPreviewGroup(groups,sourceId,direction,remembered);
 }
+// A PDF opens beside the current pane: the nearest pane to its right, else a new right split, else (at the pane limit) the nearest pane to its left.
+export function pdfTargetPane(groups:GroupPosition[],currentId:string,limit=4):{group:string}|{split:'right'}{
+ const current=groups.find(g=>g.id===currentId);if(!current)return {split:'right'};const r=current.rect,near=(g:GroupPosition)=>Math.abs(g.rect.top-r.top);
+ const right=groups.filter(g=>g.id!==currentId&&g.rect.left>=r.right-3).sort((a,b)=>a.rect.left-b.rect.left||near(a)-near(b))[0];if(right)return {group:right.id};
+ if(groups.length<limit)return {split:'right'};
+ const left=groups.filter(g=>g.id!==currentId&&g.rect.right<=r.left+3).sort((a,b)=>b.rect.right-a.rect.right||near(a)-near(b))[0];
+ return {group:(left||current).id};
+}

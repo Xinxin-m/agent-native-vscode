@@ -36,6 +36,28 @@ const markOf = row => {
  return ['finished', 'done', 'completed'].includes(row.kind) && !(row.seen || row.read_at) ? 'new' : '';
 };
 const MARK_WORDS = {failed: 'Failed', waiting: 'Waiting for you', new: 'Finished, not yet seen'};
+const debugActive = row => ['queued', 'running'].includes(row.debug?.state);
+// Inline icons (same shapes as the workbench card); one path string each.
+const ICONS = {
+ chat: 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z',
+ thread: 'M15 3h6v6M10 14L21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6',
+ bug: 'm8 2 1.88 1.88M14.12 3.88 16 2M9 7.13v-1a3.003 3.003 0 1 1 6 0v1M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6M12 20v-9M6.53 9C4.6 8.8 3 7.1 3 5M6 13H2M3 21c0-2.1 1.7-3.9 3.8-4M20.97 5c0 2.1-1.6 3.8-3.5 4M22 13h-4M17.2 17c2.1.1 3.8 1.9 3.8 4'
+};
+function icon(name) {
+ const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+ svg.setAttribute('viewBox', '0 0 24 24');
+ svg.setAttribute('aria-hidden', 'true');
+ const path = document.createElementNS(svg.namespaceURI, 'path');
+ path.setAttribute('d', ICONS[name]);
+ svg.append(path);
+ return svg;
+}
+const dayLabel = at => {
+ const day = ms => { const d = new Date(ms); d.setHours(0, 0, 0, 0); return d.getTime(); };
+ const k = day(at * 1000), today = day(Date.now());
+ return k === today ? 'Today' : k === day(today - 12 * 3600000) ? 'Yesterday' :
+  new Date(k).toLocaleDateString(undefined, {weekday: 'short', month: 'short', day: 'numeric', ...(new Date(k).getFullYear() !== new Date().getFullYear() ? {year: 'numeric'} : {})});
+};
 const DEBUG_WORDS = {queued: 'Debug queued', running: 'Debug running', fixed: 'Debug: fixed', needs_review: 'Debug: needs review', needs_signin: 'Debug: needs sign-in', needs_approval: 'Debug: needs approval', failed: 'Debug failed'};
 // One row shape for both servers.
 const fromNotice = n => ({...n, group: 'app', archived: Boolean(n.archived_at)});
@@ -90,7 +112,27 @@ function mount(host, options) {
  panel.setAttribute('aria-labelledby', heading.id);
  panel.hidden = true;
  const tabs = el('div'), status = el('p');
- const groups = {agents: {head: el('h3', 'Agents'), list: el('ul')}, app: {head: el('h3', 'App'), list: el('ul')}};
+ // Open items sit under Waiting for your decision and Failed (each with Debug all); the rest, and the archive, under Agents and App.
+ const groups = {};
+ for (const [name, title, debuggable] of [['waiting', 'Waiting for your decision', true], ['failed', 'Failed', true], ['agents', 'Agents'], ['app', 'App']]) {
+  const head = el('h3', title), row = el('div'), list = el('ul');
+  row.className = 'notification-group-row';
+  row.append(head);
+  let all;
+  if (debuggable) {
+   all = button('', () => debugAll(name), 'Debug all: ' + title.toLowerCase());
+   all.className = 'notification-icon notification-debug-all';
+   all.title = 'Debug all';
+   all.append(icon('bug'));
+   all.hidden = true;
+   row.append(all);
+  }
+  groups[name] = {head, row, list, all};
+ }
+ const groupOf = (row, archived) => {
+  const mark = !archived && mode === 'feed' ? markOf(row) : '';
+  return mark === 'waiting' || mark === 'failed' ? mark : row.group;
+ };
  tabs.className = 'notification-tabs';
  status.setAttribute('role', 'status');
  const inbox = button('Inbox', () => show('inbox'));
@@ -99,7 +141,7 @@ function mount(host, options) {
  panel.append(heading, tabs, status);
  for (const group of Object.values(groups)) {
   group.head.className = 'notification-group';
-  panel.append(group.head, group.list);
+  panel.append(group.row, group.list);
  }
  host.append(bell);
  document.body.append(panel);
@@ -135,8 +177,16 @@ function mount(host, options) {
   }
   const disabled = options.disabled?.();
   for (const [name, group] of Object.entries(groups)) {
-   const mine = visible.filter(row => row.group === name);
-   group.head.hidden = mode !== 'feed' || !mine.length;
+   const mine = visible.filter(row => groupOf(row, archived) === name);
+   if (archived) mine.sort((a, b) => (b.at || 0) - (a.at || 0));
+   group.row.hidden = mode !== 'feed' || !mine.length;
+   if (group.all) {
+    const targets = mine.filter(row => row.feed && row.debuggable);
+    group.all.hidden = !targets.length;
+    group.all.disabled = Boolean(disabled) || !targets.some(row => !debugActive(row));
+    group.all.title = group.all.disabled && targets.length && !disabled ? 'A debug is running for every item' : 'Debug all';
+   }
+   group.list.querySelectorAll('.notification-day').forEach(day => day.remove());
    let after = null;
    for (const row of mine) {
     const signature = JSON.stringify([row, disabled]);
@@ -155,6 +205,19 @@ function mount(host, options) {
     }
     after = item.node;
    }
+   // The archive reads by day: Today, Yesterday, then dates.
+   if (archived) {
+    let last = '';
+    for (const row of mine) {
+     const label = row.at ? dayLabel(row.at) : '';
+     if (!label || label === last) continue;
+     last = label;
+     const day = el('li'), text = el('h4', label);
+     day.className = 'notification-day';
+     day.append(text);
+     group.list.insertBefore(day, rows.get(row.key).node);
+    }
+   }
   }
   const empty = archived ? 'No archived notifications.' : 'You’re all caught up.';
   if (!visible.length) status.textContent = empty;
@@ -162,8 +225,11 @@ function mount(host, options) {
  }
  function build(row, archived, disabled) {
   const node = el('li'), body = el('div'), actions = el('div');
-  node.className = 'notification-row';
-  node.setAttribute('aria-label', row.message);
+  const mark = markOf(row), icons = el('div');
+  node.className = 'notification-row' + (mark === 'waiting' || mark === 'failed' ? ' notification-' + mark : '');
+  node.setAttribute('aria-label', (mark === 'waiting' || mark === 'failed' ? MARK_WORDS[mark] + ': ' : '') + row.message);
+  icons.className = 'notification-icons';
+  let top = false;
   body.className = 'notification-body';
   actions.className = 'notification-actions';
   const account = accounts.find(a => a.id === row.account_id);
@@ -185,14 +251,18 @@ function mount(host, options) {
     hideClose: true,
     showAccountLabel: ![account.email, account.label, account.id].some(label => label && row.message?.includes(label))
    });
-  } else if (row.feed && row.group === 'agents' || row.feed && row.options.length) {
+  } else if (row.feed) {
    const title = el('p', row.message);
    title.className = 'notification-title';
    if (row.kind === 'approval' && row.body) {
     const code = el('code', firstLine(row.body));
     title.append(' ', code);
    }
-   body.append(title);
+   const head = el('div');
+   head.className = 'notification-top';
+   head.append(title, icons);
+   body.append(head);
+   top = true;
    const reason = !row.chat_title && row.kind !== 'approval' && row.body && firstLine(row.body) !== row.message ? firstLine(row.body) : '';
    const context = [providerOf(row), row.at ? ago(row.at) : ''].filter(Boolean).join(' · ') + (row.chat_title ? ' · ' + row.chat_title : reason ? ' · ' + reason : '');
    if (context) {
@@ -208,14 +278,6 @@ function mount(host, options) {
    line.className = 'notification-context notification-debug';
    body.append(line);
   }
-  const mark = markOf(row), lead = body.querySelector('p:not(.notification-debug)');
-  if (mark && lead) {
-   const dot = el('i');
-   dot.className = 'notification-dot ' + mark;
-   dot.setAttribute('role', 'img');
-   dot.setAttribute('aria-label', MARK_WORDS[mark]);
-   lead.prepend(dot);
-  }
   if (row.feed && row.state !== 'open' && (row.answer?.choice || row.answer?.text)) {
    const done = el('p', 'You chose ' + (row.answer.choice || row.answer.text));
    done.className = 'notification-context';
@@ -228,20 +290,41 @@ function mount(host, options) {
    actions.append(run);
   }
   if (row.feed && row.debuggable && !archived) {
-   const active = ['queued', 'running'].includes(row.debug?.state);
-   const run = button(active ? 'Debugging' : 'Debug', () => debug(row), 'Debug: ' + row.message);
-   run.className = 'notification-debug-button';
+   const active = debugActive(row), label = active ? 'A debug is running' : 'Debug: send an agent to find and fix the cause';
+   const run = button('', () => debug(row), label);
+   run.className = 'notification-icon notification-debug-button';
+   run.title = label;
+   run.append(icon('bug'));
    run.disabled = active || Boolean(disabled);
-   actions.append(run);
+   (top ? icons : actions).append(run);
+  }
+  if (top && row.link && row.kind !== 'waiting') {
+   const thread = el('a');
+   thread.className = 'notification-icon notification-thread';
+   thread.href = row.link;
+   thread.target = '_blank';
+   thread.rel = 'noopener noreferrer';
+   thread.title = 'Open thread';
+   thread.setAttribute('aria-label', 'Open thread');
+   thread.append(icon('thread'));
+   icons.prepend(thread);
   }
   if (row.kind === 'waiting' && !row.chat_key && row.link && options.openLive) actions.append(button('Open Live', () => {
    options.openLive(row);
    close(false);
   }));
-  if ((row.chat_key || row.run_id) && (options.canOpenChat?.(row) ?? true)) actions.append(button(row.feed ? 'Open chat' : 'Open failed chat', () => {
-   options.openChat?.(row);
-   close(false);
-  }));
+  if ((row.chat_key || row.run_id) && (options.canOpenChat?.(row) ?? true)) {
+   const open = button(top && row.feed ? '' : row.feed ? 'Open chat' : 'Open failed chat', () => {
+    options.openChat?.(row);
+    close(false);
+   }, top && row.feed ? 'Open chat' : undefined);
+   if (top && row.feed) {
+    open.className = 'notification-icon';
+    open.title = 'Open chat';
+    open.append(icon('chat'));
+    icons.prepend(open);
+   } else actions.append(open);
+  }
   if (!archived && row.official && options.officialRecovery) actions.append(button('Recovery options', async () => {
    try { await options.officialRecovery(row); }
    catch (error) { status.textContent = error.message; }
@@ -265,7 +348,7 @@ function mount(host, options) {
    const remove = button('×', () => change('archive', row), 'Archive notification');
    remove.title = 'Archive notification';
    remove.className = 'notification-archive';
-   node.prepend(remove);
+   if (top) icons.append(remove); else node.prepend(remove);
   }
   node.append(body, actions);
   if (fieldNode) node.append(fieldNode);
@@ -384,6 +467,25 @@ function mount(host, options) {
    await load();
   }
   catch (error) { inlineError(row, error.message === 'debug_running' ? Error('A debug is already running for this item.') : error); }
+  finally {pending = false;}
+ }
+ // One debug request per debuggable item of the group that has none running.
+ async function debugAll(name) {
+  if (pending || !value) return;
+  const targets = value.rows.filter(row => !row.archived && row.feed && row.debuggable && groupOf(row, false) === name && !debugActive(row));
+  if (!targets.length) return;
+  pending = true;
+  status.textContent = '';
+  const failed = [];
+  try {
+   for (const row of targets) {
+    try { await options.request('/api/notifications/act', {id: row.id, action: 'debug'}); }
+    catch (error) { if (error.message !== 'debug_running') failed.push(error.message); }
+   }
+   pending = false;
+   await load();
+   if (failed.length) status.textContent = failed.length === 1 ? failed[0] : failed.length + ' debugs did not start: ' + failed[0];
+  }
   finally {pending = false;}
  }
  function open() {

@@ -45,11 +45,13 @@
 .sidebar-header-actions .icon-button{width:26px;height:30px;border-radius:5px}
 .sidebar-header-actions .icon-button[aria-expanded=true]{background:var(--hover);color:var(--ink)}
 .sidebar-header~.search-field{margin-bottom:8px}
-.workbench-canvas{position:relative}.sidebar-reveal{position:absolute;left:0;top:50%;margin-top:-18px;z-index:100;width:18px;height:36px;border-radius:0 6px 6px 0;background:var(--rail)}
+.workbench-canvas{position:relative}.dockview-theme-workbench .dv-pre-actions-container{display:flex;align-items:center}.sidebar-reveal{width:28px;height:28px;margin:0 4px 0 2px;border-radius:var(--r-s,6px)}.sidebar-reveal-float{position:absolute;left:8px;top:8px;z-index:100;margin:0}
+.secondary-toggle{width:27px;height:27px}.secondary-toggle[aria-pressed=true]{color:var(--ink);background:var(--hover)}.secondary-toggle-float{position:absolute;right:8px;top:8px;z-index:100}
+@media(max-width:640px){.sidebar-reveal{width:36px;height:36px}}
 
 /* Redesign 2026-11-22: calmer rail, readable muted text, status tokens. */
 :root{--ink:#1d1d1f;--muted:#5f6066;--panel:#ffffff;--paper:#fcfcfb;--rail:#f7f7f5;--line:#e4e4e1;--hover:#ececea;--accent:#1b66cc;--accent-soft:#e8f0fc;--bar:#1b66cc;--status-wait:#1b66cc;--status-new:#1e8e4e;--status-fail:#d32f2f}
-:root[data-theme=dark]{--ink:#ececee;--muted:#a3a3a9;--panel:#232325;--paper:#1e1e20;--rail:#1b1b1d;--line:#323236;--hover:#2c2c2f;--accent:#78b2ff;--accent-soft:#22324a;--bar:#78b2ff;--status-wait:#78b2ff;--status-new:#5ccf8a;--status-fail:#ff6b66}
+:root[data-theme=dark]{--user-bubble:#2d2d31;--ink:#ececee;--muted:#a3a3a9;--panel:#232325;--paper:#1e1e20;--rail:#1b1b1d;--line:#323236;--hover:#2c2c2f;--accent:#78b2ff;--accent-soft:#22324a;--bar:#78b2ff;--status-wait:#78b2ff;--status-new:#5ccf8a;--status-fail:#ff6b66}
 :root[data-theme=dark] .sidebar-header .sidebar-modes button.selected{background:var(--panel)}
 .sidebar{border-right:1px solid var(--line)}
 .sidebar-resizer:before{display:none}
