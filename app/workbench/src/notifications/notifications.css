@@ -70,3 +70,10 @@
 .npanel-history{padding:0;background:none;font-size:12.5px;color:var(--muted);text-decoration:underline;text-underline-offset:2px}.npanel-history:hover{color:var(--ink);background:none}
 @media(max-width:699px){.notifications-panel{position:fixed;inset:0;z-index:80;width:auto;border-left:0}.npanel-x{width:36px;height:36px}}
 @media(prefers-reduced-motion:reduce){.notifications-panel{animation:none}}
+
+.npopup-dismiss,.npopup-status{border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);color:var(--ink)}
+.npopup-dismiss{align-self:flex-end;padding:5px 10px;font-size:12px}
+.npopup-dismiss:hover{background:var(--hover)}
+.npopup-status{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;overflow-wrap:anywhere}
+.npopup-bar>div{flex:1;min-width:0;overflow:auto}
+.npopup-bar .npopup-dismiss{align-self:center;margin-right:6px}

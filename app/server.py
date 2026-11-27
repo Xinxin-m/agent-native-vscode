@@ -1077,12 +1077,13 @@ def main():
     cfg = jload("config", {})
     cfg = cfg if isinstance(cfg, dict) else {}
     port = int(cfg.get("port", 8744))
-    load_plugins()
-    run_background()
-    light_sync("server-start")
-    srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    print(f"chat dashboard: http://127.0.0.1:{port}")
-    srv.serve_forever()
+    # A duplicate launch must fail before any plugin opens the execution store.
+    with ThreadingHTTPServer(("127.0.0.1", port), Handler) as srv:
+        load_plugins()
+        run_background()
+        light_sync("server-start")
+        print(f"chat dashboard: http://127.0.0.1:{port}")
+        srv.serve_forever()
 
 
 if __name__ == "__main__":

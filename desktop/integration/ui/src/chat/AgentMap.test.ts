@@ -41,6 +41,11 @@ describe('transcript activity and ordering',()=>{
   expect(tree[0].children[1].status).toBe('finished');
   expect(agentCounts(tree)).toEqual({running:2,finished:3,waiting:1,unknown:1});
  });
+ it('renders each identity once with repeated nodes and edges',()=>{
+  const nodes=[{key:'root'},{key:'child'},{key:'child'}],edge={parent_key:'root',child_key:'child'};
+  const tree=orderAgentTree(nodes,[edge,edge],()=>'finished');
+  expect(agentCounts(tree)).toEqual({finished:2});
+ });
  it('survives a lineage cycle',()=>{
   const tree=orderAgentTree([{key:'a'},{key:'b'}],[{parent_key:'a',child_key:'b'},{parent_key:'b',child_key:'a'}],()=>'unknown');
   expect(tree).toEqual([]);

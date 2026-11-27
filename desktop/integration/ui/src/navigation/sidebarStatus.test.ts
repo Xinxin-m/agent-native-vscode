@@ -11,7 +11,8 @@ describe('row status priority',()=>{
   expect(rowStatus('idle',true,{failed:true})).toBe('failed');
   expect(rowStatus('working',false,{failed:true})).toBe('failed');
   expect(rowStatus('waiting',true,{failed:true,running:true})).toBe('failed');
-  expect(Object.keys(statusWords).sort()).toEqual(['failed','new','waiting','working']);
+  expect(rowStatus('stalled',true,{running:true})).toBe('stalled');
+  expect(Object.keys(statusWords).sort()).toEqual(['failed','new','stalled','waiting','working']);
   expect(rowStatus(null,false)).toBe(null);
  });
  it('local broker state counts as waiting or working',()=>{expect(rowStatus(null,false,{awaiting:true})).toBe('waiting');expect(rowStatus('idle',true,{running:true})).toBe('working');});

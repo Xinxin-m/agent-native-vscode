@@ -13,11 +13,11 @@ import tarfile
 PORTABLE_FILES = (
     'README.md', 'docs/upstream.json', 'docs/build-and-update.md',
     'integration/build.py', 'integration/launch.sh', 'integration/export_source.py',
-    'integration/install.py', 'integration/variants.py',
+    'integration/install.py', 'integration/idle_install.py', 'integration/variants.py',
     'integration/official-sessions.py', 'integration/auth_failure.py',
     'integration/backend/web/settings-insights.js', 'integration/backend/web/settings-insights.css',
     'integration/qa/webviews.cjs', 'integration/qa/delivery-state.cjs',
-    'integration/qa/draft-preservation.py', 'integration/qa/test_install_guard.py',
+    'integration/qa/draft-preservation.py', 'integration/qa/test_install_guard.py', 'integration/qa/test_idle_install.py',
     'integration/qa/test_export_source.py', 'integration/qa/agent-map-timeout.cjs',
 )
 UPSTREAM_PATHS = ('src', 'product.json', 'build/gulpfile.vscode.ts')

@@ -64,7 +64,10 @@ class SearchOpenTests(unittest.TestCase):
             path.write_bytes(b'%PDF')
             service=file_service.FileService(root/'data',default_root=None)
             rid=service.register('mac',str(root),'read')['id']
-            with patch.object(open_destinations.fs,'instance',return_value=service), patch.object(open_destinations.subprocess,'run') as run:
+            with patch.object(open_destinations.fs,'instance',return_value=service), \
+                 patch.object(open_destinations.sys,'platform','darwin'), \
+                 patch.object(open_destinations,'default_browser',return_value='com.example.browser'), \
+                 patch.object(open_destinations.subprocess,'run') as run:
                 open_destinations.open_resource({'root_id':rid,'path':path.name},'default_browser')
                 argv=run.call_args.args[0]
                 self.assertEqual(argv[0],'open')
@@ -72,3 +75,29 @@ class SearchOpenTests(unittest.TestCase):
                 self.assertNotIn('code',argv)
                 with self.assertRaises(file_service.FileError):
                     open_destinations.open_resource({'host_id':'sc','path':str(path)},'system')
+
+    def test_external_window_uses_default_browser_and_preserves_link(self):
+        url = 'https://example.test/report?first=1&second=two#summary'
+        with patch.object(open_destinations.sys, 'platform', 'darwin'), \
+             patch.object(open_destinations, 'default_browser', return_value='com.google.chrome'), \
+             patch.object(open_destinations.subprocess, 'run') as run:
+            open_destinations.open_resource({'url': url}, 'default_browser_window')
+        self.assertEqual(run.call_args.args[0], [
+            '/usr/bin/open', '-n', '-b', 'com.google.chrome', '--args', '--new-window', url,
+        ])
+
+    def test_external_window_uses_resolved_file_and_preserves_pdf_page(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            path = root / 'report #1.pdf'
+            path.write_bytes(b'%PDF')
+            service = file_service.FileService(root / 'data', default_root=None)
+            rid = service.register('mac', str(root), 'read')['id']
+            with patch.object(open_destinations.fs, 'instance', return_value=service), \
+                 patch.object(open_destinations.sys, 'platform', 'darwin'), \
+                 patch.object(open_destinations, 'default_browser', return_value='org.mozilla.firefox'), \
+                 patch.object(open_destinations.subprocess, 'run') as run:
+                open_destinations.open_resource({'root_id': rid, 'path': path.name, 'page': 3}, 'default_browser_window')
+        self.assertEqual(run.call_args.args[0], [
+            '/usr/bin/open', '-n', '-b', 'org.mozilla.firefox', '--args', '-new-window', path.as_uri() + '#page=3',
+        ])

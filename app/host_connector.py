@@ -30,9 +30,11 @@ import sys
 import time
 
 PROTOCOL = 1
-SSH_OPTIONS = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-o', 'ConnectionAttempts=1',
-               '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=2',
+SSH_OPTIONS = ['-o', 'BatchMode=yes', '-o', 'ConnectionAttempts=1', '-o', 'ServerAliveCountMax=2',
                '-o', 'StrictHostKeyChecking=yes', '-o', 'SendEnv=-*', '-T']
+SLURM_SSH_CONNECT_S = 35
+SLURM_SSH_KEEPALIVE_S = 15
+SLURM_SSH_COMMAND_S = SLURM_SSH_CONNECT_S + 20  # connector work and command startup after the proxy handshake
 SID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$')
 MODEL = re.compile(r'^[A-Za-z0-9._\-\[\]:]{1,160}$')
 PROFILE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$')
@@ -77,7 +79,16 @@ def ssh_command(host, operation, request=None):
     if request is not None:
         encoded = base64.urlsafe_b64encode(json.dumps(request, separators=(',', ':')).encode()).decode()
         command += ' ' + shlex.quote(encoded)
-    return ['ssh', *SSH_OPTIONS, alias, command]
+    cluster = host.get('kind') == 'slurm'
+    connect_timeout = SLURM_SSH_CONNECT_S if cluster else 10
+    keepalive_interval = SLURM_SSH_KEEPALIVE_S if cluster else 5
+    return ['ssh', *SSH_OPTIONS, '-o', f'ConnectTimeout={connect_timeout}',
+            '-o', f'ServerAliveInterval={keepalive_interval}', alias, command]
+
+
+def ssh_timeout(host, default):
+    """Allow a Slurm proxy to connect before the bounded remote operation."""
+    return max(default, SLURM_SSH_COMMAND_S) if host.get('kind') == 'slurm' else default
 
 
 def _base_env():
@@ -310,6 +321,11 @@ def shared_session_store(tool, source_account, target_account):
 
 def resolve_local_account(tool, account_id=None, model=None, session_id=None, cwd=None):
     data = _local_accounts()
+    try:
+        import accounts
+        auto = accounts._auto_cfg()
+    except ImportError:
+        auto = connector_config().get('auto_switch', {})
     bound, pinned, ownership = None, False, ''
     if session_id:
         matches, directories = [], {}
@@ -362,15 +378,15 @@ def resolve_local_account(tool, account_id=None, model=None, session_id=None, cw
         elif len(matches) > 1 and not pinned and active in matches and _login_identity(tool, directories[active]):
             # No transcript names an owner among these logins: continue on the active account.
             bound, ownership = active, ownership or 'unattributed_active'
+        elif (tool == 'codex' and auto.get('pools', True) and active in matches and
+              len({os.path.realpath(os.path.join(directories[mid], 'sessions')) for mid in matches}) == 1):
+            # Pool authentication is independent of the desktop. These homes
+            # point to the same rollout, even when all desktop logins are gone.
+            bound, ownership = active, 'pooled_shared_store'
         else:
             error = AmbiguousSessionAccount('Session account is missing or ambiguous; choose its original account')
             error.candidates = matches
             raise error
-    try:
-        import accounts
-        auto = accounts._auto_cfg()
-    except ImportError:
-        auto = connector_config().get('auto_switch', {})
     # Profiles without a usable home cannot be automatic alternatives.
     data = dict(data, accounts=[dict(p) for p in data.get('accounts', [])])
     for profile in data['accounts']:
@@ -637,7 +653,11 @@ def bind_remote_session(host_id, tool, cwd, session_id):
     ids = [a['id'] for a in usable]
     if 'resolve' in (host.get('capabilities') or []):
         request = dict(host_id=host_id, machine_id=host['machine_id'], job_id=host.get('job_id'), tool=tool, cwd=cwd, session_id=session_id)
-        result = subprocess.run(ssh_command(host, 'resolve', request), stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=20)
+        try:
+            result = subprocess.run(ssh_command(host, 'resolve', request), stdin=subprocess.DEVNULL,
+                                    capture_output=True, text=True, timeout=ssh_timeout(host, 20))
+        except subprocess.TimeoutExpired:
+            raise ValueError('SSH timed out while checking the session owner.')
         if result.returncode or len(result.stdout) > 65536:
             raise ValueError((result.stderr.strip() or 'Could not check the session owner on ' + host_id)[-400:])
         owner = json.loads(result.stdout)

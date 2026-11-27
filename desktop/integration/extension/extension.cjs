@@ -5,10 +5,10 @@ const path=require('node:path');
 const {randomUUID,randomBytes}=require('node:crypto');
 const bridge=require('./bridge.cjs');const {tabTitle,tabIcon}=require('./tab-title.cjs');
 const {createReadCache,createDispatcher,scopeState}=require('./rpc-flow.cjs');
-const {targetColumn,resourceKey,pdfTargetPane,layoutRects}=require('./panes.cjs');
+const {utilityDestination,targetColumn,resourceKey,besideFileColumn}=require('./panes.cjs');
 const agentTabs=require('./agent-tabs.cjs');
 const {openWorkspaceFolder,showInitialChats,createWorkspaceChoice}=require('./workspace-navigation.cjs');
-const defaults={theme:'dark',fontSize:14,lineHeight:1.65,readingWidth:780,openDefault:'tab',maxAutoPanes:3,defaultProvider:'ask',defaultModels:{},thinking:'collapsed',toolOutput:'folded',composerMax:null,foldComposer:true,sendKey:'enter',whileWorking:'queue',openAtLatest:true,tabGroups:'manual',groupFiles:false,confirmMoves:'some',showHidden:false,liveRefresh:15};
+const defaults={theme:'dark',fontSize:14,lineHeight:1.65,readingWidth:780,openDefault:'right',maxAutoPanes:3,defaultProvider:'ask',defaultModels:{},thinking:'collapsed',toolOutput:'folded',composerMax:null,foldComposer:true,sendKey:'enter',whileWorking:'queue',openAtLatest:true,tabGroups:'manual',groupFiles:false,confirmMoves:'some',showHidden:false,liveRefresh:15};
 async function revealExisting(vscode,resource,column){
  try{return await vscode.commands.executeCommand('_library.revealExisting',resource,column);}
  catch(error){if(error?.message === "command '_library.revealExisting' not found")return false;throw error;}
@@ -72,6 +72,7 @@ async function chooseProjectMap(vscode, api, open, project, title){
 function activate(context){
  const doubleClickMs=require('./gestures.cjs').doubleClickInterval();
  const panels=new Map(),views=new Set(),fileViews=new Set();let preferences={...defaults,...context.globalState.get('preferences',{})};
+ const preferenceWrites={settled:Promise.resolve()};
  const chatNavigationViews=new Set();
  const workspaceChoice=createWorkspaceChoice(context.workspaceState,choice=>{for(const w of chatNavigationViews)void w.postMessage({type:'workspaceChoice',choice});});
  const base=()=>bridge.endpoint(vscode.workspace.getConfiguration('library').get('endpoint'));
@@ -84,6 +85,7 @@ function activate(context){
  const projectMaps=require('./project-map.cjs').create({vscode,context,openSession:key=>open({kind:'chat',key,title:'Conversation'}),theme:()=>preferences.theme==='system'?(vscode.window.activeColorTheme.kind===vscode.ColorThemeKind.Dark?'dark':'light'):preferences.theme});
  const showError=e=>vscode.window.showErrorMessage(e.message||String(e));
  const notificationPoller=require('./notifications.cjs').create({vscode,api,canAct:()=>vscode.workspace.isTrusted});notificationPoller.start();context.subscriptions.push({dispose:()=>notificationPoller.stop()});
+ if(preferences.openDefault==='preview')preferences.openDefault='tab';
  if(!preferences.interfaceScaleVersion){preferences={...preferences,fontSize:14,interfaceScaleVersion:1};void context.globalState.update('preferences',preferences).catch(showError);}
  void require('./interface-scale.cjs').apply(vscode,preferences.fontSize).catch(showError);
  if(['beige','sage'].includes(preferences.theme))void require('./themes.cjs').apply(vscode,preferences.theme).catch(showError);
@@ -120,56 +122,87 @@ function activate(context){
  }
  async function open(resource,destination,explicitColumn){
   if(!resource||typeof resource.kind!=='string')throw Error('Invalid resource');
-  // A Mac chat's link to a file that is not on this Mac: the backend resolves the chat's exact link on the host whose workspaces hold it.
-  if(resource.kind==='file'&&resource.meta?.chat_key&&!resource.root_id&&!resource.file_id&&['mac','local',undefined].includes(resource.host_id)&&path.isAbsolute(resource.path||'')&&!(await fs.stat(resource.path).then(()=>true,()=>false))){
-   const {resource:reference}=await api('/api/files/reference',{chat_key:resource.meta.chat_key,path:resource.path});
-   resource={...resource,host_id:reference.host_id,file_id:reference.file_id};
+  await preferenceWrites.settled;
+  const utility=utilityDestination(resource.kind,destination,explicitColumn,preferences);
+  if(utility!==undefined)explicitColumn=await vscode.commands.executeCommand('_library.utilityColumn',utility);
+  async function findRemoteRoot(){
+   if(resource.file_id&&!resource.root_id)return undefined;
+   const {roots=[]}=await api('/api/files/roots?host_id='+encodeURIComponent(resource.host_id));
+   return roots.filter(r=>r.host_id===resource.host_id&&(resource.root_id?
+    (r.id||r.root_id)===resource.root_id:resource.path===r.path||resource.path.startsWith(r.path.replace(/\/$/,'')+'/')))
+    .sort((a,b)=>b.path.length-a.path.length)[0];
+  }
+  const preferRemoteRoot=resource.kind==='file'&&resource.meta?.workbench_link===true&&!resource.root_id&&!resource.file_id
+   &&!['mac','local',undefined].includes(resource.host_id);
+  const preferredRoot=preferRemoteRoot?await findRemoteRoot():undefined;
+  if(resource.kind==='file'&&resource.meta?.chat_key&&!resource.root_id&&!resource.file_id&&!preferredRoot&&path.isAbsolute(resource.path||'')){
+   try{
+    const {resource:reference}=await api('/api/files/reference',{chat_key:resource.meta.chat_key,path:resource.path});
+    if(preferRemoteRoot&&reference.host_id!==resource.host_id&&
+       !(reference.relocated_from_host===resource.host_id&&reference.evidence_path===resource.path))throw Error('The file reference belongs to a different host.');
+    resource={...resource,path:reference.host_id==='mac'?reference.path:resource.path,host_id:reference.host_id,file_id:reference.file_id};
+   }catch(error){
+    const local=['mac','local',undefined].includes(resource.host_id);
+    if(!local||!(await fs.stat(resource.path).then(info=>info.isFile(),()=>false)))throw error;
+   }
   }
   if(resource.kind==='files'&&resource.root_id===undefined){const location=await require('./file-context.cjs').workspaceFor(vscode,filesTab.rootId);if(vscode.workspace.getConfiguration('library').get('files.tabWorkspace')==='all')location.root_id='all';resource={...resource,...location};}
-  if(resource.kind==='project-map'){if(resource.project_id&&await revealExisting(vscode,resource))return;await projectMaps.open(resource.project_id,resource.title);return;}
+  if(resource.kind==='project-map'){if(resource.project_id&&await revealExisting(vscode,resource,explicitColumn))return;await projectMaps.open(resource.project_id,resource.title,explicitColumn);return;}
   const columns=vscode.window.tabGroups.all.map(g=>g.viewColumn),active=vscode.window.tabGroups.activeTabGroup.viewColumn;
   const dest=destination||(resource.kind==='file'?preferences.openDefault:'tab')||'tab';
-  let column=explicitColumn||targetColumn(columns,active,dest,preferences.maxAutoPanes);
-  const pdf=!destination&&!explicitColumn&&resource.kind==='file'&&/\.pdf$/i.test(resource.path||resource.title||'')&&['tab','right','below','preview'].includes(dest);
-  // A PDF opened without a destination goes beside the current pane (pdfTargetPane, at most 4 panes); an open PDF is focused where it is.
-  async function pdfColumn(uri){
-   const shown=vscode.window.tabGroups.all.find(g=>g.tabs.some(t=>t.input?.uri?.toString()===uri.toString()));if(shown)return shown.viewColumn;
-   const choice=pdfTargetPane(layoutRects(await vscode.commands.executeCommand('vscode.getEditorLayout')),active);if('group' in choice)return choice.group;
-   await vscode.commands.executeCommand('workbench.action.newGroupRight');return vscode.window.tabGroups.activeTabGroup.viewColumn;
+  const newBrowserWindow=dest==='default-browser-window';
+  const external=['default-browser','default-browser-window','browser-tab','system'].includes(dest);
+  async function openExternally(uri,href=uri.toString()){
+   const fragment=resource.page?'page='+resource.page:resource.anchor?encodeURIComponent(resource.anchor):'';
+   if(newBrowserWindow&&fragment&&uri.scheme==='file')href+='#'+fragment;
+   if(await require('./external-open.cjs').openExternal(href,dest!=='system',newBrowserWindow))return;
+   if(newBrowserWindow)throw Error('Opening a separate default-browser window is supported on macOS');
+   await vscode.env.openExternal(uri);
   }
-  if(!pdf&&!explicitColumn&&['right','below'].includes(dest)&&(preferences.maxAutoPanes<=0||columns.length<preferences.maxAutoPanes)){
+  let column=explicitColumn||targetColumn(columns,active,dest,preferences.maxAutoPanes);
+  const beside=!destination&&!explicitColumn&&resource.kind==='file'&&dest==='right';
+  if(!beside&&!explicitColumn&&['right','below'].includes(dest)&&(preferences.maxAutoPanes<=0||columns.length<preferences.maxAutoPanes)){
    await vscode.commands.executeCommand(dest==='below'?'workbench.action.newGroupBelow':'workbench.action.newGroupRight');
    column=vscode.window.tabGroups.activeTabGroup.viewColumn;
   }
   if(resource.kind==='file'){
    if(!['mac','local',undefined].includes(resource.host_id)){
-    const roots=resource.file_id?[]:(await api('/api/files/roots?host_id='+encodeURIComponent(resource.host_id))).roots||[];
-    const root=roots.filter(r=>resource.root_id?r.id===resource.root_id:resource.path===r.path||resource.path.startsWith(r.path.replace(/\/$/,'')+'/')).sort((a,b)=>b.path.length-a.path.length)[0];
+    const root=preferRemoteRoot?preferredRoot:await findRemoteRoot(),root_id=root?.id||root?.root_id;
     let uri,reader=remoteProvider;
     if(root){
      const relative=path.posix.relative(root.path,resource.path);if(relative.startsWith('..')||path.posix.isAbsolute(relative))throw Error('Remote file is outside its workspace');
-     uri=vscode.Uri.from({scheme:'library-file',authority:root.id,path:'/'+relative});
-    }else{uri=await referenceProvider.resolve(resource);reader=referenceProvider;}
-    if(['browser-tab','default-browser','system'].includes(dest)){
+     uri=vscode.Uri.from({scheme:'library-file',authority:root_id,path:'/'+relative});
+    }else{
+     if(resource.meta?.workbench_link&&(!resource.file_id&&!(resource.meta?.chat_key||resource.chat_key)||resource.root_id))throw Error('This file is outside the available folders. Add its folder in Files to view it.');
+     uri=await referenceProvider.resolve(resource);reader=referenceProvider;
+    }
+    if(newBrowserWindow){
+     const {host_id,path,page,line,anchor,title,file_id,mode}=resource;
+     const link={kind:'file',host_id,path,page,line,anchor,title,file_id,mode,root_id,meta:{chat_key:resource.meta?.chat_key}};
+     const href=base()+'/workbench#resource='+encodeURIComponent(JSON.stringify(link));
+     await openExternally(vscode.Uri.parse(href),href);return;
+    }
+    if(external){
      const bytes=await reader.readFile(uri);const folder=path.join(context.globalStorageUri.fsPath,'remote-open',randomUUID());await fs.mkdir(folder,{recursive:true});
      const cached=path.join(folder,path.posix.basename(resource.path)||'remote-file');await fs.writeFile(cached,bytes,{flag:'wx'});
-     if(!await require('./external-open.cjs').openExternal(vscode.Uri.file(cached).toString(),dest!=='system'))await vscode.env.openExternal(vscode.Uri.file(cached));return;
+     await openExternally(vscode.Uri.file(cached));return;
     }
-    if(pdf)column=await pdfColumn(uri);
+    if(beside)column=await besideFileColumn(vscode,uri);
     await vscode.commands.executeCommand('vscode.open',uri,{viewColumn:column,preview:dest!=='tab'});return;
    }
    if(typeof resource.path!=='string'||!path.isAbsolute(resource.path)||resource.path.includes('\0'))throw Error('An absolute file path is required');
    const stat=await fs.stat(resource.path);if(!stat.isFile())throw Error('Select a regular file');
    const uri=vscode.Uri.file(resource.path);
-   if(['browser-tab','default-browser','system'].includes(dest)){if(!await require('./external-open.cjs').openExternal(uri.toString(),dest!=='system'))await vscode.env.openExternal(uri);return;}
-   await require('./file-context.cjs').workspaceFor(vscode,filesTab.rootId,uri);
-   if(pdf)column=await pdfColumn(uri);
-   // Native preview semantics preserve dirty buffers without closing or replacing them.
-   await vscode.commands.executeCommand('vscode.open',uri,{viewColumn:column,preview:dest!=='tab',...(resource.line?{selection:new vscode.Range(Math.max(0,resource.line-1),0,Math.max(0,resource.line-1),0)}:{})});return;
+   if(external){await openExternally(uri);return;}
+   if(beside)column=await besideFileColumn(vscode,uri);
+   // Adding the first workspace folder can restart the extension host. Open the
+   // requested document first so the editor is present when the window restores.
+   await vscode.commands.executeCommand('vscode.open',uri,{viewColumn:column,preview:dest!=='tab',...(resource.line?{selection:new vscode.Range(Math.max(0,resource.line-1),0,Math.max(0,resource.line-1),0)}:{})});
+   await require('./file-context.cjs').workspaceFor(vscode,filesTab.rootId,uri);return;
   }
   if(resource.kind==='url'){
    const u=new URL(resource.url);if(!['https:','http:'].includes(u.protocol))throw Error('Unsupported link');
-   if(['default-browser','browser-tab','system'].includes(dest)){if(!await require('./external-open.cjs').openExternal(u.href))await vscode.env.openExternal(vscode.Uri.parse(u.href));}
+   if(external){await openExternally(vscode.Uri.parse(u.href),u.href);}
    else await vscode.commands.executeCommand('simpleBrowser.show',u.href,{viewColumn:column,preserveFocus:false});return;
   }
   if(resource.kind==='chat'&&await officialChats.open(resource,explicitColumn))return;
@@ -197,7 +230,7 @@ function activate(context){
   if(['sidebar','projects','recent'].includes(kind))chatNavigationViews.add(webview);
   const storageKey='draft:'+key;
   let build;try{build=require('./build-info.json')}catch{}
-  const configuration={kind,resource,preferences,build,doubleClickMs,workspaceChoice:workspaceChoice.get(),storage:context.workspaceState.get(storageKey,{})};
+  const configuration={kind,resource,preferences,build,doubleClickMs,endpoint:vscode.workspace.getConfiguration('library').get('endpoint'),workspaceChoice:workspaceChoice.get(),storage:context.workspaceState.get(storageKey,{})};
   webview.options={enableScripts:true,localResourceRoots:[vscode.Uri.joinPath(context.extensionUri,'media')]};
   const nonce=randomBytes(24).toString('base64');const media=n=>webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri,'media',n)).with({query:'v='+encodeURIComponent(nonce)}).toString();
   webview.html=`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}' ${webview.cspSource}; style-src ${webview.cspSource} 'unsafe-inline'; font-src ${webview.cspSource} data:; img-src ${webview.cspSource} data: blob: https:; connect-src 'none';"><link rel="stylesheet" href="${media('main.css')}"></head><body><div id="root"></div><script nonce="${nonce}">window.__LIBRARY_BOOT__=${JSON.stringify(configuration).replace(/</g,'\\u003c')};</script><script nonce="${nonce}" type="module" src="${media('boot.js')}"></script></body></html>`;
@@ -214,7 +247,9 @@ function activate(context){
      const found=await vscode.window.showOpenDialog({canSelectFiles:false,canSelectFolders:true,canSelectMany:false,defaultUri:m.body.path?vscode.Uri.file(m.body.path):undefined});return {path:found?.[0]?.fsPath||''};
     }
     if(m.path==='/api/state'&&m.body===undefined)return scopeState(await api(m.path,undefined,{fresh:m.fresh===true}),kind==='chat'?(Array.isArray(m.keys)?m.keys:[resource?.key]):undefined,m.since);
-    return api(m.path,m.body,{fresh:m.fresh===true});
+    const value=await api(m.path,m.body,{fresh:m.fresh===true});
+    if(m.path==='/api/notices'&&m.body?.action==='settings')await notificationPoller.syncDuration(value.settings?.duration_seconds);
+    return value;
    }
    if(m.action==='officialRecovery'){
     trusted();
@@ -226,7 +261,11 @@ function activate(context){
    if(m.action==='tabIdentityReady')return vscode.commands.executeCommand('_library.refreshTabGroups');
    if(m.action==='storage'){if(!m.values||typeof m.values!=='object'||JSON.stringify(m.values).length>12000000)throw Error('Draft storage limit exceeded; keep this tab open.');await context.workspaceState.update(storageKey,m.values);return true;}
    if(m.action==='copy'){if(typeof m.text==='string')await vscode.env.clipboard.writeText(m.text);return true;}
-   if(m.action==='open')return open(m.resource,m.destination);
+   if(m.action==='open'){
+    const navigateFromUtility=['settings','accounts','notifications','recent','projects'].includes(kind)&&['chat','project-map'].includes(m.resource?.kind);
+    const column=navigateFromUtility?await vscode.commands.executeCommand('_library.utilityColumn',false):undefined;
+    return open(m.resource,m.destination,column);
+   }
    if(m.action==='history')return choosePaneChat(vscode,api,async(next,destination,column)=>{
     // A tab with a draft or a running turn keeps it; the chosen chat opens beside it in this pane.
     const nextKey=resourceKey(next);
@@ -261,7 +300,7 @@ function activate(context){
    if(m.action==='unsubscribe'){streams.get(m.token)?.();streams.delete(m.token);return true;}
    throw Error('Unsupported Library action');
   }
-  const dispatch=createDispatcher(handle);
+  const dispatch=createDispatcher(handle,preferenceWrites);
   disposables.push(webview.onDidReceiveMessage(m=>{
    if(m?.type!=='rpc'||typeof m.id!=='string')return;
    // Draft persistence and all mutations share FIFO; reads/UI never wait for a slow GET.
@@ -284,9 +323,35 @@ function activate(context){
  require('./icon-bar.cjs').register(vscode,context);
  const command=(name,fn)=>context.subscriptions.push(vscode.commands.registerCommand(name,(...args)=>Promise.resolve().then(()=>fn(...args)).catch(showError)));
  command('library.addWorkspace',addWorkspace);
+ command('library.openTabInBrowser',async uri=>{
+  if(uri?.scheme==='file')return open({kind:'file',host_id:'mac',path:uri.fsPath},'default-browser');
+  if(uri?.scheme==='library-reference'){
+   const query=new URLSearchParams(uri.query);
+   return open({kind:'file',host_id:uri.authority,path:uri.path,file_id:query.get('file_id'),meta:{chat_key:query.get('chat_key')}},'default-browser-window');
+  }
+  if(uri?.scheme==='library-file'){
+   const {roots=[]}=await api('/api/files/roots');
+   const root=roots.find(r=>(r.id||r.root_id)===uri.authority);
+   if(root)return open({kind:'file',host_id:root.host_id,root_id:uri.authority,path:path.posix.join(root.path,uri.path)},'default-browser-window');
+  }
+  throw Error('The selected file is unavailable.');
+ });
  command('library.newFile',uri=>{trusted();return require('./file-actions.cjs').createItem(vscode,filesTab,'file',uri).then(refreshFiles);});
  command('library.newFolder',uri=>{trusted();return require('./file-actions.cjs').createItem(vscode,filesTab,'directory',uri).then(refreshFiles);});
- command('library.openResource',(resource,column,place)=>place==='current'?openInCurrent(resource,column):open(resource,'tab',column));
+ command('library.openExplorerFile',async(uri,options)=>{
+  if(preferences.openDefault==='tab')return false;
+  let viewColumn;
+  if(preferences.openDefault==='below'){
+   const columns=vscode.window.tabGroups.all.map(g=>g.viewColumn);
+   if(preferences.maxAutoPanes<=0||columns.length<preferences.maxAutoPanes){
+    await vscode.commands.executeCommand('workbench.action.newGroupBelow');
+    viewColumn=vscode.window.tabGroups.activeTabGroup.viewColumn;
+   }else viewColumn=targetColumn(columns,vscode.window.tabGroups.activeTabGroup.viewColumn,'below',preferences.maxAutoPanes);
+  }else viewColumn=await besideFileColumn(vscode,uri);
+  await vscode.commands.executeCommand('vscode.open',uri,{...options,viewColumn});
+  return true;
+ });
+ command('library.openResource',(resource,column,place)=>place==='current'?openInCurrent(resource,column):open(resource,resource?.kind==='file'&&!column?undefined:'tab',column));
  context.subscriptions.push(agentTabs.watchCodexTurns(vscode));
  const openAgentChat=agentTabs.create(vscode,()=>open({kind:'chat',draftId:randomUUID(),title:'New chat'}));
  command('_library.openAgentChat',openAgentChat);
@@ -315,8 +380,8 @@ function activate(context){
  command('library.show',()=>layout(false));command('library.development',()=>layout(true));
  command('library.openProjectMap',(project,title)=>chooseProjectMap(vscode,api,open,project,title));
  command('library.accounts',()=>open({kind:'accounts',title:'Accounts'}));
- // The bell and the toasts' "Open" open Notifications as a tab in the active group; an open one is revealed where it is.
- command('library.notifications',()=>{const panel=panels.get('notifications:');if(panel){panel.reveal(panel.viewColumn);return;}return open({kind:'notifications',title:'Notifications'},'tab');});
+ // The bell and toast actions share the user's utility destination.
+ command('library.notifications',()=>open({kind:'notifications',title:'Notifications'},'tab'));
  command('library.settings',()=>open({kind:'settings',title:'Settings'}));command('library.projects',()=>open({kind:'projects',title:'Projects'}));
  command('library.openFiles',async uri=>{const location=uri?await require('./file-context.cjs').workspaceFor(vscode,filesTab.rootId,uri):{};return open({kind:'files',title:'Files',...location});});
  if(true){
@@ -331,4 +396,4 @@ function activate(context){
  }
  if(require('node:fs').existsSync(path.join(__dirname,'documents.cjs')))require('./documents.cjs').register(context);
 }
-module.exports={activate};
+module.exports={activate,deactivate:()=>require('./document-review.cjs').flushEditors()};

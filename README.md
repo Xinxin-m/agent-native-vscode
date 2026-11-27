@@ -29,8 +29,8 @@ The interface is yours to change. Ask an agent to move search into the sidebar h
 - **Run controls.** Continue a conversation through the native CLI, answer the agent's questions and approve its tools. While the agent is working, queue a message for the end of its turn or steer it with a message it reads at its next step. A steer appears in the conversation where it was sent, and the live reply continues below it. Runs are hosted by a small process of their own (`app/provider_host.py`), so restarting the server, for example with `python3 app/scripts/restart_server.py`, does not interrupt them: the new server reattaches to each running agent.
 - **Prompt navigation.** While you scroll a long chat, your current prompt stays pinned at the top. The agent tree has a second tab, My prompts, that lists every prompt in the chat and jumps to it.
 - **Subagent tree.** See a chat’s recorded subagents and open their available conversations.
-- **One status mark per chat.** Every chat row, tab and agent-tree node shows at most one mark, decided once on the server (`sidebar.resolve`, sent as `status_mark`): failed (red dot) > waiting for you (blue dot) > running (turning circle) > finished and not yet seen (green dot) > none. The latest event wins: a failed run clears running and waiting, and the failure stands until the conversation moves on (a later turn or a newer run). Check a running page with `python3 scripts/check_one_badge.py`.
-- **Accounts.** Connect several Claude and Codex accounts and see each account's usage and reset times. Sign-in and usage-limit notices collect in one notification center, where you can move new chats to another account. Cmd+L (Ctrl+L) opens or closes the notification sidebar.
+- **One status mark per chat.** Every chat row, tab and agent-tree node shows at most one mark, decided once on the server (`sidebar.resolve`, sent as `status_mark`): failed (red dot) > waiting for you (blue dot) > running (turning circle) > finished and not yet seen (green dot) > none. The latest event wins: a failed run clears running and waiting, and the failure stands until the conversation moves on (a later turn or a newer run).
+- **Accounts.** Connect several Claude and Codex accounts and see each account's usage and reset times. Sign-in and usage-limit notices collect in one notification center, where you can move new chats to another account.
 
 | Library and search | Projects |
 | --- | --- |
@@ -43,6 +43,18 @@ The interface is yours to change. Ask an agent to move search into the sidebar h
 | ![Markdown file compared with Git HEAD](docs/screenshots/rendered-diff.png) | ![Subagents started by one chat, nested under it](docs/screenshots/subagent-tree.png) |
 | **Settings** | **Accounts and usage** |
 | ![Settings page with search and sections](docs/screenshots/settings.png) | ![Claude and Codex accounts with usage bars](docs/screenshots/accounts.png) |
+
+## Workspace controls
+
+| Shortcut on macOS | Windows and Linux | Action |
+| --- | --- | --- |
+| Command-B | Ctrl+B | Show or hide the primary sidebar with chats and files. |
+| Command-L | Ctrl+L | Show or hide the Notifications sidebar. In a browser that reserves this shortcut for its address bar, use the secondary sidebar button. |
+
+- **Group conversations.** Right-click a chat tab to create a named group or add the chat to an existing group. Choosing a group in another pane moves the chat there. Right-click the group name to rename it or choose a color. Click the group name to collapse or expand its tabs. In the browser, use **Tab Groups** beside the pane’s **+** button or in **Recent chats** to revisit a group. Choose **Arrange automatically** in the pane menu to group open tabs by agent or project.
+- **Reveal navigation on hover.** In Settings → Appearance, set **Activity icon bar** to **Auto-hide**. Move the pointer to the left edge to reveal the icons. The open sidebar keeps its place.
+- **Choose where utility pages open.** In Settings → Appearance → Panes and tabs, **Open utility pages in a pop-up window** controls Settings, Accounts, Notifications, Recent chats and Projects. It starts enabled. Turn it off to open those pages in your current pane.
+- **Open a file beside a conversation.** The default file action reuses a pane on the right or left. With one pane, it splits to the right. Under **When I click a file**, choose **New Tab in This Pane** to keep files in the current pane. HTML previews run chart scripts in an isolated frame. For a report that loads a plotting library from the web, enable **Allow web assets** in its preview.
 
 ## Choose your interface
 
@@ -71,7 +83,7 @@ python3 app/pipeline.py --parse-only
 ./run.sh
 ```
 
-Open http://127.0.0.1:8744/workbench. `install.sh` creates your private configuration, adds session hooks to your Claude Code and Codex settings without replacing existing hooks, and installs a helper skill. `./install.sh --help` lists the options, including `--service` to start Library at login and `--uninstall`, which removes the hooks and keeps your library. The import step reads your local transcripts and makes no model calls. If another program already uses port 8744, set `port` in `app/data/config.json`.
+Bookmark [the local Workbench](http://127.0.0.1:8744/workbench). The plain address works across reloads and releases while your local service is running. `install.sh` creates your private configuration, adds session hooks to your Claude Code and Codex settings without replacing existing hooks, and installs a helper skill. `./install.sh --help` lists the options, including `--service` to start Library at login and `--uninstall`, which removes the hooks and keeps your library. The import step reads your local transcripts and makes no model calls. If another program already uses port 8744, set `port` in `app/data/config.json`.
 
 You can also hand the setup to your agent. Open Claude Code or Codex in the cloned folder and say:
 
@@ -101,7 +113,9 @@ AGENTS.md       instructions for an agent working on this repository
 
 ## Privacy
 
-Library runs on your computer and listens only on `127.0.0.1`. Private library state stays in `app/data/`; original transcripts remain in the provider’s local storage, and each client keeps its own layout and drafts. Git ignores `app/data/`. Library has no telemetry. It contacts other machines in three cases: to read each connected account's identity and usage from Anthropic and OpenAI with that account's own login; when your agents run, through the Claude Code and Codex CLIs; and over SSH to remote hosts you configure. Model labeling of chats is off by default; if you turn it on, chat text goes to the provider through the CLI you configure.
+Library listens on `127.0.0.1`. Your indexed history lives in the Git-ignored `app/data/` directory. The provider CLIs keep their original transcripts, and each client stores its own layout and drafts.
+
+Account checks and agent runs contact the providers you connect. Optional model labeling sends chat text through the CLI you configure. Remote hosts and external account pools use the connections you set up. Opening a website or enabling **Allow web assets** in an HTML preview also makes network requests.
 
 ## Contributing
 
@@ -109,7 +123,7 @@ Contributions to the layout, the visuals, and the agent rules and roles are welc
 
 ## Current limits
 
-Changing a conversation’s provider, host or working folder creates a linked handoff; it does not rewrite the original native session. Remote file browsing is supported. Files move between this computer and an enrolled cluster one direction at a time; other remote writes and remote attachments are not supported. Automatic tab grouping is planned.
+Changing a conversation’s provider, host or working folder creates a linked handoff; it does not rewrite the original native session. Remote file browsing is supported. Files move between this computer and an enrolled cluster one direction at a time; other remote writes and remote attachments are not supported. Use **Group Chats by Project** in the desktop command palette to organize open conversations by their assigned project.
 
 ## License and credits
 

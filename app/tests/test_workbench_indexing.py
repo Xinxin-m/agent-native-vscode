@@ -24,6 +24,16 @@ class IndexingTests(unittest.TestCase):
             self.assertEqual(locations[0]['profile_ids'],['default','personal'])
             self.assertNotIn('account_id',locations[0])
 
+    def test_codex_retains_only_published_progress_from_reasoning_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'rollout.jsonl'
+            record = {'type': 'response_item', 'timestamp': '2026-11-25', 'payload': {
+                'type': 'reasoning', 'encrypted_content': 'opaque', 'content': [{'text': 'internal'}],
+                'summary': [{'type': 'summary_text', 'text': 'Checking the layout.'}]}}
+            path.write_text(json.dumps(record) + '\n')
+            self.assertEqual(indexer.parse_codex_file(str(path))[1], [{
+                'role': 'assistant', 'channel': 'analysis', 'text': 'Checking the layout.', 'ts': '2026-11-25'}])
+
     def test_exact_codex_profile_mirror_does_not_duplicate_turns(self):
         parsed=('/work',[{'role':'user','text':'hello'},{'role':'assistant','text':'answer'}],{},'2026-01-01','2026-01-02','complete',False,[],{},[])
         with patch.object(indexer,'parse_codex_file',return_value=parsed):

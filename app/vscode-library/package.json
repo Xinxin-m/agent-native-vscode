@@ -45,7 +45,7 @@
       },
       {
         "command": "library.copy.transcript_path",
-        "title": "Copy transcript path"
+        "title": "Copy Path"
       },
       {
         "command": "library.copy.resume_command",
@@ -78,7 +78,7 @@
         {
           "command": "library.copy.transcript_path",
           "when": "activeWebviewPanelId == libraryChat",
-          "group": "1_library_reference@2"
+          "group": "0_library_path"
         },
         {
           "command": "library.copy.resume_command",

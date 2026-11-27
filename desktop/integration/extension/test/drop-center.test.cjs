@@ -8,7 +8,12 @@ test('a chat dropped on the editor center shows in the current tab; an edge or t
  assert.match(tabs,/executeCommand\('library\.openResource', resource, column\)\)/,'tab bar: a new tab');
  assert.match(tabs,/const lastTab = this\.addTabContainer \? this\.addTabContainer\.previousElementSibling : element\.lastElementChild;/,'tab bar: the insertion marker sits on the last tab, not the hidden add-tab control');
  const host=read('../extension.cjs');
- assert.match(host,/command\('library\.openResource',\(resource,column,place\)=>place==='current'\?openInCurrent\(resource,column\):open\(resource,'tab',column\)\)/);
+ const calls=[];
+ const command=host.split('\n').find(line=>line.includes("command('library.openResource'"));
+ const route=require('node:vm').runInNewContext(command,{command:(_id,fn)=>fn,open:(...args)=>calls.push(['open',...args]),openInCurrent:(...args)=>calls.push(['current',...args])});
+ const chat={kind:'chat'},file={kind:'file'};
+ route(chat,2,'current');route(chat,2);route(file,2);route(file);
+ assert.deepEqual(calls,[['current',chat,2],['open',chat,'tab',2],['open',file,'tab',2],['open',file,undefined,undefined]]);
  assert.match(host,/const existing=resource\?\.kind==='chat'&&resource\.key&&panels\.get\(resourceKey\(resource\)\);\n  if\(existing\)\{existing\.reveal\(existing\.viewColumn\);return;\}\n  if\(resource\?\.kind==='chat'&&resource\.key&&await revealExisting\(vscode,resource\)\)return;/,'a chat already open is focused, not opened again');
  assert.match(host,/if\(!current\)return open\(resource,'tab',column\);\n  current\.reveal\(column\);return current\.webview\.postMessage\(\{type:'dropChat',resource\}\);/);
  assert.match(read('../../ui/src/native/boot.ts'),/m\?\.type==='dropChat'\)window\.dispatchEvent\(new CustomEvent\('library-drop-chat'/);

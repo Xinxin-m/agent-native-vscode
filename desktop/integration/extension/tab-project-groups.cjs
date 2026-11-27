@@ -24,9 +24,9 @@ function projectGrouping(vscode, state, catalog, roots, includeFiles) {
 }
 function register(vscode, context, api){
  const add=(name,callback)=>context.subscriptions.push(vscode.commands.registerCommand(name,callback));
- add('library.createTabGroup',()=>vscode.commands.executeCommand('_library.createTabGroup'));
- add('library.addTabToGroup',()=>vscode.commands.executeCommand('_library.addTabToGroup'));
- add('library.removeTabFromGroup',()=>vscode.commands.executeCommand('_library.removeTabFromGroup'));
+ for(const action of ['createTabGroup','addTabToGroup','removeTabFromGroup']){
+  add('library.'+action,(...args)=>vscode.commands.executeCommand('_library.'+action,args.find(arg=>Number.isInteger(arg?.groupId)&&Number.isInteger(arg?.editorIndex))));
+ }
  async function auto(includeFiles){
   const [state,catalog,rootData]=await Promise.all([api('/api/state'),api('/api/project_catalog'),includeFiles?api('/api/files/roots').catch(()=>({roots:[]})):Promise.resolve({roots:[]})]);
   return vscode.commands.executeCommand('_library.groupTabsByProject',projectGrouping(vscode,state,catalog,rootData.roots,includeFiles));

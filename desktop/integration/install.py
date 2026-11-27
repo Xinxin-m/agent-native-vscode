@@ -193,7 +193,7 @@ def check_report(app=APP):
     except (OSError,ValueError,KeyError,GuardError,subprocess.SubprocessError) as exc:
         return {'ok':False,'error':str(exc)}
 
-def install(candidate, expected_hash, expected_extension, restart=False, app=APP, bundle_id='local.library.code'):
+def install(candidate, expected_hash, expected_extension, restart=False, app=APP, bundle_id='local.library.code', before_replace=None, expected_previous=None):
     candidate=Path(candidate); app=Path(app)
     if candidate.resolve()==app.resolve(): raise GuardError('Candidate and installed app must be distinct')
     validate_candidate(candidate,expected_hash,expected_extension)
@@ -201,13 +201,13 @@ def install(candidate, expected_hash, expected_extension, restart=False, app=APP
     if app.exists() and not check_report(app)['ok']: raise GuardError('Installed app failed its integrity or signature check')
     installed_hash=lambda: bundle_hash(app) if app.exists() else None
     original=installed_hash()
+    if expected_previous is not None and original != expected_previous:
+        raise GuardError('Installed release changed after queueing.')
     receipt=Path(tempfile.mkdtemp(prefix='library-install-',dir=app.parent)); os.chmod(receipt,0o700)
     staged=receipt/'candidate.app'; backup=receipt/'previous.app'
     before=None; launch_args=[]; pid=None; close_attempted=False; reopened=False
     daily_profile=bundle_id=='local.library.code'
     try:
-        run(['ditto',candidate,staged])
-        validate_candidate(staged,expected_hash,expected_extension)
         rows=processes(); clients=client_processes(rows,app)
         if len(clients)>1: raise GuardError('Multiple daily clients detected; no files changed')
         if clients:
@@ -226,12 +226,22 @@ def install(candidate, expected_hash, expected_extension, restart=False, app=APP
                 raise GuardError('The daily client must use the verified 19342 debugging endpoint for preservation checks')
             check_debug_endpoint(identity)
             before=snapshot(receipt,'before');check_snapshot(before)
-        if daily_profile: draft_capture(receipt,'capture')
+        if before_replace: before_replace()
+        run(['ditto',candidate,staged])
+        validate_candidate(staged,expected_hash,expected_extension)
+        if daily_profile and not (before_replace and pid): draft_capture(receipt,'capture')
         if bundle_hash(candidate)!=expected_hash or installed_hash()!=original:
             raise GuardError('Candidate or installed app changed during preflight')
         if pid:
             if check_children(pid,processes(),app)!=identity: raise GuardError('Client process tree changed during preflight')
             check_debug_endpoint(identity)
+            if before_replace:
+                before = snapshot(receipt, 'before-close')
+                check_snapshot(before)
+                if before['activeRuns']:
+                    raise GuardError('New agent activity appeared before client close.')
+                draft_capture(receipt, 'capture')
+                before_replace()
             close_attempted=True
             close_daily_client()
             for _ in range(150):
@@ -242,6 +252,7 @@ def install(candidate, expected_hash, expected_extension, restart=False, app=APP
         if client_processes(processes(),app): raise GuardError('Client reopened during preflight; no files changed')
         if bundle_hash(candidate)!=expected_hash or installed_hash()!=original:
             raise GuardError('Candidate or installed app changed before replacement')
+        if before_replace: before_replace()
         if original: app.rename(backup)
         try:
             staged.rename(app)
@@ -279,6 +290,9 @@ def install(candidate, expected_hash, expected_extension, restart=False, app=APP
                     run(['open','-g','-a',app,'--args',*launch_args])
             except Exception as recovery:
                 raise GuardError(str(exc)+'; original client recovery failed: '+str(recovery)+'; inspect '+str(receipt)) from exc
+        if before_replace and not close_attempted and staged.is_dir() and not backup.exists():
+            # A deferred idle check needs the receipt, not another full staging copy.
+            shutil.rmtree(staged)
         # Keep the unique receipt, evidence and any backup for inspection.
         raise
 

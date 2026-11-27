@@ -151,6 +151,7 @@ export function AccountsPanel({onGitHubAccounts}:{onGitHubAccounts?:(connect?:bo
 // Accounts page: the account list and the usage analytics that used to live in Settings.
 export function AccountsPage(props:Parameters<typeof AccountsPanel>[0]={}){
  const [tab,setTab]=useState('Accounts');
- return <div className="settings-page"><header><h1>Accounts</h1><div className="settings-tabs" role="tablist" aria-label="Accounts sections">{['Accounts','Analytics'].map(t=><button key={t} role="tab" aria-selected={t===tab} onClick={()=>setTab(t)}>{t}</button>)}</div></header>
+ const {open}=useWorkbench();
+ return <div className="settings-page"><header><div className="settings-section-heading"><h1>Accounts</h1><button type="button" onClick={()=>open({kind:"settings",title:"Settings",meta:{settingsTab:"Appearance"}},"tab")}>Settings</button></div><div className="settings-tabs" role="tablist" aria-label="Accounts sections">{['Accounts','Analytics'].map(t=><button key={t} role="tab" aria-selected={t===tab} onClick={()=>setTab(t)}>{t}</button>)}</div></header>
   {tab==='Accounts'?<AccountsPanel {...props}/>:<><Analytics/><Insights mode="analytics"/></>}</div>;
 }

@@ -32,6 +32,22 @@ def age(path, seconds):
     os.utime(path, (t, t))
 
 
+class LiveLineageTests(unittest.TestCase):
+    def test_nested_agent_keeps_parent_when_native_ids_arrive(self):
+        agents = {}
+        def tool(key, parent=None):
+            return {'type': 'assistant', 'parent_tool_use_id': parent,
+                    'message': {'content': [{'type': 'tool_use', 'name': 'Agent', 'id': key}]}}
+        for event in (tool('outer'), tool('inner', 'outer'),
+                      {'type': 'system', 'subtype': 'task_started', 'task_type': 'local_agent',
+                       'task_id': 'outer-native', 'tool_use_id': 'outer'},
+                      {'type': 'system', 'subtype': 'task_started', 'task_type': 'local_agent',
+                       'task_id': 'inner-native', 'tool_use_id': 'inner'}):
+            aa.observe_claude(agents, 'root', event)
+        self.assertEqual(set(agents), {'outer-native', 'inner-native'})
+        self.assertEqual(agents['inner-native']['parent_id'], 'outer-native')
+
+
 class ClaudeChildTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -137,6 +153,23 @@ class CodexChildTests(unittest.TestCase):
     def test_no_codex_process_means_stopped(self):
         live = {'fetched_at': time.time(), 'nodes': [{'name': 'mac', 'ok': True}], 'sessions': []}
         self.assertEqual(self.case([{'type': 'task_started'}], 9999, live=live), 'stopped')
+
+    def test_subagent_model_is_from_its_latest_turn_without_usage(self):
+        path = write(Path(self.tmp.name) / 'rollout.jsonl', [
+            {'type': 'turn_context', 'payload': {'model': 'gpt-old-child'}},
+            {'type': 'turn_context', 'payload': {'model': 'gpt-new-child'}},
+        ])
+        self.assertEqual(aa.child_model({'source': 'codex', 'src_sig': [[path]], 'model_main': 'gpt-old-child'}),
+                         'gpt-new-child')
+
+    def test_claude_model_ignores_synthetic_messages_and_parent_model(self):
+        path = write(Path(self.tmp.name) / 'claude.jsonl', [
+            {'type': 'assistant', 'message': {'model': 'claude-child'}},
+            {'type': 'assistant', 'message': {'model': '<synthetic>'}},
+        ])
+        self.assertEqual(aa.child_model({'source': 'claude', 'src_sig': [[path]], 'model_main': 'claude-old'}),
+                         'claude-child')
+        self.assertEqual(aa.child_model({'source': 'claude', 'model_main': '<synthetic>'}), '')
 
 
 if __name__ == '__main__':

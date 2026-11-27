@@ -5,11 +5,12 @@ import {api,query} from '../api/client';
 import {StatusMark} from '../ui/StatusMark';
 import {rowStatus} from '../navigation/chats';
 import {firstLine,type UserPrompt} from './userPrompts';
+import {childModel} from './SubagentActivity';
 import './agent-map.css';
 
-export type AgentStatus='running'|'waiting'|'idle'|'finished'|'stopped'|'failed'|'unknown';
+export type AgentStatus='starting'|'running'|'waiting'|'idle'|'finished'|'stopped'|'failed'|'unknown';
 // The server's per-node `state` (same source as the sidebar rows), as a status.
-const fromState:Record<string,AgentStatus>={waiting:'waiting',working:'running',idle:'idle',finished:'finished',stopped:'stopped',failed:'failed',unknown:'unknown'};
+const fromState:Record<string,AgentStatus>={starting:'starting',waiting:'waiting',working:'running',idle:'idle',finished:'finished',stopped:'stopped',failed:'failed',unknown:'unknown'};
 export type OpenWhere='preview'|'tab'|'current';
 const waiting=['waiting','waiting_input','waiting_approval','waiting_for_input','waiting_for_permission','awaiting_input','awaiting_approval'];
 const running=['queued','starting','running','interrupting'];
@@ -37,7 +38,7 @@ export function agentStatusLabel(node:any,status:AgentStatus){
  if(status==='idle')return 'Idle';
  return status[0].toUpperCase()+status.slice(1);
 }
-const rank=(s:AgentStatus)=>s==='running'?0:s==='waiting'?1:2;
+const rank=(s:AgentStatus)=>s==='running'?0:s==='waiting'||s==='starting'?1:2;
 // Same vocabulary as the sidebar: running, waiting, failed, finished and not seen; everything else has no mark.
 const markOf=(node:any,status:AgentStatus)=>rowStatus(status==='running'?'working':status==='waiting'?'waiting':null,!!node.unseen&&(status==='idle'||status==='finished'),{failed:status==='failed'});
 const newest=(n:any)=>String(n.ts_last||n.ts_first||'');
@@ -45,15 +46,21 @@ export interface AgentItem{node:any;status:AgentStatus;rank:number;children:Agen
 // Running branches first, then waiting, then the rest; newest first within a group.
 // A parent takes the most active rank of its subtree so running children stay visible at the top.
 export function orderAgentTree(nodes:any[],edges:any[],statusOf:(node:any)=>AgentStatus):AgentItem[]{
- const byKey=new Map(nodes.map(n=>[n.key,n])),childKeys=new Set(edges.map(e=>e.child_key));
- const build=(node:any,seen:Set<string>):AgentItem=>{
-  const next=new Set([...seen,node.key]);
-  const children=edges.filter(e=>e.parent_key===node.key&&!next.has(e.child_key)&&byKey.has(e.child_key)).map(e=>build(byKey.get(e.child_key),next));
-  const status=statusOf(node);
-  return {node,status,rank:Math.min(rank(status),...children.map(c=>c.rank)),children:sort(children)};
- };
+ const byKey=new Map(nodes.map(n=>[n.key,n]));
+ const childrenByParent=new Map<string,Set<string>>(),childKeys=new Set<string>();
+ for(const {parent_key,child_key} of edges){
+  if(!byKey.has(parent_key)||!byKey.has(child_key)||parent_key===child_key||childKeys.has(child_key))continue;
+  childKeys.add(child_key);
+  const siblings=childrenByParent.get(parent_key)||new Set<string>();
+  siblings.add(child_key);childrenByParent.set(parent_key,siblings);
+ }
  const sort=(items:AgentItem[])=>items.sort((a,b)=>a.rank-b.rank||newest(b.node).localeCompare(newest(a.node))||String(a.node.key).localeCompare(String(b.node.key)));
- return sort(nodes.filter(n=>!childKeys.has(n.key)).map(n=>build(n,new Set())));
+ const build=(node:any):AgentItem=>{
+  const children=sort(Array.from(childrenByParent.get(node.key)||[],key=>build(byKey.get(key))));
+  const status=statusOf(node);
+  return {node,status,rank:Math.min(rank(status),...children.map(c=>c.rank)),children};
+ };
+ return sort([...byKey.values()].filter(n=>!childKeys.has(n.key)).map(build));
 }
 export function agentCounts(items:AgentItem[]){
  const counts:Record<string,number>={};const walk=(list:AgentItem[])=>list.forEach(i=>{counts[i.status]=(counts[i.status]||0)+1;walk(i.children)});walk(items);return counts;
@@ -87,8 +94,15 @@ export function AgentMap({sessionKey,selected,onOpen,onClose,renderChat,mode='po
   void refresh();const timer=window.setInterval(refresh,15000);
   return()=>{alive=false;clearInterval(timer);controllers.forEach(c=>c.abort())};
  },[sessionKey,retry]);
- const focusNode=(key:string)=>requestAnimationFrame(()=>dialog.current?.querySelector<HTMLElement>(`.agent-map-node[data-key="${CSS.escape(key)}"]`)?.focus());
- const closePreview=()=>{const key=state.current.preview?.key;setPreview(null);if(key)focusNode(key)};
+ const returnFocus=useRef<string|undefined>(undefined);
+ const closePreview=()=>{returnFocus.current=state.current.preview?.key;setPreview(null)};
+ useLayoutEffect(()=>{
+  const key=returnFocus.current;
+  if(!preview&&key){
+   returnFocus.current=undefined;
+   dialog.current?.querySelector<HTMLElement>(`.agent-map-node[data-key="${CSS.escape(key)}"]`)?.focus();
+  }
+ },[preview]);
  const closeMenu=(refocus=true)=>{const from=state.current.menu?.from;setMenu(null);if(refocus)requestAnimationFrame(()=>from?.focus())};
  // Escape peels one layer: the menu, then the agent chat, then the popup.
  useEffect(()=>{const key=(e:KeyboardEvent)=>{
@@ -97,7 +111,7 @@ export function AgentMap({sessionKey,selected,onOpen,onClose,renderChat,mode='po
    if(state.current.preview){e.preventDefault();closePreview();return}
    if(mode==='popup'){e.preventDefault();close.current()}return;
   }
-  if(mode!=='popup'||e.key!=='Tab'||!dialog.current)return;const items=Array.from(dialog.current.querySelectorAll<HTMLElement>('button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])')).filter(el=>el.getClientRects().length);if(!items.length){e.preventDefault();return}const first=items[0],last=items[items.length-1];if(e.shiftKey&&(document.activeElement===first||document.activeElement===dialog.current)){e.preventDefault();last.focus()}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus()}};document.addEventListener('keydown',key);return()=>document.removeEventListener('keydown',key)},[mode]);
+  if(mode!=='popup'||e.key!=='Tab'||!dialog.current)return;const items=Array.from(dialog.current.querySelectorAll<HTMLElement>('button:not(:disabled), summary, [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])')).filter(el=>el.getClientRects().length);if(!items.length){e.preventDefault();return}const first=items[0],last=items[items.length-1];if(e.shiftKey&&(document.activeElement===first||document.activeElement===dialog.current)){e.preventDefault();last.focus()}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus()}};document.addEventListener('keydown',key);return()=>document.removeEventListener('keydown',key)},[mode]);
  useEffect(()=>{if(mode!=='popup')return;const previous=document.activeElement as HTMLElement|null;dialog.current?.focus();return()=>{previous?.focus()}},[mode]);
  // Escape is handled above, so a host's Escape-driven dismissal must not close the whole popup.
  useEffect(()=>{if(mode!=='popup')return;const dismiss=(e:Event)=>{if((e as CustomEvent).detail!=='escape')close.current()};window.addEventListener('workbench-dismiss-popovers',dismiss);return()=>window.removeEventListener('workbench-dismiss-popovers',dismiss)},[mode]);
@@ -108,34 +122,52 @@ export function AgentMap({sessionKey,selected,onOpen,onClose,renderChat,mode='po
  const nodes=tree?.nodes||[],edges=tree?.edges||[];
  const items=orderAgentTree(nodes,edges,node=>agentMapStatus(node,runs,live)),counts=agentCounts(items);
  const flat:any[]=[];const walk=(list:AgentItem[])=>list.forEach(i=>{flat.push(i.node);walk(i.children)});walk(items);
- const tabStop=flat.some(n=>n.key===focusKey&&!n.missing)?focusKey:flat.find(n=>!n.missing)?.key;
- function choose(node:any){if(node.missing)return;if(node.key===selected){setPreview(null);if(mode==='popup')onClose();return}if(!renderChat){onOpen(node,'tab');return}setPreview(node)}
+ const tabStop=flat.some(n=>n.key===focusKey&&!n.missing&&!n.transcript_pending)?focusKey:flat.find(n=>!n.missing&&!n.transcript_pending)?.key;
+ function choose(node:any){if(node.missing||node.transcript_pending)return;if(node.key===selected){setPreview(null);if(mode==='popup')onClose();return}if(!renderChat){onOpen(node,'tab');return}setPreview(node)}
  function act(node:any,where:Exclude<OpenWhere,'preview'>){setMenu(null);onOpen(node,where)}
  function openMenu(node:any,e:React.MouseEvent|React.KeyboardEvent,from?:HTMLElement|null){e.preventDefault();e.stopPropagation();const target=(from||e.currentTarget) as HTMLElement,box=target.getBoundingClientRect();const pointer='clientX' in e&&e.clientX?{x:e.clientX,y:e.clientY}:{x:box.left+12,y:box.bottom+2};setMenu({node,...pointer,from:target})}
  function rowKey(e:React.KeyboardEvent<HTMLButtonElement>,node:any){
   if(e.key==='ContextMenu'||(e.shiftKey&&e.key==='F10')){openMenu(node,e);return}
-  const enabled=flat.filter(n=>!n.missing),i=enabled.findIndex(n=>n.key===node.key);
+  const enabled=Array.from(dialog.current?.querySelectorAll<HTMLButtonElement>('.agent-map-node:enabled')||[]).filter(button=>button.getClientRects().length),i=enabled.indexOf(e.currentTarget);
   const next=e.key==='ArrowDown'?enabled[i+1]:e.key==='ArrowUp'?enabled[i-1]:e.key==='Home'?enabled[0]:e.key==='End'?enabled[enabled.length-1]:null;
-  if(next){e.preventDefault();setFocusKey(next.key);focusNode(next.key)}
+  if(next){e.preventDefault();next.focus()}
  }
- function branch(item:AgentItem,depth:number):React.ReactNode{
+ function branches(siblings:AgentItem[]):React.ReactNode[]{
+  // Each transcript keeps its own identity. Repeated leaf tasks share a disclosure. Active counts stay visible.
+  const batches=new Map<string,AgentItem[]>();
+  for(const item of siblings){
+   const name=item.node.agent_label||item.node.title;
+   if(!name||item.children.length||item.node.key===selected)continue;
+   const key=JSON.stringify([item.node.source,name]);
+   const batch=batches.get(key)||[];batch.push(item);batches.set(key,batch);
+  }
+  return siblings.map(item=>{
+   const name=item.node.agent_label||item.node.title,key=JSON.stringify([item.node.source,name]);
+   const batch=batches.get(key);
+   if(!batch||batch.length<2||!batch.includes(item))return branch(item);
+   if(batch[0]!==item)return null;
+   const active=batch.filter(i=>i.rank<2).length,failed=batch.filter(i=>i.status==='failed').length;
+   return <li key={'batch'+key}><details className="agent-map-batch" data-active={active>0}><summary>{name}<small>{[batch.length+' agents',active&&active+' active',failed&&failed+' failed'].filter(Boolean).join(' · ')}</small></summary><ul>{batch.map(child=>branch(child,true))}</ul></details></li>;
+  });
+ }
+ function branch(item:AgentItem,inBatch=false):React.ReactNode{
   const {node,status,children}=item,label=agentStatusLabel(node,status),current=node.key===selected,previewed=node.key===preview?.key;
-  const meta=[current?'This chat':'',node.agent_label&&node.agent_label!==node.title?node.agent_label:'',node.source==='codex'?'Codex':node.source==='claude'?'Claude':node.source,node.missing?'Transcript unavailable':ago(newest(node))].filter(Boolean).join(' · ');
-  return <li key={node.key}><div className={'agent-map-row'+(previewed?' is-selected':'')} style={{'--depth':depth} as React.CSSProperties}>
-   <button type="button" className="agent-map-node" data-key={node.key} tabIndex={node.key===tabStop?0:-1} disabled={node.missing} aria-current={current?'page':undefined} aria-pressed={renderChat?previewed:undefined} onFocus={()=>setFocusKey(node.key)} onClick={()=>choose(node)} onContextMenu={e=>{if(!node.missing&&!current)openMenu(node,e)}} onKeyDown={e=>rowKey(e,node)}>
-    <span title={node.activity_evidence||label}><StatusMark compact status={markOf(node,status)}/></span><span className="agent-map-text"><strong>{node.title||node.key}</strong><small><span className={'agent-map-state '+status}>{label}</span>{meta?' · '+meta:''}</small></span>
+  const meta=[current?'This chat':'',!node.is_child&&!node.missing?'Orchestrator':'',inBatch?String(node.agent_id||node.id||node.key).slice(-8):'',node.agent_label&&node.agent_label!==node.title?node.agent_label:'',node.source==='codex'?'Codex':node.source==='claude'?'Claude':node.source,childModel(node)||(node.is_child?'Model unknown':''),node.missing?'Transcript unavailable':node.transcript_pending?'Transcript pending':ago(newest(node))].filter(Boolean).join(' · ');
+  return <li key={node.key}><div className={'agent-map-row'+(previewed?' is-selected':'')} data-state={status}>
+   <button type="button" className="agent-map-node" data-key={node.key} tabIndex={node.key===tabStop?0:-1} disabled={node.missing||node.transcript_pending} aria-current={current?'page':undefined} aria-pressed={renderChat?previewed:undefined} onFocus={()=>setFocusKey(node.key)} onClick={()=>choose(node)} onContextMenu={e=>{if(!node.missing&&!node.transcript_pending&&!current)openMenu(node,e)}} onKeyDown={e=>rowKey(e,node)}>
+    <span title={node.activity_evidence||label}>{['finished','stopped'].includes(status)?<span className="agent-map-settled" aria-hidden="true"/>:<StatusMark compact status={markOf(node,status)}/>}</span><span className="agent-map-text"><strong>{node.title||node.key}</strong><small><span className={'agent-map-state '+status}>{label}</span>{meta?' · '+meta:''}</small></span>
    </button>
-   {!node.missing&&!current&&<button type="button" className="agent-map-more" tabIndex={-1} aria-label={'More actions for '+(node.title||node.key)} aria-haspopup="menu" onClick={e=>openMenu(node,e)}><MoreHorizontal size={14}/></button>}
-  </div>{children.length>0&&<ul>{children.map(c=>branch(c,depth+1))}</ul>}</li>;
+   {!node.missing&&!node.transcript_pending&&!current&&<button type="button" className="agent-map-more" tabIndex={-1} aria-label={'More actions for '+(node.title||node.key)} aria-haspopup="menu" onClick={e=>openMenu(node,e)}><MoreHorizontal size={14}/></button>}
+  </div>{children.length>0&&<ul>{branches(children)}</ul>}</li>;
  }
- const sc:Record<string,number>=tree?.counts?{running:tree.counts.working,waiting:tree.counts.waiting,idle:tree.counts.idle,finished:tree.counts.finished,stopped:tree.counts.stopped,failed:tree.counts.failed,unknown:tree.counts.unknown}:counts;
- const summary=[sc.running&&sc.running+' working',sc.waiting&&sc.waiting+' waiting',sc.idle&&sc.idle+' idle',sc.finished&&sc.finished+' finished',sc.stopped&&sc.stopped+' stopped',sc.failed&&sc.failed+' failed',sc.unknown&&sc.unknown+' unknown'].filter(Boolean).join(', ');
+ const sc:Record<string,number>=tree?.counts?{starting:tree.counts.starting,running:tree.counts.working,waiting:tree.counts.waiting,idle:tree.counts.idle,finished:tree.counts.finished,stopped:tree.counts.stopped,failed:tree.counts.failed,unknown:tree.counts.unknown}:counts;
+ const summary=[sc.starting&&sc.starting+' starting',sc.running&&sc.running+' working',sc.waiting&&sc.waiting+' waiting',sc.idle&&sc.idle+' idle',sc.finished&&sc.finished+' finished',sc.stopped&&sc.stopped+' stopped',sc.failed&&sc.failed+' failed',sc.unknown&&sc.unknown+' unknown'].filter(Boolean).join(', ');
  const treeColumn=<div className="agent-map-tree">
   <header><div>{prompts?<div className="agent-map-tabs" role="tablist" aria-label="Agent tree views"><button type="button" role="tab" id={titleId} aria-selected={tab==='tree'} onClick={()=>setTab('tree')}>Agent tree</button><button type="button" role="tab" aria-selected={tab==='prompts'} onClick={()=>setTab('prompts')}>My prompts</button></div>:<h2 id={titleId}>Agent tree</h2>}<p>{tab==='prompts'?`${prompts?.length||0} ${prompts?.length===1?'prompt':'prompts'} in this chat`:tree?summary||'No agents':'Loading…'}</p></div>{mode==='popup'&&<button type="button" className="agent-map-icon" aria-label="Close agent tree" title="Close (Esc)" onClick={onClose}><X size={16}/></button>}</header>
   {tab==='prompts'?(prompts?.length?<ol className="agent-map-scroll agent-map-prompts" ref={promptList} aria-label="My prompts">{prompts.map((p,i)=><li key={i}><button type="button" title={p.text.slice(0,600)} onClick={()=>onPrompt?.(i)}><span>{firstLine(p.text,200)}</span>{p.ts&&Date.parse(p.ts)?<small>{new Date(p.ts).toLocaleString([],{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})}</small>:null}</button></li>)}</ol>:<p className="agent-map-note">No prompts in this chat yet.</p>):<>
   {error&&<p role="alert" className="agent-map-note">{error} <button type="button" onClick={()=>setRetry(v=>v+1)}>Retry</button></p>}
   {!tree&&!error&&<p role="status" className="agent-map-note">Loading agent tree…</p>}
-  {tree&&<div className="agent-map-scroll">{items.length?<ul className="agent-map-roots" aria-labelledby={titleId}>{items.map(i=>branch(i,0))}</ul>:<p className="agent-map-note">No explicit agent lineage found.</p>}</div>}
+  {tree&&<div className="agent-map-scroll">{items.length?<ul className="agent-map-roots" aria-labelledby={titleId}>{branches(items)}</ul>:<p className="agent-map-note">No explicit agent lineage found.</p>}</div>}
   </>}
  </div>;
  const previewStatus=preview&&(flat.find(n=>n.key===preview.key)?agentMapStatus(flat.find(n=>n.key===preview.key),runs,live):'unknown');

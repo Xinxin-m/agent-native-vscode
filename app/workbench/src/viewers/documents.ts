@@ -16,7 +16,7 @@ export function releaseDocument(resource:Resource){releaseDocumentId(documentKey
 if(typeof window!=='undefined'&&new URLSearchParams(location.search).has('document-profile'))(window as any).__documentStats=()=>[...records].map(([id,d])=>({id,text:d.text.length,base:d.baseText.length,dirty:d.dirty,subscribers:listeners.get(id)?.size||0,views:watched.get(id)?.views.size||0,released:releasedDocuments.has(id)}));
 
 const fallbackWriter=globalThis.crypto?.randomUUID?.()||'writer-'+Date.now();
-function drafts(){let writer=fallbackWriter;try{writer=new URLSearchParams(location.search).get('window')||writer;}catch{}return createDraftRepository(localStorage,writer);}
+function drafts(){let writer=fallbackWriter;try{writer=history.state?.libraryWindow||new URLSearchParams(location.search).get('window')||writer;}catch{}return createDraftRepository(localStorage,writer);}
 function availableRecoveries(id:string){const repo=drafts();return repo.list(id).filter(d=>d.writer!==repo.writer);}
 export function documentKey(r:Resource){return r.path?fileIdentity(r.host_id||'mac',r.path):r.file_id?JSON.stringify([r.host_id||'mac',{file_id:r.file_id}]):fileIdentity(r.host_id||'mac','');}
 export function unassignedDrafts(r:Resource,repo:{list:(id:string)=>FileDraft[]}){return !r.path&&r.file_id?repo.list(fileIdentity(r.host_id||'mac','')):[];}
@@ -30,20 +30,38 @@ export function useFileDocument(resource:Resource){const id=documentKey(resource
 export function moveDocument(from:Resource,to:Resource){const old=documentKey(from),id=documentKey(to),d=records.get(old);if(!d)return;if(d.dirty){const repo=drafts();repo.save(id,{text:d.text,baseText:d.baseText,version:d.baseVersion});repo.clearOwn(old);}records.delete(old);records.delete(id);}
 export function changeText(resource:Resource,text:string){const id=documentKey(resource),d=snapshot(id);update(id,{text,dirty:text!==d.baseText});persist(id);}
 export async function resolveFile(resource:Resource):Promise<FileRecord>{
- const host=resource.host_id||'mac',chatKey=resource.key||resource.meta?.chat_key;let root=resource.root_id,relative:string|undefined;
+ const host=resource.host_id||'mac',chatKey=resource.key||resource.meta?.chat_key,root=resource.root_id;
  if(resource.file_id&&!root){
   try{const result=await api(query('/api/files/stat',{file_id:resource.file_id}));return result.resource;}
-  catch(error){if(!(error instanceof ApiError)||error.status!==404||!chatKey||!resource.path)throw error;const result=await api('/api/files/reference',{chat_key:chatKey,path:resource.path});if(!result.resource?.file_id||(result.resource.host_id||'mac')!==host)throw new Error('The refreshed file reference belongs to a different host.');return result.resource;}
+  catch(error){
+   if(!(error instanceof ApiError)||error.status!==404||!chatKey||!resource.path)throw error;
+   const {resource:found}=await api('/api/files/reference',{chat_key:chatKey,path:resource.path});
+   const verifiedMove=found?.relocated_from_host===host&&found.evidence_path===resource.path;
+   if(!found?.file_id||((found.host_id||'mac')!==host&&!verifiedMove))throw new Error('The refreshed file reference belongs to a different host.');
+   return found;
+  }
  }
- const data=await api(query('/api/files/roots',{host_id:host,chat_key:chatKey}));
- const roots=data.roots||[];const match=root?roots.find((r:any)=>(r.root_id||r.id)===root):coveringRoot(roots,host,resource.path||'');
- if(match){root=match.root_id||match.id;relative=(resource.path||'').slice(match.path.replace(/\/$/,'').length).replace(/^\//,'')||'.';}
- if(!root){if(chatKey){const result=await api('/api/files/reference',{chat_key:chatKey,path:resource.path});return result.resource;}throw new Error('This file is outside the available folders. Add its folder in Files to view it.');}
- if(relative===undefined)throw new Error('The folder is unavailable. Reopen this file from Files.');
- const result=await api(query('/api/files/stat',{root_id:root,path:relative}));
- return result.resource;
+ const canUseReference=Boolean(chatKey&&!root&&resource.path);
+ const preferRoot=host!=='mac'&&host!=='local'&&resource.meta?.workbench_link===true;
+ if(!canUseReference||preferRoot){
+  const data=await api(query('/api/files/roots',{host_id:host,chat_key:chatKey}));
+  const roots=data.roots||[],path=resource.path||'';
+  const match=coveringRoot(root?roots.filter((r:any)=>(r.root_id||r.id)===root):roots,host,path);
+  if(match){
+   const relative=path.slice(match.path.replace(/\/$/,'').length).replace(/^\//,'')||'.';
+   const result=await api(query('/api/files/stat',{root_id:match.root_id||match.id,path:relative}));
+   return result.resource;
+  }
+  if(!canUseReference)throw new Error(root?'This file is outside the linked workspace folder. Reopen it from Files.':'This file is outside the available folders. Add its folder in Files to view it.');
+ }
+ const {resource:found}=await api('/api/files/reference',{chat_key:chatKey,path:resource.path});
+ if(preferRoot){
+  const verifiedMove=found?.relocated_from_host===host&&found.evidence_path===resource.path;
+  if(!found?.file_id||((found.host_id||'mac')!==host&&!verifiedMove))throw new Error('The file reference belongs to a different host.');
+ }
+ return found;
 }
-async function textFor(file:FileRecord){
+export async function textFor(file:FileRecord){
  if(file.size>8*1024*1024)throw new Error('This text file exceeds the 8 MB editor limit. Download it or open it in your editor.');
  const response=await fetch(contentUrl(file));if(!response.ok)throw new Error(`Cannot read file (HTTP ${response.status}).`);
  const length=Number(response.headers.get('content-length')||0);if(length>8*1024*1024)throw new Error('This text file exceeds the 8 MB editor limit.');
@@ -61,12 +79,33 @@ async function hydrateDocument(resource:Resource,force=false){
   let saved:FileDraft|undefined,recoveries:FileDraft[]=[],unassignedRecoveries:FileDraft[]=[];try{const repo=drafts(),all=repo.list(id);unassignedRecoveries=unassignedDrafts(resource,repo);if(!resource.path&&resource.file_id&&file.path)unassignedRecoveries=[...unassignedRecoveries,...repo.list(fileIdentity(file.host_id,file.path))];saved=all.find(d=>d.writer===repo.writer)||(all.length===1&&all[0].legacy?all[0]:undefined);recoveries=all.filter(d=>d.writer!==repo.writer);}catch{}
   const restored=Boolean(saved);
   update(id,{file,text:restored?saved.text:text,baseText:restored?saved.baseText:text,baseVersion:restored?saved.version:file.version,dirty:restored&&saved.text!==text,loading:false,error:undefined,recoveries,unassignedRecoveries,conflict:restored&&saved.version!==file.version?{text,version:file.version}:undefined});
-  if(restored&&saved.text!==text)persist(id);
+  if(restored&&saved.text!==text){persist(id);if(file.document_editable&&saved.version===file.version)scheduleDocumentSave(resource);}
  }catch(e){update(id,{loading:false,error:(e as Error).message});}
 }
-export async function saveDocument(resource:Resource){const id=documentKey(resource),d=snapshot(id);if(!d.file||!d.file.editable||d.saving||d.conflict)return;
+export function documentTarget(file:FileRecord){
+ return file.file_id&&!file.root_id?{file_id:file.file_id}:{root_id:file.root_id,path:file.relative_path||'.'};
+}
+const autosaveTimers=new Map<string,ReturnType<typeof setTimeout>>();
+export function changeRenderedText(resource:Resource,text:string){
+ changeText(resource,text);
+ scheduleDocumentSave(resource);
+}
+export function scheduleDocumentSave(resource:Resource,delay=700){
+ const id=documentKey(resource);
+ clearTimeout(autosaveTimers.get(id));
+ autosaveTimers.set(id,setTimeout(async()=>{
+  autosaveTimers.delete(id);
+  const before=snapshot(id);
+  if(!before.dirty||before.conflict||!before.file?.document_editable)return;
+  if(before.saving){scheduleDocumentSave(resource);return}
+  await saveDocument(resource);
+  const after=snapshot(id);
+  if(after.dirty&&!after.error&&!after.conflict&&!autosaveTimers.has(id))scheduleDocumentSave(resource);
+ },delay));
+}
+export async function saveDocument(resource:Resource){const id=documentKey(resource),d=snapshot(id);if(!d.file||!(d.file.editable||d.file.document_editable)||d.saving||d.conflict||!d.dirty)return;
  update(id,{saving:true,error:undefined});const sent=d.text;
- try{const result=await api('/api/files/save',{root_id:d.file.root_id,path:d.file.relative_path||'.',base_version:d.baseVersion,text:sent});const file=result.resource||result;const current=snapshot(id);update(id,{file:{...d.file,...file},baseText:sent,baseVersion:file.version,dirty:current.text!==sent,saving:false,conflict:undefined});persist(id);
+ try{const result=await api(d.file.document_editable?'/api/files/document-save':'/api/files/save',{...documentTarget(d.file),base_version:d.baseVersion,text:sent});const file=result.resource||result;const current=snapshot(id);update(id,{file:{...d.file,...file},baseText:sent,baseVersion:file.version,dirty:current.text!==sent,saving:false,conflict:undefined});persist(id);
  }catch(e){if(e instanceof ApiError&&e.status===409){try{const file=await resolveFile(resource),text=await textFor(file);update(id,{saving:false,conflict:{text,version:file.version},error:undefined});}catch(f){update(id,{saving:false,error:(f as Error).message});}}else update(id,{saving:false,error:(e as Error).message});}
 }
 export function reloadConflict(resource:Resource){const id=documentKey(resource),d=snapshot(id);if(!d.conflict)return;update(id,{text:d.conflict.text,baseText:d.conflict.text,baseVersion:d.conflict.version,dirty:false,conflict:undefined});persist(id);}

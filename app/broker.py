@@ -26,6 +26,7 @@ import threading
 import time
 import uuid
 
+import agent_activity
 import attention_watch
 import stream
 
@@ -52,6 +53,7 @@ CAPABILITIES = {
 # After a turn, background work and this grace period keep the provider alive
 # so a quick follow-up reaches the same process. Never an elapsed-time kill.
 IDLE_GRACE = 10
+STALL_AFTER_SECONDS = 5 * 60
 CONFIG = DATA / 'config.json'
 QUEUE_PENDING = ('queued', 'delivering', 'failed')
 QUEUE_HISTORY = 50
@@ -187,6 +189,16 @@ def codex_native_terminal(env, sid, expected_turn_id, not_before, cache, budget=
             'text': newest[6] if isinstance(newest[6], str) else None, 'error': newest[7]}
 
 
+def announce_quota_move(from_id, to_id):
+    """Tell her before work starts on another account than the configured one because of quota.
+    A failed notice never blocks the run."""
+    import accounts
+    try:
+        accounts.announce_switch(from_id, to_id)
+    except (OSError, ValueError) as error:
+        print(f"notices: {type(error).__name__}: {error}")
+
+
 class SessionBusy(ValueError):
     def __init__(self, active_run_id=None):
         self.active_run_id = active_run_id
@@ -305,9 +317,19 @@ class HostedProcess:
                 if host.poll() is None:
                     host.kill()
                 host.wait()
-                raise OSError('provider host did not start the provider: ' + (host_dir / 'err.log').read_text(errors='replace')[-2000:])
+                raise OSError('Provider host did not start the provider. ' + cls.stderr_tail(host_dir, 2000))
             time.sleep(.02)
         return cls(host_dir, json.loads((host_dir / 'provider.json').read_text())['pid'], host.pid, host)
+
+    @staticmethod
+    def stderr_tail(host_dir, limit):
+        try:
+            with (host_dir / 'err.log').open('rb') as log:
+                log.seek(0, os.SEEK_END)
+                log.seek(max(0, log.tell() - limit))
+                return log.read(limit).decode('utf-8', 'replace')
+        except FileNotFoundError:
+            return ''
 
     @staticmethod
     def _alive(pid):
@@ -441,6 +463,9 @@ class RunStore:
         with self.lock:
             run = self._record(rid)
             became_failed = fields.get('status') == 'failed' and run.get('status') != 'failed'
+            status = fields.get('status')
+            if (status in TERMINAL or status == 'interrupting') and run.get('stalled'):
+                fields['stalled'] = False
             run.update(copy.deepcopy(fields), updated_at=now())
             # Explicit state/turn boundaries remain immediately durable. Only
             # per-event snapshots are batched; no provider receipt is discarded.
@@ -743,12 +768,15 @@ class Broker:
         # unconfirmed queue items are settled after its output is replayed.
         reattached = {}
         for run in store.list():
-            if run.get('status') in TERMINAL:
+            if run.get('status') in TERMINAL and not run.get('recovery_blocked'):
                 self._remove_host(run)
-            elif run.get('process_host'):
+            elif run.get('process_host') and not run.get('finished_at'):
                 attached = self._reattach_control(run)
                 if attached:
                     reattached[run['id']] = attached
+                    if run.get('recovery_blocked'):
+                        store.update(run['id'], status='running', recovery_blocked=False,
+                                     recovery_reason=None, recovery_observation=None, error=None)
         for path in (store.root / 'queues').glob('*.json'):
             data = stream._jload(str(path), {})
             items = data.get('items') or []
@@ -772,7 +800,7 @@ class Broker:
                 if successor:
                     marker['successor_run_id'] = successor['id']
                 store.update(run['id'], quota_failover=marker)
-            if run.get('status') not in TERMINAL or run.get('recovery_blocked'):
+            if run.get('status') not in TERMINAL or (run.get('recovery_blocked') and not run.get('finished_at')):
                 self._recover(run)
         for rid, (launch, ctrl) in reattached.items():
             self.active[rid] = ctrl
@@ -903,6 +931,11 @@ class Broker:
                                   protocol=protocol, images=None,
                                   **({'shared_session_from': spec['shared_session_from']} if spec.get('shared_session_from') else {}))
         launch['protocol'] = protocol
+        if launch.get('transport') == 'local':
+            import accounts, pools
+            launch = pools.route(launch, spec['provider'], self.store.root / 'codex-lb-models.json',
+                                 enabled=accounts._auto_cfg().get('pools', True),
+                                 session_id=spec.get('session_id') or None)
         if binding and launch.get('account_selection'):
             launch['account_selection'] = dict(launch['account_selection'], reason=binding['reason'])
         return launch
@@ -942,6 +975,9 @@ class Broker:
             if attachments and spec['host_id'] not in ('mac', 'local'):
                 raise ValueError('remote attachment staging is not available; upload on the execution host first')
             spec = dict(spec, attachment_records=attachments)
+            if not spec.get('session_id') and not spec.get('title') and not spec.get('handoff'):
+                from enrich import provisional
+                spec['title'] = provisional({'first_prompt': spec.get('message'), 'cwd': spec.get('cwd')})['title']
             if spec.get('handoff') and spec.get('source_key'):
                 from enrich import CONTINUED_SUFFIX, conversation_title
                 index = stream._jload(stream.INDEX, {})
@@ -962,6 +998,11 @@ class Broker:
             spec['account_id'] = launch.get('account_id') or spec.get('account_id') or ''
             if launch.get('account_selection'):
                 spec['account_selection'] = launch['account_selection']
+                selection = launch['account_selection']
+                if selection.get('reason') == 'more_model_headroom' and spec['host_id'] in ('mac', 'local'):
+                    announce_quota_move(selection['previous_account_id'], selection['account_id'])
+            if launch.get('account_pool'):
+                spec['account_pool'] = launch['account_pool']
             spec['cwd'] = launch.get('execution_cwd') or spec['cwd']
             spec['host_id'] = launch.get('host_id') or spec['host_id']
             self._check_recovery(spec)
@@ -982,6 +1023,8 @@ class Broker:
                     lockfiles.append(handle)
                     fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 run = self.store.create(spec)
+                if spec.get('account_pool') and run.get('status') == 'queued':
+                    self.store.emit(run['id'], 'account_pool', spec['account_pool'])
             except BlockingIOError:
                 for handle in lockfiles:
                     handle.close()
@@ -1047,6 +1090,7 @@ class Broker:
             try:
                 proc.stdin.write(json.dumps(obj, ensure_ascii=False) + '\n')
                 proc.stdin.flush()
+                ctrl['last_input_at'] = time.monotonic()
             except OSError as exc:
                 raise ValueError(f'could not write to the provider process: {exc}') from exc
 
@@ -1138,6 +1182,8 @@ class Broker:
             raise ValueError('run is not active')
         action = body.get('action')
         if action == 'interrupt':
+            self.store.update(rid, status='interrupting')
+            self.store.emit(rid, 'state', {'status': 'interrupting'})
             ctrl['stop'] = True
             # A broken control pipe must not bypass Stop's cleanup fallback.
             self._cancel_idle(ctrl)
@@ -1158,8 +1204,6 @@ class Broker:
             timer.daemon = True
             ctrl['interrupt_timer'] = timer
             timer.start()
-            self.store.update(rid, status='interrupting')
-            self.store.emit(rid, 'state', {'status': 'interrupting'})
         elif action == 'remote_control':
             if run.get('operation') != 'remote_control' or ctrl['protocol'] != 'claude-stream':
                 raise ValueError('This run does not own a remote-control session')
@@ -1317,6 +1361,8 @@ class Broker:
         if quota_failover.eligible(dict(current, failure=failure), ctrl):
             switching['quota_failover'] = dict(status='switching', from_account_id=run.get('account_id'),
                 reason='Checking saved conversation before switching accounts.')
+        elif offer := quota_failover.provider_switch(dict(current, failure=failure), ctrl):
+            switching['provider_switch'] = offer
         remote = {}
         if run.get('operation') == 'remote_control':
             ctrl['remote_connected'] = False
@@ -1356,10 +1402,16 @@ class Broker:
                     if proofs.get(child) != evidence:
                         ctrl.setdefault('background', {}).pop(child, None)
                         proofs[child] = evidence
+                        agent = ctrl.get('subagents', {}).get(child)
+                        if agent:
+                            agent['state'] = {'completed': 'finished', 'failed': 'failed',
+                                              'interrupted': 'stopped'}.get(evidence['status'], 'unknown')
                         self.store.emit(rid, 'background_finished', {'thread_id': child, **evidence})
                         changed = True
                 elif ctrl.setdefault('native_child_proofs', {}).pop(child, None):
                     ctrl.setdefault('background', {})[child] = 'subagent'
+                    if child in ctrl.get('subagents', {}):
+                        ctrl['subagents'][child]['state'] = 'unknown'
                     changed = True
             guarded = (ctrl.get('background') or ctrl.get('pending_requests') or ctrl.get('pending_rpc')
                        or ctrl.get('auto_compacting') or ctrl.get('compact_failed')
@@ -1427,7 +1479,9 @@ class Broker:
                         return
                     proc.offset += len(line) + 1
                     yield line.decode('utf-8', 'replace')
-        stderr[:] = [(proc.dir / 'err.log').read_bytes()[-16000:].decode('utf-8', 'replace')]
+        tail = proc.stderr_tail(proc.dir, 16000)
+        if tail:
+            stderr[:] = [tail]
         if pending.strip() and not ctrl.get('stop'):
             proc.offset += len(pending)
             yield pending.decode('utf-8', 'replace')
@@ -1482,12 +1536,32 @@ class Broker:
             if pending.strip() and not ctrl.get('stop'):
                 yield pending
 
+    def _check_stall(self, rid, ctrl, quiet_seconds):
+        with ctrl.setdefault('control_lock', threading.RLock()):
+            if ctrl.get('stop') or ctrl.get('closing') or ctrl.get('replaying'):
+                return
+            active = (ctrl.get('turn_open') or ctrl.get('background') or ctrl.get('auto_compacting')
+                      or ctrl.get('pending_rpc') or (ctrl.get('goal') or {}).get('status') == 'active'
+                      or 'goal_get_pending' in ctrl or 'goal_set_pending' in ctrl)
+            stalled = bool(active and not ctrl.get('pending_requests') and quiet_seconds >= STALL_AFTER_SECONDS)
+            if stalled == bool(ctrl.get('stalled')):
+                return
+            self.store.update(rid, stalled=stalled)
+            self.store.emit(rid, 'state', {'stalled': stalled})
+            ctrl['stalled'] = stalled
+
     def _work(self, rid, launch, ctrl, reattach=False):
         run = self.store.get(rid)
         st = stream._State(run.get('session_id') or '')
         stderr = []
         terminal = None
         replay_until = 0
+        last_progress = time.monotonic()
+        if reattach:
+            last_update = _lifecycle_time(run.get('updated_at'))
+            if last_update is not None:
+                last_progress -= max(0, time.time() - last_update)
+            ctrl['stalled'] = bool(run.get('stalled'))
         # Long-running native goals have no implicit elapsed-time deadline.
         # Explicit interruption and configured idle stopping own termination.
         try:
@@ -1543,6 +1617,8 @@ class Broker:
                 if ctrl.get('replaying') and proc.offset >= replay_until:
                     self._end_replay(rid, run, ctrl)
                 self._reconcile_native(rid, run, st, ctrl, launch)
+                activity_at = max(last_progress, ctrl.get('last_input_at', 0))
+                self._check_stall(rid, ctrl, time.monotonic() - activity_at)
             for line in self._provider_lines(proc, ctrl, stderr, tick):
                 if ctrl.get('replaying') and proc.offset > replay_until:
                     self._end_replay(rid, run, ctrl)
@@ -1550,6 +1626,10 @@ class Broker:
                     ev = json.loads(line)
                 except ValueError:
                     continue
+                if not ctrl.get('replaying'):
+                    last_progress = time.monotonic()
+                    if ctrl.get('stalled'):
+                        self._check_stall(rid, ctrl, 0)
                 self.store.emit(rid, 'provider_event', {'provider': run['provider'], 'event': ev,
                                                         **({'offset': proc.offset} if isinstance(proc, HostedProcess) else {})})
                 if (run.get('operation') == 'remote_control' and ev.get('session_id')
@@ -1687,6 +1767,14 @@ class Broker:
                     and not (ctrl.get('remote_disabling') and terminal == 'completed')):
                 terminal = 'failed'
                 st.error = st.error or 'Claude Remote Control provider exited unexpectedly before a confirmed disconnect.'
+            if (launch['protocol'] == 'app-server' and not ctrl['stop'] and ctrl.get('turn_open')
+                    and not ctrl.get('native_terminal') and terminal not in ('failed', 'interrupted')):
+                terminal = 'failed'
+                if not st.error:
+                    details = ''.join(stderr)[-3000:].strip()
+                    st.error = 'The provider exited before Codex confirmed the turn finished.'
+                    if details:
+                        st.error += '\n' + details
             if ctrl.get('native_final_text') is not None:
                 text = ctrl['native_final_text']
             status = ('interrupted' if ctrl['stop'] else 'failed' if unresolved_goal or ctrl.get('failure') else
@@ -1756,7 +1844,8 @@ class Broker:
                 self.active.pop(rid, None)
             try:
                 import quota_failover
-                quota_failover.continue_run(self, rid, launch, ctrl)
+                if not quota_failover.continue_run(self, rid, launch, ctrl):
+                    quota_failover.offer_provider_switch(self, rid, ctrl)
             finally:
                 ctrl['finished'].set()
 
@@ -2008,6 +2097,7 @@ class Broker:
         else:
             method = ev.get('method')
             p = ev.get('params') or {}
+            agent_activity.observe_codex(ctrl.setdefault('subagents', {}), run.get('session_id'), method, p)
             # app-server forwards subagent notifications on this same stream.
             # Keep their raw/tool activity, but only the bound thread owns this
             # run's lifecycle, assistant response, compaction and token usage.
@@ -2133,6 +2223,7 @@ class Broker:
         """
         with ctrl.setdefault('control_lock', threading.RLock()):
             typ, sub = ev.get('type'), ev.get('subtype')
+            agent_activity.observe_claude(ctrl.setdefault('subagents', {}), ev.get('session_id'), ev)
             background = ctrl.setdefault('background', {})
             if typ == 'system' and sub == 'background_tasks_changed':
                 ctrl['background'] = {t['task_id']: t.get('description') or t.get('task_type') or 'task'
@@ -2226,10 +2317,13 @@ class Broker:
                 background['native_goal'] = 'goal'
             phase = 'turn' if ctrl.get('turn_open') else 'background' if background else 'idle'
             labels = sorted(str(v) for v in background.values())
-            if ctrl.get('shown_phase') != (phase, labels):
-                ctrl['shown_phase'] = (phase, labels)
-                self.store.update(rid, phase=phase, background=labels)
-                self.store.emit(rid, 'state', {'status': 'running', 'phase': phase, 'background': labels})
+            subagents = [dict(agent) for agent in (ctrl.get('subagents') or {}).values()
+                         if agent['source'] == 'claude' or agent.get('parent_id')]
+            if ctrl.get('shown_phase') != (phase, labels, subagents):
+                ctrl['shown_phase'] = (phase, labels, subagents)
+                self.store.update(rid, phase=phase, background=labels, subagents=subagents)
+                self.store.emit(rid, 'state', {'status': 'running', 'phase': phase, 'background': labels,
+                                               'subagents': subagents})
             if phase == 'idle' and ctrl.get('native_reconciled') and ctrl.get('idle_timer'):
                 return  # Old stdout must not postpone a proven native completion.
             self._cancel_idle(ctrl)
@@ -2817,7 +2911,7 @@ class Broker:
                 if isinstance(record, dict):
                     if path != Path(stream.INDEX) and native_chat:
                         record.update(native_chat)
-                    for key in ('account_id', 'host_id', 'conversation_key', 'source_key', 'source_session_id', 'source_provider', 'source_turn', 'context_omitted_chars', 'quota_failover_from'):
+                    for key in ('account_id', 'host_id', 'conversation_key', 'source_key', 'source_session_id', 'source_provider', 'source_turn', 'context_omitted_chars', 'quota_failover_from', 'provider_switch_from'):
                         if key in run:
                             record[key] = run[key]
                     record['execution_host'] = run['host_id']
@@ -2833,12 +2927,49 @@ _BROKER = None
 _INIT_LOCK = threading.Lock()
 
 
+def observed_run(rid):
+    """Read run state without opening the broker or triggering recovery."""
+    rid = safe_id(rid)
+    controller = _BROKER
+    if controller is not None:
+        return controller.store.get(rid)
+    run = stream._jload(str(DATA / 'execution' / 'runs' / rid / 'run.json'), {})
+    if not isinstance(run, dict) or run.get('id') != rid:
+        raise ValueError('unknown run')
+    return run
+
+
+def observed_subagents(key):
+    """Latest attached run evidence, without starting the broker on a read."""
+    if _BROKER is None:
+        return []
+    with _BROKER.store.lock:
+        run = next((r for r in reversed(_BROKER.store.records.values())
+                    if r.get('key') == key and r.get('status') not in TERMINAL), None)
+        return copy.deepcopy((run or {}).get('subagents') or [])
+
+
 def instance():
     global _BROKER
     with _INIT_LOCK:
         if _BROKER is None:
             from accounts import collect_run_notice
-            _BROKER = Broker(RunStore(DATA / 'execution', collect_run_notice))
+            root = DATA / 'execution'
+            root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            # RunStore startup recovery must never observe another broker's live
+            # runs. A separate lock file keeps ownership for the process lifetime.
+            owner = (root / 'broker.lock').open('a')
+            try:
+                try:
+                    fcntl.flock(owner.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as exc:
+                    raise RuntimeError('Another Library broker already owns this execution store.') from exc
+                controller = Broker(RunStore(root, collect_run_notice))
+            except BaseException:
+                owner.close()
+                raise
+            controller.owner_lock = owner
+            _BROKER = controller
         return _BROKER
 
 
@@ -2872,8 +3003,16 @@ def create_run(req, query, body):
         if run.get('key') and run.get('session_id'):
             latest.setdefault(run['key'], run)
     for key, run in latest.items():
+        binding = {field: run[field] for field in identity_fields if field in run}
         if key in index:
-            index[key] = dict(index[key], **{k: run[k] for k in identity_fields if k in run})
+            index[key] = dict(index[key], **binding)
+        elif key == body.get('key') and key == f"{run['provider']}-{run['session_id']}":
+            # A stopped first turn can have a saved transcript before it qualifies
+            # for the searchable index. Resume only its recorded native session.
+            chat = stream._jload(str(Path(stream.CHATS) / (safe_id(key) + '.json')), {})
+            if (chat.get('id'), chat.get('source'), chat.get('cwd')) == (
+                    run['session_id'], run['provider'], run['cwd']):
+                index[key] = dict(id=chat['id'], source=chat['source'], cwd=chat['cwd'], **binding)
     def load_chat(key):
         chat = stream._jload(str(Path(stream.CHATS) / (safe_id(key) + '.json')), {})
         binding = latest.get(key) or {}

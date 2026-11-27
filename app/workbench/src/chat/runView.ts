@@ -2,29 +2,59 @@ import type {RunEvent} from '../state/runs';
 import {groupToolEvents} from './toolEvents';
 import {recordedOutputContains} from './recordedOutput';
 // Reasoning the provider streamed: Claude thinking blocks or Codex reasoning summaries.
-export function runThinking(events:RunEvent[]){
- const full:string[]=[],partial:string[]=[];
- for(const e of events){
-  if(e.event!=='provider_event')continue;
-  const ev=e.data?.event||{},body=ev.type==='stream_event'?ev.event:ev;
-  if(Array.isArray(ev.message?.content))for(const c of ev.message.content)if(c?.type==='thinking'&&c.thinking)full.push(String(c.thinking));
-  if(body?.type==='content_block_delta'&&body.delta?.type==='thinking_delta')partial.push(String(body.delta.thinking||''));
-  if(ev.method==='item/reasoning/summaryTextDelta')partial.push(String(ev.params?.delta||''));
-  if(ev.method==='item/completed'&&ev.params?.item?.type==='reasoning')full.push(...(ev.params.item.summary||[]).map((s:any)=>String(s?.text??s)));
+export function runThinking(events:RunEvent[],rootId?:string){
+ const blocks=new Map();
+ let claudeId='',anonymous=0;
+ for(const entry of events){
+  if(entry.event!=='provider_event')continue;
+  const ev=entry.data?.event||{},params=ev.params||{},body=ev.type==='stream_event'?ev.event:ev;
+  if(ev.parent_tool_use_id||(rootId&&params.threadId&&params.threadId!==rootId))continue;
+  if(body?.type==='message_start')claudeId=body.message?.id||'stream-'+(++anonymous);
+  if(body?.type==='content_block_delta'&&body.delta?.type==='thinking_delta'){
+   const key='claude:'+claudeId+':'+(body.index||0);
+   blocks.set(key,(blocks.get(key)||'')+(body.delta.thinking||''));
+  }
+  if(ev.type==='assistant'&&Array.isArray(ev.message?.content)){
+   ev.message.content.forEach((block,index)=>{
+    if(block.type==='thinking'&&block.thinking)blocks.set('claude:'+(ev.message.id||claudeId)+':'+index,block.thinking);
+   });
+  }
+  const key='codex:'+(params.itemId||params.item?.id||'current');
+  if(ev.method==='item/reasoning/summaryTextDelta'){
+   const parts=blocks.get(key)||[];
+   const i=params.summaryIndex||0;
+   parts[i]=(parts[i]||'')+(params.delta||'');blocks.set(key,parts);
+  }
+  if(ev.method==='item/completed'&&params.item?.type==='reasoning'){
+   const summary=(params.item.summary||[]).map(part=>typeof part==='string'?part:part?.text||'').filter(Boolean);
+   if(summary.length)blocks.set(key,summary);
+  }
  }
- return (full.length?full.join('\n\n'):partial.join('')).trim();
+ return Array.from(blocks.values(),value=>Array.isArray(value)?value.join('\n\n'):value).filter(Boolean).join('\n\n').trim();
 }
 // What a run adds below the transcript. Tool calls fold into one group; the answer is never inside it.
-export function runView(turns:any[],events:RunEvent[],output:string){
- return {tools:groupToolEvents(events),thinking:runThinking(events),answer:unrecordedOutput(turns,events,output)};
+export function runView(turns:any[],events:RunEvent[],output:string,runStart?:string,rootId?:string){
+ return {tools:groupToolEvents(events),thinking:runThinking(events,rootId),answer:unrecordedOutput(turns,events,output,runStart)};
 }
-// A steered or queued run keeps one output across several turns. The transcript shows the replies it has indexed, so
-// below it goes only the text streamed after its newest reply; the whole output when the loaded deltas do not reach back.
-function unrecordedOutput(turns:any[],events:RunEvent[],output:string){
+// Match saved text, never cut deltas at a transcript timestamp: provider timestamps and delivery times differ,
+// and reasoning can be recorded while an answer is still streaming. Keep the snapshot when events are paginated.
+function unrecordedOutput(turns:any[],events:RunEvent[],output:string,runStart?:string){
  if(!output||recordedOutputContains(turns,output))return '';
- const recorded=Date.parse(turns.filter(t=>t.role==='assistant').at(-1)?.ts||''),deltas=events.filter(e=>e.event==='delta');
- if(!(Date.parse(deltas[0]?.ts||'')<=recorded))return output;
- return deltas.filter(e=>!(Date.parse(e.ts||'')<=recorded)).map(e=>e.data?.text||'').join('');
+ const since=Date.parse(runStart||events.find(e=>e.event==='delta')?.ts||'');
+ const lastUser=turns.map(t=>t.role).lastIndexOf('user');
+ const replies=turns.filter((t,i)=>t.role==='assistant'&&t.channel!=='analysis'&&
+  (Number.isFinite(since)?!(Date.parse(t.ts||'')<since-1000):i>lastUser));
+ // Index non-whitespace characters back to their original offsets so Markdown is never reformatted.
+ const chars=[...output.matchAll(/\S/g)],compact=chars.map(c=>c[0]).join('');let consumed=0;
+ for(const turn of replies){
+  const saved=String(turn.text||'').replace(/\s/g,'');if(!saved)continue;
+  const rest=compact.slice(consumed);
+  if(saved===rest)return '';
+  if(rest.startsWith(saved)){consumed+=saved.length;continue;}
+  // The index may already contain the completed version of the message whose deltas are still arriving.
+  if(saved.startsWith(rest)&&rest)return '';
+ }
+ return consumed?output.slice(chars[consumed-1].index!+1):output;
 }
 // Where a sent prompt sits in the run's event order: the receipt that shows the agent read it, the queue event that
 // delivered it at a turn end, or the start for the message that began the run. Not read yet: after all text so far.

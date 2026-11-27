@@ -12,6 +12,7 @@ const mod=compile('libraryTabGroups.ts',id=>{
  if(id.endsWith('customEditorInput.js'))return {CustomEditorInput};if(id.endsWith('webviewEditorInput.js'))return {WebviewInput};
  if(id.endsWith('editorGroupsService.js'))return {IEditorGroupsService:groupService,GroupsOrder:{GRID_APPEARANCE:2}};
  if(id.endsWith('storage.js'))return {IStorageService:storageService,StorageScope:{WORKSPACE:1},StorageTarget:{MACHINE:1}};
+ if(id.endsWith('libraryChatIdentity.js'))return compile('libraryChatIdentity.ts',()=>({}));
  if(id.endsWith('libraryPaneArrangement.js'))return {planPaneArrangement};
  if(id.endsWith('editor.js'))return {EditorsOrder:{SEQUENTIAL:0}};if(id.endsWith('libraryTabGroupModel.js'))return {TabGroupModel};return {};
 });

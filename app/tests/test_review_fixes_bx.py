@@ -35,7 +35,7 @@ class TreeStatusTests(unittest.TestCase):
         nodes = {n['key']: n for n in tree['nodes']}
         self.assertEqual((nodes['claude-p']['live_status'], nodes['claude-p']['state'], nodes['claude-p']['unseen']), ('idle', 'idle', False))
         self.assertTrue(nodes['claude-p-agent-a']['unseen'])  # result newer than the baseline, same rule as the sidebar row
-        self.assertEqual(tree['counts'], {'working': 1, 'waiting': 0, 'idle': 1, 'finished': 2, 'stopped': 1, 'failed': 1, 'unknown': 0})
+        self.assertEqual(tree['counts'], {'starting': 0, 'working': 1, 'waiting': 0, 'idle': 1, 'finished': 2, 'stopped': 1, 'failed': 1, 'unknown': 0})
 
     def test_node_state_order(self):
         s = session_lineage.node_state

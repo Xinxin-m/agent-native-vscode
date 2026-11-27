@@ -16,6 +16,11 @@ class HostModelTests(unittest.TestCase):
         with patch.object(host_models.hosts,'get_host',return_value=self.host), patch.object(host_models.host_connector,'ssh_command',return_value=['fake']), patch.object(host_models,'_read_connector',return_value=self.response):
             self.assertEqual(self.discover()['models'][0]['id'],'actual-model')
 
+    def test_slurm_allows_connection_setup_before_model_discovery(self):
+        with patch.object(host_models.hosts,'get_host',return_value=dict(self.host, kind='slurm')), patch.object(host_models.host_connector,'ssh_command',return_value=['fake']), patch.object(host_models,'_read_connector',return_value=self.response) as read:
+            self.assertEqual(self.discover()['models'][0]['id'],'actual-model')
+        read.assert_called_once_with(['fake'], timeout=55)
+
     def test_success_cache_and_failed_requests(self):
         with patch.object(host_models.hosts,'get_host',return_value=self.host), patch.object(host_models.host_connector,'ssh_command',return_value=['fake']), patch.object(host_models,'_read_connector',return_value=self.response) as read:
             self.discover(); self.discover()
@@ -38,7 +43,7 @@ class HostModelTests(unittest.TestCase):
     def test_concurrent_same_context_deduplicates(self):
         import concurrent.futures, threading
         started, release = threading.Event(), threading.Event()
-        def remote(_):
+        def remote(_, **kwargs):
             started.set(); self.assertTrue(release.wait(2)); return self.response
         with patch.object(host_models.hosts,'get_host',return_value=self.host), patch.object(host_models.host_connector,'ssh_command',return_value=['fake']), patch.object(host_models,'_read_connector',side_effect=remote) as read:
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:

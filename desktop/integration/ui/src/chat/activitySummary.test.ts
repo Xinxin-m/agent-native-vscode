@@ -32,3 +32,12 @@ it('distinguishes streaming text, explicit thinking deltas, unknown and waiting 
  expect(summarizeActivity({status:'running'},[],true,0)).toMatchObject({phase:'Waiting for you',active:false});
  expect(summarizeActivity({status:'completed'},[],false,0).active).toBe(false);
 });
+
+it('shows Stalled without animation and follows newer run receipts',()=>{
+ const run={status:'running',operation:'compact',last_seq:5,stalled:true};
+ expect(summarizeActivity(run,[],false,0)).toMatchObject({phase:'Stalled',active:false,finished:false});
+ expect(summarizeActivity(run,[],true,0).phase).toBe('Waiting for you');
+ expect(summarizeActivity(run,[e(4,'state',{stalled:false})],false,0).phase).toBe('Stalled');
+ expect(summarizeActivity(run,[e(6,'state',{stalled:false})],false,0)).toMatchObject({phase:'Compacting',active:true});
+ expect(summarizeActivity({...run,status:'failed'},[],false,0)).toMatchObject({phase:'Failed',active:false});
+});

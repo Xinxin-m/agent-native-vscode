@@ -79,3 +79,15 @@ test('state deltas merge rows and metadata, recover an invalid base without losi
 });
 
 test('a model update check does not hold the send lane',async()=>{const slow=deferred(),events=[];const dispatch=flow.createDispatcher(async m=>{events.push(m.tag);if(m.tag==='refresh')await slow.promise;return m.tag});const a=dispatch({action:'api',path:'/api/models/refresh',body:{install:true},tag:'refresh'}),b=dispatch({action:'api',path:'/api/runs',body:{message:'m'},tag:'send'});assert.equal(await b,'send');slow.resolve();assert.equal(await a,'refresh');});
+
+test('opening a utility from another webview waits for the persisted preference despite a slow rail configuration write',async()=>{
+ const settings={settled:Promise.resolve()},slowConfig=deferred(),slowSave=deferred();let popups=true;
+ const first=flow.createDispatcher(async m=>{
+  if(m.action==='config')return slowConfig.promise;
+  await slowSave.promise;popups=m.value.utilityPopups;
+ },settings);
+ const other=flow.createDispatcher(async()=>{await settings.settled;return popups;},settings);
+ const rail=first({action:'config'}),write=first({action:'preferences',value:{utilityPopups:false}});
+ const opened=other({action:'open'});slowSave.resolve();
+ assert.equal(await opened,false);await write;slowConfig.resolve();await rail;
+});

@@ -119,7 +119,7 @@ function create({vscode,context,helper,api,findTranscript,openLibrary,switchAcco
   if(!recoverable(failure))throw Error('This conversation no longer reports a recoverable failure.');
   const account=failure.account_id||entry.account;
   const notices=await api('/api/notices');
-  const seconds=notices.settings?.duration_seconds??3;
+  const seconds=notices.settings?.duration_seconds??4;
   let accounts=[];try{accounts=(await helper(['accounts','--provider',entry.provider])).accounts||[];}catch{}
   const current=accounts.find(a=>a.id===account),alternative=accounts.find(a=>a.id!==account&&a.logged_in===true&&!a.disabled);
   const other=entry.provider==='claude'?'codex':'claude',actions=[];

@@ -2,6 +2,7 @@
 data/*
 !data/.gitkeep
 !data/config.example.json
+.file-relocations.json
 
 # Browser-automation snapshots: these transcribe the on-screen page, i.e.
 # real chat titles and absolute paths. Never commit them.

@@ -66,7 +66,7 @@ def start_agent(brief, model, progress_path, request_id):
 
 def _run(run_id):
     import broker
-    return broker.instance().store.get(run_id)
+    return broker.observed_run(run_id)
 
 
 def _login(account_id):

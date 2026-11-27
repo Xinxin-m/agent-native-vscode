@@ -38,10 +38,140 @@ CODEX_FRESH_S = 600
 LIVE_FRESH_S = 180
 _NOTE = re.compile(r'<task-id>([^<]+)</task-id>.*?<status>([^<]+)</status>', re.S)
 _TERMINAL = {'completed': 'finished', 'failed': 'failed', 'killed': 'stopped', 'stopped': 'stopped'}
+_CODEX_STATUS = {'pendingInit': 'starting', 'running': 'working', 'interrupted': 'stopped',
+                 'completed': 'finished', 'errored': 'failed', 'shutdown': 'stopped', 'notFound': 'unknown'}
+_TURN_STATUS = {'completed': 'finished', 'failed': 'failed', 'interrupted': 'stopped'}
 
 _TAILS = {}    # path -> (mtime_ns, size, state)
 _PARENTS = {}  # path -> {'ino', 'offset', 'reports': {agent_id: (status, ts)}}
 _LOCK = threading.Lock()
+
+
+def _update_agent(agents, agent_id, provider, **fields):
+    if not isinstance(agent_id, str) or not agent_id:
+        return
+    record = agents.setdefault(agent_id, {'id': agent_id, 'source': provider, 'state': 'unknown'})
+    record.update({key: value for key, value in fields.items() if value})
+
+
+def observe_codex(agents, root, method, params):
+    """Retain the observation for a child after it stops, to override stale indexed activity."""
+    if not root:
+        return
+    thread_id = params.get('threadId')
+    if method == 'thread/started':
+        thread = params.get('thread') or {}
+        child = thread.get('id')
+        parent = thread.get('parentThreadId')
+        if child != root and (child in agents or parent and (parent == root or parent in agents)):
+            _update_agent(agents, child, 'codex', title=thread.get('agentNickname'), parent_id=parent)
+    elif method in ('item/started', 'item/completed'):
+        item = params.get('item') or {}
+        parent = item.get('senderThreadId') or thread_id
+        if item.get('type') != 'collabAgentToolCall' or parent != root and parent not in agents:
+            return
+        spawned = item.get('tool') == 'spawnAgent'
+        states = item.get('agentsStates') or {}
+        prompt = str(item.get('prompt') or '').strip().partition('\n')[0][:100]
+        for child in set(item.get('receiverThreadIds') or []) | states.keys():
+            if child == root or (not spawned and child not in agents):
+                continue
+            previous = agents.get(child) or {}
+            state = _CODEX_STATUS.get((states.get(child) or {}).get('status'))
+            # The spawn receipt can follow the child's first turn notification.
+            if spawned and previous.get('state') not in (None, 'unknown', 'starting') and state == 'starting':
+                state = None
+            _update_agent(agents, child, 'codex',
+                          parent_id=parent if spawned else None,
+                          title=prompt if spawned and not previous.get('title') else None, state=state)
+    elif thread_id and root and thread_id != root:
+        if method == 'turn/started':
+            state = 'working'
+        elif method == 'turn/completed':
+            state = _TURN_STATUS.get((params.get('turn') or {}).get('status'), 'unknown')
+        elif method == 'thread/status/changed':
+            status = params.get('status') or {}
+            state = {'idle': 'idle', 'systemError': 'failed', 'notLoaded': 'unknown'}.get(status.get('type'))
+            if status.get('type') == 'active':
+                state = 'waiting' if status.get('activeFlags') else 'working'
+            if state == 'idle' and (agents.get(thread_id) or {}).get('state') in _TURN_STATUS.values():
+                return
+        else:
+            return
+        _update_agent(agents, thread_id, 'codex', state=state)
+
+
+def observe_claude(agents, root, event):
+    """Join Agent/Task tool IDs to native task IDs, excluding shell and other jobs."""
+    typ, sub = event.get('type'), event.get('subtype')
+    def parent_id(tool):
+        return next((agent['id'] for agent in agents.values() if tool and agent.get('tool_id') == tool), root)
+
+    def started(task):
+        aid, tool = task.get('task_id'), task.get('tool_use_id')
+        if not aid or not (task.get('task_type') in ('local_agent', 'agent', 'subagent') or tool in agents):
+            return
+        previous = agents.pop(tool, {}) if tool != aid else {}
+        existing = agents.get(aid) or previous
+        if tool and tool != aid:
+            for child in agents.values():
+                if child.get('parent_id') == tool:
+                    child['parent_id'] = aid
+        _update_agent(agents, aid, 'claude', tool_id=tool,
+                      parent_id=existing.get('parent_id') or parent_id(task.get('parent_tool_use_id')),
+                      title=task.get('description') or existing.get('title'),
+                      model=existing.get('model'), state='working')
+
+    if typ == 'system' and sub in ('task_started', 'task_progress'):
+        if sub == 'task_progress' and event.get('task_id') in agents:
+            _update_agent(agents, event['task_id'], 'claude', state='working')
+        else:
+            started(event)
+    elif typ == 'system' and sub == 'task_notification' and event.get('task_id') in agents:
+        _update_agent(agents, event['task_id'], 'claude', state=_TERMINAL.get(event.get('status'), 'unknown'))
+    elif typ == 'system' and sub == 'background_tasks_changed':
+        for task in event.get('tasks') or []:
+            if isinstance(task, dict):
+                started(task)
+    elif typ in ('assistant', 'user'):
+        message = event.get('message') or {}
+        parent_tool = event.get('parent_tool_use_id')
+        if typ == 'assistant' and parent_tool:
+            for agent in agents.values():
+                if agent.get('tool_id') == parent_tool:
+                    model = _recorded_model(message.get('model'))
+                    if model:
+                        agent['model'] = model
+                    break
+        content = message.get('content')
+        if not isinstance(content, list):
+            return
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if typ == 'assistant' and block.get('type') == 'tool_use' and block.get('name') in ('Agent', 'Task'):
+                tool = block.get('id')
+                if tool and not any(tool == record.get('tool_id') for record in agents.values()):
+                    _update_agent(agents, tool, 'claude', tool_id=tool, parent_id=parent_id(parent_tool),
+                                  title=(block.get('input') or {}).get('description'), state='starting')
+            elif typ == 'user' and block.get('type') == 'tool_result':
+                tool = block.get('tool_use_id')
+                previous = next((r for r in agents.values() if tool and tool == r.get('tool_id')), None)
+                if previous is None:
+                    continue
+                result = event.get('toolUseResult')
+                result = result if isinstance(result, dict) else {}
+                aid = result.get('agentId') or previous['id']
+                agents.pop(previous['id'])
+                if aid != previous['id']:
+                    for child in agents.values():
+                        if child.get('parent_id') == previous['id']:
+                            child['parent_id'] = aid
+                state = ('working' if result.get('status') == 'async_launched' else
+                         'failed' if block.get('is_error') else _TERMINAL.get(result.get('status'), 'finished'))
+                _update_agent(agents, aid, 'claude', tool_id=tool, parent_id=previous.get('parent_id') or root,
+                              title=previous.get('title'), model=_recorded_model(result.get('resolvedModel')) or previous.get('model'),
+                              state=state)
 
 
 def _stat(path):
@@ -53,6 +183,12 @@ def _stat(path):
 
 def transcript_path(meta):
     sig = meta.get('src_sig') or []
+    if meta.get('source') == 'codex':
+        # Continuations get their own rollout. The filename carries the native
+        # creation date, unlike a copied file's filesystem modification time.
+        paths = [entry[0] for entry in sig if isinstance(entry, (list, tuple)) and entry]
+        if paths:
+            return max(paths, key=os.path.basename)
     if sig and isinstance(sig[0], (list, tuple)) and sig[0]:
         return sig[0][0]
     return meta.get('file') or ''
@@ -65,18 +201,21 @@ def _records(path, size, whole=False):
             fh.readline()  # drop the partial first line
         for line in fh:
             try:
-                yield json.loads(line)
+                record = json.loads(line)
             except ValueError:
                 continue
+            if isinstance(record, dict):
+                yield record
 
 
 def _claude_tail(path, size, whole=False):
-    """('ended', ts) after a final end_turn, else ('open', ts) or (None, '')."""
-    state, ts = None, ''
+    state, ts, model = None, '', ''
     for d in _records(path, size, whole):
         t = d.get('type')
         if t == 'assistant':
-            reason = (d.get('message') or {}).get('stop_reason')
+            message = d.get('message') or {}
+            reason = message.get('stop_reason')
+            model = _recorded_model(message.get('model')) or model
             state, ts = ('ended' if reason in ('end_turn', 'stop_sequence') else 'open'), d.get('timestamp') or ts
         elif t == 'user':
             content = (d.get('message') or {}).get('content')
@@ -84,15 +223,17 @@ def _claude_tail(path, size, whole=False):
                 state, ts = 'open', d.get('timestamp') or ts
             elif state != 'ended':
                 state, ts = 'open', d.get('timestamp') or ts
-    return state, ts
+    return state, ts, model
 
 
 def _codex_tail(path, size, whole=False):
-    state, ts = None, ''
+    state, ts, model = None, '', ''
     for d in _records(path, size, whole):
+        p = d.get('payload') if isinstance(d.get('payload'), dict) else {}
+        if d.get('type') in ('turn_context', 'token_usage_record'):
+            model = _recorded_model(p.get('model')) or model
         if d.get('type') != 'event_msg':
             continue
-        p = d.get('payload') if isinstance(d.get('payload'), dict) else {}
         pt = p.get('type')
         if pt == 'task_started':
             state = 'open'
@@ -105,13 +246,18 @@ def _codex_tail(path, size, whole=False):
         else:
             continue
         ts = d.get('timestamp') or ts
-    return state, ts
+    return state, ts, model
+
+
+def _recorded_model(model):
+    model = model.strip() if isinstance(model, str) else ''
+    return '' if model.startswith('<') else model
 
 
 def tail_state(path, source):
     st = _stat(path)
     if not st:
-        return None, '', None
+        return None, '', '', None
     hit = _TAILS.get(path)
     if hit and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
         return hit[2] + (st.st_mtime,)
@@ -121,9 +267,14 @@ def tail_state(path, source):
         if state[0] is None and st.st_size > TAIL_BYTES:
             state = read(path, st.st_size, True)  # a long final output can hide the last event
     except OSError:
-        return None, '', st.st_mtime
+        return None, '', '', st.st_mtime
     _TAILS[path] = (st.st_mtime_ns, st.st_size, state)
     return state + (st.st_mtime,)
+
+
+def child_model(meta):
+    _, _, model, _ = tail_state(transcript_path(meta), meta.get('source'))
+    return model or _recorded_model((meta.get('resume') or {}).get('model')) or _recorded_model(meta.get('model_main'))
 
 
 def parent_reports(path):
@@ -227,7 +378,7 @@ def child_activity(meta, index, now=None, live=None):
     live = _live() if live is None else live
     source = meta.get('source')
     path = transcript_path(meta)
-    state, ts, mtime = tail_state(path, source)
+    state, ts, _, mtime = tail_state(path, source)
     age = now - mtime if mtime else None
     if source == 'codex':
         if state == 'ended':
@@ -244,7 +395,7 @@ def child_activity(meta, index, now=None, live=None):
         if state == 'open':
             return _out('unknown', 'Turn open with no completion; rollout last written ' + _ago(age or 0))
         if age is not None and age < CODEX_FRESH_S:
-            return _out('running', 'Rollout created ' + _ago(age) + '; no turn event yet')
+            return _out('unknown', 'Child rollout exists; no turn event yet')
         if age is not None:
             return _out('stopped', 'No turn was recorded in the child rollout')
         return _out('unknown', 'Child rollout unavailable')
@@ -262,7 +413,7 @@ def child_activity(meta, index, now=None, live=None):
         return _out('running', 'No completion recorded; transcript written ' + _ago(age))
     root_sid = meta.get('root_session_id') or ''
     alive = _root_alive(live, meta, root_sid)
-    if alive is True:
+    if alive is True and (state == 'open' or report and report[0] == 'launched'):
         return _out('running', 'No completion recorded; root session process is alive')
     if alive is False:
         return _out('stopped', 'No completion recorded and the root session process has exited')

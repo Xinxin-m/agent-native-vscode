@@ -44,6 +44,7 @@ import urllib.error
 import urllib.request
 
 import notices
+import pools
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "data")
@@ -53,6 +54,7 @@ BACKUPS = os.path.join(DATA, "account-backups")
 HOME = os.path.expanduser("~")
 CLAUDE_JSON = os.path.join(HOME, ".claude.json")
 CODEX_HOME = os.path.join(HOME, ".codex")
+PROFILE_ROOTS = {"claude": os.path.join(HOME, ".claude-profiles"), "codex": os.path.join(HOME, ".codex-profiles")}
 KC_SERVICE = "Claude Code-credentials"
 API = "https://api.anthropic.com/api/oauth/"
 UA = "claude-code/2.1.282"
@@ -116,7 +118,8 @@ def _epoch(value):
     return datetime.datetime.fromisoformat(iso.replace('Z', '+00:00')).timestamp() if iso else None
 
 
-def account_warnings(account, record, now=None):
+def account_warnings(account, record, now=None, successor=None):
+    """successor: the account new work moves to, named in the usage warning of the configured account."""
     now = time.time() if now is None else now
     result = []
     label = (record.get('email') if record.get('logged_in') else None) or account.get('label') or account['id']
@@ -138,7 +141,11 @@ def account_warnings(account, record, now=None):
                 continue
             # Reset times drift between polls; the key uses the reset hour (notices.py matches drift too).
             hour = _expiry_iso(round((_epoch(reset) or 0) / 3600) * 3600) if reset else None
-            result.append({'kind': 'usage_high', 'message': f"{label} is at {percent:g}% of its {window.get('label') or window.get('kind') or 'usage'} limit.",
+            message = f"{label} is at {percent:g}% of its {window.get('label') or window.get('kind') or 'usage'} limit"
+            if _epoch(reset):
+                message += f" (resets {notices.reset_text(_epoch(reset), now)})"
+            message += f"; new work goes to {successor}." if successor else "."
+            result.append({'kind': 'usage_high', 'message': message,
                            'resets_at': reset, 'expires_at': None, 'threshold': threshold, 'window': window.get('kind'),
                            'key': f"{account['id']}:usage:{window.get('kind')}:{hour}:{threshold}"})
     return result
@@ -175,7 +182,8 @@ def _config():
 
 
 def _auto_cfg():
-    a = dict({"enabled": True, "threshold": 90, "mode": "global"}, **(_config().get("auto_switch") or {}))
+    a = dict({"enabled": True, "threshold": 90, "mode": "global", "pools": True, "cross_provider": "one_click"},
+             **(_config().get("auto_switch") or {}))
     return a
 
 
@@ -209,7 +217,40 @@ def load():
     st.setdefault("global_active", dict(st["active"]))
     st.setdefault("last_switch", None)
     d.setdefault("cache", {})
+    _discover(d)
     return d
+
+
+def _login_email(tool, directory):
+    if tool == "claude":
+        return ((_jread(os.path.join(directory, ".claude.json"), {}) or {}).get("oauthAccount") or {}).get("emailAddress")
+    tokens = (_jread(os.path.join(directory, "auth.json"), {}) or {}).get("tokens") or {}
+    return _jwt_claims(tokens.get("id_token") or "").get("email")
+
+
+def _discover(d):
+    """Register every signed-in profile home the registry lacks, pending until refresh verifies it.
+    The registry only grows here, so a wiped accounts.json heals from the profile folders."""
+    from host_connector import _login_identity
+    known = {os.path.realpath(path) for a in d["accounts"] + d["pending_accounts"]
+             for path in (a.get("config_dir"), a.get("login_config_dir")) if path}
+    for tool, root in PROFILE_ROOTS.items():
+        try:
+            names = sorted(os.listdir(root))
+        except FileNotFoundError:
+            continue
+        for name in names:
+            directory = os.path.join(root, name)
+            if not os.path.isdir(directory) or os.path.realpath(directory) in known:
+                continue
+            if not _login_identity(tool, directory):
+                continue
+            aid = f"{tool}-{_slug(name)}"
+            if _slug(name) in ("", "default") or _acct(d, aid):
+                print(f"accounts: {directory} is signed in but {aid} is taken; rename the folder to list it")
+                continue
+            d["pending_accounts"].append({"id": aid, "tool": tool, "config_dir": directory,
+                                          "label": _login_email(tool, directory) or name})
 
 
 def save(d):
@@ -735,7 +776,7 @@ def payload(d=None):
             "spend_control": c.get("spend_control"), "quota_source": c.get("quota_source"),
             "quota_attributed": c.get("quota_attributed"),
             "loginExpiresAt": c.get('loginExpiresAt'), "accessTokenExpiresAt": c.get('accessTokenExpiresAt'),
-            "warnings": account_warnings(a, c), "renewal_pending": a['id'] in _pending_renewals,
+            "warnings": account_warnings(a, c, successor=_warning_successor(d, a)), "renewal_pending": a['id'] in _pending_renewals,
             "login": active_logins.get(a['id']),
             "login_error": login_errors.get(a['id']), "login_starting": a['id'] in _login_starting,
             "renewal_error": (_pending_renewals.get(a['id']) or {}).get('error'),
@@ -766,6 +807,8 @@ def picker_list(d=None, model=None, rows=None, pending=None):
     by_id = {r['id']: r for r in rows}
     out = {'ok': True, 'accounts': [{'id': r['id'], 'tool': r['tool'], 'label': r['label'], 'email': r.get('email') or '',
                                      'logged_in': bool(r.get('logged_in'))} for r in shown + signed_out], 'auto': {}}
+    if _auto_cfg().get('pools', True):
+        out['pool_labels'] = {'codex': 'Codex pool', 'claude': 'Claude pool'}
     for tool in ('claude', 'codex'):
         try:
             aid = resolve_launch(tool, model, d=d)['account_id']
@@ -844,6 +887,47 @@ def verify(aid):
 def _worst(c):
     ws = [w.get("percent") or 0 for w in (c or {}).get("windows", [])]
     return max(ws) if ws else None
+
+
+def _name(d, aid):
+    """The name notices use: the verified email, else the profile label."""
+    rec = d["cache"].get(aid, {})
+    return (rec.get("email") if rec.get("logged_in") else None) or (_acct(d, aid) or {}).get("label") or aid
+
+
+def _successor(d, tool, exclude, threshold):
+    """Where automatic routing sends new work instead: the signed-in account with the lowest known
+    usage under the threshold (host_connector.resolve_account ranks the same way per model)."""
+    rows = [(_worst(d["cache"].get(a["id"])), a["id"]) for a in d["accounts"]
+            if a["tool"] == tool and a["id"] != exclude and not a.get("disabled")
+            and d["cache"].get(a["id"], {}).get("logged_in") and d["cache"].get(a["id"], {}).get("email")]
+    rows = [row for row in rows if row[0] is not None and row[0] < threshold]
+    return _name(d, min(rows)[1]) if rows else None
+
+
+def _warning_successor(d, a):
+    if d["state"]["active"].get(a["tool"]) != a["id"]:
+        return None
+    return _successor(d, a["tool"], a["id"], float(_auto_cfg().get("threshold") or 90))
+
+
+def announce_switch(from_id, to_id, now=None):
+    """Notice (and macOS banner) before new work starts on another account because of quota.
+    One notice per source account and usage window."""
+    now = time.time() if now is None else now
+    d = load()
+    windows = [w for w in d["cache"].get(from_id, {}).get("windows") or []
+               if isinstance(w.get("percent"), (int, float)) and (_epoch(w.get("resets_at")) or now + 1) > now]
+    window = max(windows, key=lambda w: w["percent"], default=None)
+    reset = _epoch(window.get("resets_at")) if window else None
+    if window:
+        why = f"{_name(d, from_id)} is at {window['percent']:g}% of its {window.get('label') or window['kind']} limit"
+        why += f" (resets {notices.reset_text(reset, now)})" if reset else ""
+    else:
+        why = f"{_name(d, from_id)} has no known headroom"
+    key = f"switch:{from_id}:{(window or {}).get('kind')}:{round((reset or now) / 3600)}"
+    return notices.announce(os.path.join(DATA, "notices.json"), key, "account_switch",
+                            f"{why}; new work goes to {_name(d, to_id)}.", at=reset, account_id=from_id, now=now)
 
 
 # ------------------------------------------------------------------ env + pick
@@ -1679,6 +1763,10 @@ def _set_auto_locked(body):
         auto["threshold"] = max(1, min(100, int(body["threshold"])))
     if body.get("mode") in ("global", "dashboard", "off"):
         auto["mode"] = body["mode"]
+    if "pools" in body:
+        auto["pools"] = bool(body["pools"])
+    if body.get("cross_provider") in ("one_click", "automatic"):
+        auto["cross_provider"] = body["cross_provider"]
     cfg["auto_switch"] = auto
     _jwrite(CONFIG_FILE, cfg)
     return auto
@@ -1848,7 +1936,7 @@ def _notice_display(result):
         profile = _acct(data, aid)
         if not profile:
             continue
-        for warning in account_warnings(profile, data['cache'].get(aid, {}), now):
+        for warning in account_warnings(profile, data['cache'].get(aid, {}), now, _warning_successor(data, profile)):
             current = _epoch(warning.get('resets_at'))
             if warning.get('kind') == 'usage_high' and notice.get('family') == f"{aid}:usage:{warning.get('window')}" \
                     and current and abs(reset - current) <= notices.RESET_TOLERANCE:
@@ -1905,7 +1993,11 @@ ROUTES = {
     ("GET", "/api/notices"): _get_notices,
     ("POST", "/api/notices"): _h_notices,
 }
-BACKGROUND = [(background, 30)]
+def poll_pools():
+    pools.poll(os.path.join(DATA, "notices.json"), float(_auto_cfg().get("threshold") or 90))
+
+
+BACKGROUND = [(background, 30), (poll_pools, pools.POLL_SECONDS)]
 
 
 # ------------------------------------------------------------------ CLI

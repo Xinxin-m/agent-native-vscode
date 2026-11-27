@@ -55,9 +55,15 @@ function createReadCache(send,{now=Date.now,maxEntries=16,sendState,stateGap=500
  return {request,invalidate};
 }
 const parallelActions=new Set(['subscribe','unsubscribe','tabIdentityReady','title','terminal','toggleSecondarySidebar','toggleSidebar','advancedEditor','confirm','sessionDetails','models','imageResource']);
-function createDispatcher(handle){
+function createDispatcher(handle,preferenceWrites={settled:Promise.resolve()}){
  let mutations=Promise.resolve(),opens=Promise.resolve();
  return message=>{
+  // Preferences affect native commands as well as opens from other webviews.
+  if(message.action==='preferences'){
+   const write=preferenceWrites.settled.then(()=>handle(message));
+   preferenceWrites.settled=write.catch(()=>{});
+   return write;
+  }
   if(message.action==='open'){const operation=opens.then(()=>handle(message));opens=operation.catch(()=>{});return operation}
   // A model update check writes no Library data and an install can take minutes, so it must not hold the send lane.
   const parallel=(message.action==='api'&&(message.body===undefined||message.path==='/api/models/refresh'))||parallelActions.has(message.action)||(message.action==='githubAccounts'&&!message.connect);

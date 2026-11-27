@@ -2,7 +2,7 @@
 const vscode=require('vscode');const {editMarkdown}=require('./markdown-source.cjs');const {randomBytes}=require('node:crypto');const {inspectHtml,editHtml,previewHtml,resolveHtmlAssets,markdownImageSources}=require('./html-source.cjs');const {createAssetLoader}=require('./document-assets.cjs');
 function register(context,services){
  const bridge=require('./bridge.cjs'),base=()=>bridge.endpoint(vscode.workspace.getConfiguration('library').get('endpoint'));
- const assets=services||{api:p=>bridge.request(base(),p),bytes:p=>bridge.requestBytes(base(),p)};
+ const assets=services||{api:(p,b)=>bridge.request(base(),p,b),bytes:p=>bridge.requestBytes(base(),p)};
  context.subscriptions.push(vscode.window.registerCustomEditorProvider('library.pdf',{
   async openCustomDocument(uri){return {uri,dispose(){}};},
   async resolveCustomEditor(document,panel){
@@ -14,6 +14,7 @@ function register(context,services){
   }
  },{webviewOptions:{retainContextWhenHidden:true}}));
  async function resolveCustomTextEditor(document,panel){
+  if(await require('./document-review.cjs').resolveReviewEditor(vscode,context,document,panel,assets))return;
   const format=/\.html?$/i.test(document.uri.path)?'html':'markdown';let original=document.getText(),model=format==='html'?inspectHtml(original):null,applying=false,queue=Promise.resolve();
   panel.webview.options={enableScripts:true,localResourceRoots:[vscode.Uri.joinPath(context.extensionUri,'media'),document.uri]};
   const nonce=randomBytes(24).toString('base64'),uri=n=>panel.webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri,'media',n)).with({query:'v='+encodeURIComponent(nonce)});

@@ -15,7 +15,7 @@ test('every installed provider title chat icon routes through current-pane new c
  for(const dir of dirs){
   const manifest=JSON.parse(fs.readFileSync(path.join(root,dir,'package.json'),'utf8'));
   for(const item of manifest.contributes?.menus?.['editor/title']||[]){
-   if((item.group||'').split('@')[0]!=='navigation'||/ProposedDiff$/.test(item.command))continue;
+   if((item.group||'').split('@')[0]!=='navigation'||/(?:ProposedDiff|resolveMergeConflicts)$/.test(item.command))continue;
    assert.ok(commands.includes("['"+item.command+"',"),dir+' '+item.command+' must route to the current pane');
   }
  }

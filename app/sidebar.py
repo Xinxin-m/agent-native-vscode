@@ -95,7 +95,7 @@ def mark_seen(keys, visible, focused, data=DATA, now=None):
 
 
 # ------------------------------------------------------------------ live status
-_RUNS = {}  # run.json path -> ((mtime_ns, size), (status, keys, blocked, created_at)); only changed journals are parsed
+_RUNS = {}  # run.json path -> ((mtime_ns, size), (status, keys, blocked, created_at, finished_at, stalled)); only changed journals are parsed
 
 
 def _run_facts(path):
@@ -111,7 +111,8 @@ def _run_facts(path):
         with open(path) as handle:
             run = json.load(handle)
         facts = (str(run.get('status') or ''), (run.get('key'), run.get('conversation_key')), bool(run.get('recovery_blocked')),
-                 str(run.get('created_at') or ''), str(run.get('finished_at') or run.get('updated_at') or run.get('created_at') or ''))
+                 str(run.get('created_at') or ''), str(run.get('finished_at') or run.get('updated_at') or run.get('created_at') or ''),
+                 bool(run.get('stalled')))
     except (OSError, ValueError, AttributeError):
         facts = None
     _RUNS[path] = (stamp, facts)
@@ -119,15 +120,15 @@ def _run_facts(path):
 
 
 def _active_runs(data):
-    """{chat key: 'working' | 'waiting'} from the broker's run journals."""
+    """Active chat states from the broker's run journals."""
     out = {}
     for path in glob.glob(os.path.join(data, 'execution', 'runs', '*', 'run.json')):
         facts = _run_facts(path)
         if not facts or not facts[0] or facts[0] in RUN_DONE or facts[2]:
             continue
-        state = 'waiting' if facts[0].startswith(('waiting', 'awaiting')) else 'working'
+        state = 'waiting' if facts[0].startswith(('waiting', 'awaiting')) else 'stalled' if facts[5] else 'working'
         for key in facts[1]:
-            if key and out.get(key) != 'waiting':
+            if key and RANK[state] > RANK.get(out.get(key), 0):
                 out[key] = state
     return out
 
@@ -156,16 +157,16 @@ def failed_keys(data=DATA):
 # Latest event wins: a failure stands until the transcript moves on (a later turn means she
 # resumed, so the failure is history). A standing failure clears working and waiting, which
 # otherwise come from process rows or run journals that were never updated.
-STATUS_MARKS = ('failed', 'waiting', 'working', 'new')
+STATUS_MARKS = ('failed', 'waiting', 'stalled', 'working', 'new')
 FAILURE_SLACK_S = 120  # the failed run writes its own error turn into the transcript
 
 
 def resolve(live_status, failed_at, ts_last, unseen):
     """(live_status, failed, status_mark) for one chat; the only place the mark is decided."""
     failed = bool(failed_at) and _parse(ts_last) <= failed_at + FAILURE_SLACK_S
-    if failed and live_status in ('working', 'waiting'):
+    if failed and live_status in ('working', 'waiting', 'stalled'):
         live_status = None
-    mark = 'failed' if failed else live_status if live_status in ('waiting', 'working') else 'new' if unseen else None
+    mark = 'failed' if failed else live_status if live_status in ('waiting', 'stalled', 'working') else 'new' if unseen else None
     return live_status, failed, mark
 
 
@@ -181,7 +182,7 @@ def _attention_keys():
         return set()
 
 
-RANK = {'waiting': 3, 'working': 2, 'idle': 1}
+RANK = {'waiting': 4, 'stalled': 3, 'working': 2, 'idle': 1}
 
 
 def live_statuses(sessions, runs=None, waiting_keys=(), now=None):

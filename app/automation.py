@@ -24,6 +24,7 @@ def prefixes():
     try:
         stamp = os.stat(CONFIG).st_mtime_ns
     except OSError:
+        _private[:] = [None, (), CONFIG, time.monotonic()]
         return PREFIXES
     _private[2:] = [CONFIG, time.monotonic()]
     if _private[0] != stamp:

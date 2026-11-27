@@ -12,7 +12,7 @@ import uuid
 
 RESET_TOLERANCE = 3600
 KEEP_SECONDS = 30 * 86400
-DEFAULT_SETTINGS = {'usage': True, 'signin': True, 'duration_seconds': 3}
+DEFAULT_SETTINGS = {'usage': True, 'signin': True, 'duration_seconds': 4}
 _LOCK = threading.RLock()
 
 
@@ -49,8 +49,22 @@ def _write(path, value):
             os.unlink(tmp)
 
 
+USAGE_KINDS = ('usage_high', 'limit_reached', 'rate_limited', 'account_switch', 'pool_usage', 'pool_switch', 'provider_switch')
+UNKNOWN_RESET_SECONDS = 6 * 3600
+
+
 def category(warning):
-    return 'usage' if warning.get('kind') in ('usage_high', 'limit_reached', 'rate_limited') else 'signin'
+    return 'usage' if warning.get('kind') in USAGE_KINDS else 'signin'
+
+
+def reset_text(at, now=None):
+    """A reset time as she reads it: "3:40 PM" today, "Sun 3:40 PM" within a week, else the date."""
+    now = time.time() if now is None else now
+    stamp, today = time.localtime(at), time.localtime(now)
+    clock = time.strftime('%-I:%M %p', stamp)
+    if stamp[:3] == today[:3]:
+        return clock
+    return time.strftime('%a ', stamp) + clock if at - now < 6 * 86400 else time.strftime('%b %-d ', stamp) + clock
 
 
 def _family(account_id, warning):
@@ -346,6 +360,24 @@ def note(path, key, message, now=None):
             records[key] = {'kind': 'other', 'first_seen': now, 'message': message}
             _write(path, state)
     return key
+
+
+def announce(path, key, kind, message, at=None, account_id=None, now=None, **fields):
+    """Add a quota notice once per key, so one account and window gives one notice; True when new.
+    It closes at its reset time; without one it closes after UNKNOWN_RESET_SECONDS. fields (run_id,
+    chat_key, provider) let a notice offer the chat's recovery actions."""
+    now = time.time() if now is None else now
+    with _LOCK:
+        state = _read(path)
+        records = state.setdefault('notices', {})
+        if key in records:
+            return False
+        records[key] = {'kind': kind, 'first_seen': now, 'message': message,
+                        'at': at if at is not None else now + UNKNOWN_RESET_SECONDS, **fields}
+        if account_id:
+            records[key]['account_id'] = account_id
+        _write(path, state)
+    return True
 
 
 def act(path, body, now=None, account=None):

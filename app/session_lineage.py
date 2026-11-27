@@ -139,7 +139,7 @@ def _cached_resume(key, meta):
     return {}
 
 
-STATES = ('working', 'waiting', 'idle', 'finished', 'stopped', 'failed', 'unknown')
+STATES = ('starting', 'working', 'waiting', 'idle', 'finished', 'stopped', 'failed', 'unknown')
 
 
 def node_state(node):
@@ -160,9 +160,11 @@ def session_tree(req, query, body):
     key = (query or {}).get('key') or ''
     snap = _snapshot(key)
     index = snap['index']
-    if key not in index and key not in snap['by_root']:
-        return {'error': 'Session not found', 'key': key, 'nodes': [], 'edges': []}
+    from broker import observed_subagents
     root = index.get(key, {}).get('root_key') or key
+    observed = {agent['id']: agent for agent in observed_subagents(root)}
+    if key not in index and key not in snap['by_root'] and not observed:
+        return {'error': 'Session not found', 'key': key, 'nodes': [], 'edges': []}
     enrich, titles = snap['enrich'], snap['titles']  # a manual rename wins
     project_id = snap['assignments'].get(root)
     selected = {k: index[k] for k in snap['by_root'].get(root, ())}
@@ -190,6 +192,13 @@ def session_tree(req, query, body):
                 node.update(agent_activity.child_activity(meta, index, live=live))
             except Exception as exc:  # evidence is advisory; never fail the tree
                 node.update(activity='unknown', activity_evidence='Activity check failed: ' + type(exc).__name__)
+            provider = meta.get('source')
+            reading = observed.get(meta.get('agent_id')) or {}
+            actual = agent_activity.child_model(meta) or reading.get('model')
+            node['model_actual'] = actual or ''
+            if reading and reading.get('source') == provider and reading['state'] != 'unknown':
+                node['state'] = reading['state']
+                node['activity_evidence'] = 'Provider reported active-run status'
             # The same mark the sidebar uses: a running child is working, a settled one has none.
             node['live_status'] = 'working' if node.get('activity') == 'running' else None
         node['unseen'] = sidebar.is_unseen(dict(meta, key=node_key), seen, views)  # the sidebar row's blue dot
@@ -197,7 +206,7 @@ def session_tree(req, query, body):
             node['live_status'], failed_now, _ = sidebar.resolve(statuses.get(node_key), failed.get(node_key), meta.get('ts_last'), node['unseen'])
             if failed_now:
                 node['live_status'], node['activity'] = None, 'failed'
-        node['state'] = node_state(node)
+        node.setdefault('state', node_state(node))
         nodes.append(node)
         parent = meta.get('parent_key')
         if parent and parent != node_key:
@@ -207,13 +216,46 @@ def session_tree(req, query, body):
     for parent in sorted(missing):
         nodes.append({'key': parent, 'root_key': root, 'missing': True,
                       'title': 'Transcript unavailable', 'project_id': project_id})
+    # Native observations can reach the browser before the index has a child
+    # transcript. Preserve the status and disable opening until it is indexed.
+    if observed:
+        if not any(node['key'] == root for node in nodes):
+            nodes.append({'key': root, 'title': 'This chat', 'state': 'unknown', 'transcript_pending': True})
+        agent_keys = {node.get('agent_id'): node['key'] for node in nodes}
+        def observed_key(agent):
+            return ('codex-' + agent['id'] if agent['source'] == 'codex' else root + '-agent-' + agent['id'])
+        agent_keys.update({aid: observed_key(agent) for aid, agent in observed.items() if aid not in agent_keys})
+        for aid, agent in observed.items():
+            node_key = agent_keys[aid]
+            if any(node['key'] == node_key for node in nodes):
+                continue
+            parent_key = agent_keys.get(agent.get('parent_id'), root)
+            nodes.append({'key': node_key, 'root_key': root, 'is_child': True, 'agent_id': aid,
+                          'source': agent['source'], 'title': agent.get('title') or 'Subagent', 'parent_key': parent_key,
+                          'model_actual': agent.get('model') or '', 'state': agent['state'],
+                          'transcript_pending': True})
+            edges.append({'parent_key': parent_key, 'child_key': node_key})
     nodes.sort(key=lambda n: (n.get('ts_first') or '', n['key']))
     counts = dict.fromkeys(STATES, 0)
     for node in nodes:
-        if node.get('state'):
-            counts[node['state']] += 1
+        state = node.get('state')
+        if state:
+            counts[state] += 1
+    children = {}
+    for edge in edges:
+        children.setdefault(edge['parent_key'], []).append(edge['child_key'])
+    descendants, pending = {key}, [key]
+    while pending:
+        for child in children.get(pending.pop(), ()):
+            if child not in descendants:
+                descendants.add(child)
+                pending.append(child)
+    active_subagents = [{'id': n.get('agent_id') or n['key'], 'state': n['state'],
+                        'title': n['title'], 'model': n.get('model_actual') or ''}
+                       for n in nodes if n.get('is_child') and n['key'] != key and n['key'] in descendants
+                       and n.get('state') in ('starting', 'working', 'waiting')]
     return {'key': key, 'root_key': root, 'nodes': nodes, 'edges': edges, 'counts': counts,
-            'missing_parent_keys': sorted(missing)}
+            'missing_parent_keys': sorted(missing), 'active_subagents': active_subagents}
 
 
 ROUTES = {('GET', '/api/session_tree'): session_tree}

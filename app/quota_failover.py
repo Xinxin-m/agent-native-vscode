@@ -10,6 +10,7 @@ import stream
 
 MAX_CONTEXT = 180000
 MAX_ACCOUNTS = 8
+NAMES = {'claude': 'Claude', 'codex': 'Codex'}
 CONTINUE = ('[Automatic account continuation] Continue the unfinished objective in the saved conversation after its account exhausted its quota. '
             'Do not repeat completed actions or resubmit earlier tool calls. Inspect current files and external '
             'state first, use recorded tool results as evidence, and perform only the remaining work. '
@@ -20,7 +21,9 @@ def eligible(run, ctrl):
     return (ctrl.get('quota_failure_confirmed') is True and not ctrl.get('stop')
             and run.get('provider') == 'claude' and run.get('host_id', 'mac') in ('mac', 'local')
             and (run.get('operation') or 'message') == 'message'
-            and (run.get('failure') or {}).get('kind') == 'limit_reached')
+            and (run.get('failure') or {}).get('kind') == 'limit_reached'
+            # A pooled run already went through every pool account; another profile is the same accounts.
+            and (run.get('account_pool') or {}).get('status') != 'pooled')
 
 
 def _snapshot(run, launch):
@@ -279,6 +282,7 @@ def continue_run(obj, rid, launch, ctrl):
         marker['mode'] = provenance['mode']
         spec.update(quota_failover_from=provenance,
                     quota_failover_attempted_accounts=attempted + [selected['account_id']])
+        broker.announce_quota_move(run['account_id'], selected['account_id'])
         publish(to_account_id=selected['account_id'], reason='Continuing with verified available model quota.')
         successor = obj.start(spec)
         publish(status='continued', successor_run_id=successor['id'],
@@ -297,3 +301,55 @@ def continue_run(obj, rid, launch, ctrl):
             return successor
         publish(status='blocked', reason=str(exc))
         return None
+
+
+
+def provider_switch(run, ctrl):
+    """The offer to continue on the other provider when every account of the run's provider reached
+    its limit: a pooled run already went through the whole pool; a direct run has no other account
+    with known headroom. None otherwise."""
+    if (ctrl.get('stop') or (run.get('failure') or {}).get('kind') != 'limit_reached'
+            or run.get('host_id', 'mac') not in ('mac', 'local') or (run.get('operation') or 'message') != 'message'):
+        return None
+    provider = run['provider']
+    pooled = (run.get('account_pool') or {}).get('status') == 'pooled'
+    if not pooled and host_connector.select_quota_failover(provider, run.get('effective_model') or run.get('model'),
+                                                           run.get('account_id'), run.get('quota_failover_attempted_accounts') or []):
+        return None
+    import accounts
+    return {'status': 'offered', 'from': provider, 'to': 'codex' if provider == 'claude' else 'claude',
+            'automatic': accounts._auto_cfg().get('cross_provider') == 'automatic',
+            'reason': f'Every {NAMES[provider]} account has reached its usage limit.'}
+
+
+def offer_provider_switch(obj, rid, ctrl):
+    """Announce the offer (notice and macOS banner, with a one-click action), and continue the chat
+    on the other provider at once when the cross_provider setting is automatic. Called once the
+    provider process is reaped. Returns the continuation run or None."""
+    import accounts
+    import auth_recovery
+    import notices
+    run = obj.store.get(rid)
+    marker = dict(run.get('provider_switch') or provider_switch(run, ctrl) or {})
+    if marker.get('status') != 'offered' or marker.get('announced'):
+        return None
+
+    def publish(**fields):
+        marker.update(fields)
+        obj.store.update(rid, provider_switch=marker)
+        obj.store.emit(rid, 'provider_switch', dict(marker))
+    target = NAMES[marker['to']]
+    action = f'Continuing this chat in {target}.' if marker['automatic'] else f'Continue this chat in {target} with one click.'
+    notices.announce(os.path.join(accounts.DATA, 'notices.json'), 'provider-switch:' + rid, 'provider_switch',
+                     marker['reason'] + ' ' + action, account_id=run.get('account_id') or None, run_id=rid,
+                     chat_key=run.get('key') or run.get('conversation_key'), provider=marker['from'])
+    publish(announced=True)
+    if not marker['automatic']:
+        return None
+    try:
+        successor = auth_recovery.recover(obj, {'id': rid, 'action': 'handoff', 'provider': marker['to']})['run']
+    except ValueError as error:
+        publish(status='blocked', reason=str(error))
+        return None
+    publish(status='continued', successor_run_id=successor['id'])
+    return successor

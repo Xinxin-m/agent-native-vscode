@@ -15,11 +15,12 @@ export function chatActivity(resource:Resource,data:any,runs:any[]=[],attention:
  const active=exactRuns.filter((run:any)=>['starting','running','waiting','interrupting','waiting_input','waiting_approval','awaiting_input','awaiting_approval'].includes(run.status));
  const awaiting=active.some((run:any)=>['waiting_input','waiting_approval','awaiting_input','awaiting_approval'].includes(run.status))||attention.some((item:any)=>(key&&[item.key,item.conversation_key].includes(key))||active.some((run:any)=>run.id===item.run_id));
  const liveRunning=liveSessions.some(s=>key&&s.chat_key===key&&s.alive&&!s.process_only&&['running','working','busy'].includes(s.status)&&Number(s.observed_at)>0&&Date.now()/1000-Number(s.observed_at)<150&&Number(s.observed_at)<=Date.now()/1000+5&&(!latest||!['completed','complete','failed','error','interrupted','cancelled','canceled','stopped'].includes(latest.status)||(!!timestamp(latest.finished_at)&&Number(s.observed_at)*1000>timestamp(latest.finished_at))));
- const running=!awaiting&&(active.length>0||liveRunning);
+ const stalled=!awaiting&&(latest?latest.stalled===true&&active.includes(latest):chat.live_status==='stalled');
+ const running=!awaiting&&!stalled&&(active.length>0||liveRunning);
  // The server decides what she has seen (`unseen`, `seen_at`); no client keeps its own baseline.
  const seen=Math.max(timestamp(chat.seen_at),timestamp(key&&data?.views?.[key]?.last));
  const row=liveSessions.find(s=>key&&s.chat_key===key&&s.alive&&!s.process_only&&s.live_status&&Number(s.observed_at)>0&&Date.now()/1000-Number(s.observed_at)<150);
- const live:string|null=row?.live_status||chat.live_status||null;
+ const live:string|null=stalled?'stalled':row?.live_status||(chat.live_status==='stalled'?null:chat.live_status)||null;
  const finished=!active.length&&exactRuns.some((run:any)=>run.status==='completed'&&timestamp(run.finished_at)>seen);
  // Failed: the latest known run failed and the transcript has not moved on since (same rule as the server's sidebar.resolve), else the server's `failed` flag.
  const failed=!active.length&&(latest?latest.status==='failed'&&!(timestamp(chat.ts_last)>timestamp(latest.finished_at||latest.updated_at||latest.created_at)+120000):chat.failed===true);

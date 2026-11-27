@@ -5,6 +5,29 @@ import {runOutput} from '../state/runs';
 const e=(seq:number,event:string,data:any)=>({seq,event,data});
 const answerOf=(events:any[],turns:any[]=[{role:'user',text:'go'}])=>runView(turns,events,runOutput({id:'r',run:{status:'completed'},events,cursor:0} as any));
 describe('final answer stays outside the folded tool group',()=>{
+ it('preserves Markdown indentation after a recorded prefix',()=>{
+  const turns=[{role:'user',text:'go'},{role:'assistant',text:'Progress.'}];
+  expect(runView(turns,[],'Progress.\n\n    code()').answer).toBe('\n\n    code()');
+ });
+ it('does not match an older run before a new identical reply',()=>{
+  const turns=[{role:'user',text:'before'},{role:'assistant',text:'Repeated reply.',ts:'2026-11-24T09:00:00Z'},{role:'user',text:'again'}];
+  expect(runView(turns,[],'Repeated reply.','2026-11-24T10:00:00Z').answer).toBe('Repeated reply.');
+ });
+ it('does not cut a new answer at the timestamp of recorded reasoning',()=>{
+  const events=[{...e(1,'delta',{text:'The complete '}),ts:'2026-11-24T10:00:01Z'},{...e(2,'delta',{text:'answer.'}),ts:'2026-11-24T10:00:03Z'}];
+  const turns=[{role:'user',text:'go'},{role:'assistant',channel:'analysis',text:'Check first.',ts:'2026-11-24T10:00:02Z'}];
+  expect(runView(turns,events,'The complete answer.').answer).toBe('The complete answer.');
+ });
+ it('deduplicates completed progress across a steer without leaving its delayed stream tail',()=>{
+  const events=[{...e(1,'delta',{text:'Earlier progress.\n\n'}),ts:'2026-11-24T10:00:01Z'},e(2,'steered',{message:'Also B'}),{...e(3,'delta',{text:'Full progress. '}),ts:'2026-11-24T10:00:03Z'},{...e(4,'delta',{text:'The last sentence.'}),ts:'2026-11-24T10:00:05Z'}];
+  const turns=[{role:'user',text:'go'},{role:'assistant',text:'Earlier progress.',ts:'2026-11-24T10:00:01Z'},{role:'user',text:'Also B'},{role:'assistant',channel:'commentary',text:'Full progress. The last sentence.',ts:'2026-11-24T10:00:04Z'}];
+  expect(runView(turns,events,'Earlier progress.\n\nFull progress. The last sentence.').answer).toBe('');
+ });
+ it('keeps a full snapshot answer when its deltas have fallen out of the event window',()=>{
+  const turns=[{role:'assistant',channel:'commentary',text:'Still working.',ts:'2026-11-24T10:00:04Z'}];
+  const events=[{...e(1,'delta',{text:'Old activity.'}),ts:'2026-11-24T10:00:01Z'}];
+  expect(runView(turns,events,'The full saved answer.').answer).toBe('The full saved answer.');
+ });
  it('shows the answer when the run ends with a tool group followed by the answer',()=>{
   const view=answerOf([e(1,'tool',{id:'a',name:'Bash'}),e(2,'tool_result',{tool_use_id:'a'}),e(3,'tool',{id:'b',name:'Read'}),e(4,'tool_result',{tool_use_id:'b'}),e(5,'delta',{text:'The answer.'}),e(6,'done',{status:'completed',text:'The answer.'})]);
   expect(view.tools).toHaveLength(2);expect(view.answer).toBe('The answer.');
@@ -59,4 +82,13 @@ describe('live answer split at each steered prompt',()=>{
  it('keeps one block when the streamed text does not add up to the shown answer',()=>{
   expect(liveSegments([e(1,'delta',{text:'Part'}),e(2,'done',{text:'Different final text'})],'Different final text',[{text:'x'}])).toBeNull();
  });
+});
+
+it('shows later live root progress beside earlier completed summaries and ignores child progress',()=>{
+ const event=(seq:number,method:string,params:any)=>e(seq,'provider_event',{event:{method,params}});
+ const events=[event(1,'item/reasoning/summaryTextDelta',{threadId:'root',itemId:'a',delta:'First.'}),
+  event(2,'item/completed',{threadId:'root',item:{id:'a',type:'reasoning',summary:['First.']}}),
+  event(3,'item/reasoning/summaryTextDelta',{threadId:'child',itemId:'c',delta:'Child.'}),
+  event(4,'item/reasoning/summaryTextDelta',{threadId:'root',itemId:'b',delta:'Next.'})];
+ expect(runThinking(events,'root')).toBe('First.\n\nNext.');
 });

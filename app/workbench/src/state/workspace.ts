@@ -31,8 +31,9 @@ export function createNarrowPaneController(dock:any){let narrow=false,shown:stri
 export function findOpenChat(panels:any[],resource:Resource){return resource.kind==='chat'?panels.find(p=>p.params.resource.kind==='chat'&&conversationIdentity(p.params.resource)===conversationIdentity(resource)):undefined;}
 export function dropWorkspaceResource(dock:any,open:(r:Resource,destination?:any,groupId?:string)=>any,resource:Resource,event:{group?:any;position:string;index?:number}){
  const group=event.group, panel=open(resource,'tab',group?.id);if(!panel)return;
- // Use Dockview's resolved edge and insertion index, shared with native tab drops.
- panel.api.moveTo({group,position:event.position,index:event.index});panel.api.setActive();return panel;
+ // Dockview's panel API needs a group to honor the workspace-edge split direction.
+ panel.api.moveTo({group:group||panel.group,position:event.position,index:event.index});
+ panel.api.setActive();return panel;
 }
 export function mergePaneInto(source:any,target:any,index?:number){if(!source||!target||source.id===target.id)return;for(const panel of [...source.panels]){panel.api.moveTo({group:target,position:'center',index});if(index!==undefined)index++;}}
 
@@ -52,11 +53,11 @@ export function filePreviewGroup(groups:GroupPosition[],sourceId:string,directio
  if(limit>0&&groups.length>=limit)return ordered[Math.min(limit,groups.length)-1]?.id;
  return adjacentPreviewGroup(groups,sourceId,direction,remembered);
 }
-// A PDF opens beside the current pane: the nearest pane to its right, else a new right split, else (at the pane limit) the nearest pane to its left.
-export function pdfTargetPane(groups:GroupPosition[],currentId:string,limit=4):{group:string}|{split:'right'}{
+export function fileTargetPane(groups:GroupPosition[],currentId:string):{group:string}|{split:'right'}{
  const current=groups.find(g=>g.id===currentId);if(!current)return {split:'right'};const r=current.rect,near=(g:GroupPosition)=>Math.abs(g.rect.top-r.top);
  const right=groups.filter(g=>g.id!==currentId&&g.rect.left>=r.right-3).sort((a,b)=>a.rect.left-b.rect.left||near(a)-near(b))[0];if(right)return {group:right.id};
- if(groups.length<limit)return {split:'right'};
+ if(groups.length===1)return {split:'right'};
  const left=groups.filter(g=>g.id!==currentId&&g.rect.right<=r.left+3).sort((a,b)=>b.rect.right-a.rect.right||near(a)-near(b))[0];
- return {group:(left||current).id};
+ const stacked=groups.filter(g=>g.id!==currentId).sort((a,b)=>near(a)-near(b))[0];
+ return {group:(left||stacked||current).id};
 }

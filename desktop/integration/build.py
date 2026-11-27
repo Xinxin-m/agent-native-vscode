@@ -14,6 +14,9 @@ repo=root/'vscode'
 classifier=root.parent/'chat-dashboard/auth_failure.py'
 if classifier.is_file():
  shutil.copy2(classifier,root/'integration/auth_failure.py')
+preview_source=root.parent/'chat-dashboard/vscode-library/artifact-preview.cjs'
+if preview_source.is_file():
+ shutil.copy2(preview_source,root/'integration/extension/artifact-preview.cjs')
 # The upstream webview bootstrap uses a pinned CSP hash. Keep it exact after
 # native drag/drop and link handling changes; never weaken the script policy.
 import re, hashlib, base64
@@ -38,7 +41,7 @@ else:
 
 # A small, non-private build marker makes the user's running client verifiable.
 from datetime import datetime, timezone
-inputs=sorted((root/'integration/ui/src').rglob('*'))+sorted((root/'integration/extension').glob('*.cjs'))+[root/'integration/official-sessions.py',root/'integration/auth_failure.py']
+inputs=sorted((root/'integration/ui/src').rglob('*'))+sorted((root/'integration/extension').glob('*.cjs'))+[root/'integration/extension/package.json',root/'integration/official-sessions.py',root/'integration/auth_failure.py']
 source_hash=hashlib.sha256()
 for file in inputs:
  if file.is_file():

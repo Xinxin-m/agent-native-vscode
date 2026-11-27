@@ -31,5 +31,5 @@ export function summarizeActivity(run:any,events:RunEvent[],awaiting:boolean,now
  }
  const start=time(run?.created_at)??time(events.find(e=>e.event==='start')?.ts);
  const end=finished?(time(run?.finished_at)??time(done?.ts)):now;
- return {phase,active:activeStatuses.has(status)&&!awaiting,elapsed:start!==undefined&&end!==undefined&&end>=start?formatElapsed(end-start):undefined,startedAt:start,toolCount:rows.filter(row=>row.call).length,finished};
+ return {phase,active:activeStatuses.has(status)&&!awaiting&&phase!=='Stalled',elapsed:start!==undefined&&end!==undefined&&end>=start?formatElapsed(end-start):undefined,startedAt:start,toolCount:rows.filter(row=>row.call).length,finished};
 }

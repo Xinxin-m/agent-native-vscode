@@ -109,7 +109,7 @@ class AccountPresentationTests(unittest.TestCase):
         with patch.object(accounts, 'load', return_value=data), patch.object(
                 accounts.notices, 'listing', return_value={'notices': [active, archived]}):
             rows = accounts.ROUTES[("GET", "/api/notices")](None, None, None)['notices']
-        self.assertEqual(rows[0]['message'], 'personal@example.test is at 100% of its Weekly limit.')
+        self.assertTrue(rows[0]['message'].startswith('personal@example.test is at 100% of its Weekly limit (resets '))
         self.assertEqual(rows[1]['message'], archived['message'])
 
     def test_claude_receives_expected_email_from_existing_pending_setup(self):

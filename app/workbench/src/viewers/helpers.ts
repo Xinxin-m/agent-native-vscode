@@ -1,6 +1,6 @@
 import type {Resource} from '../state/types';
 export type ViewerKind='markdown'|'html'|'image'|'pdf'|'source'|'unsupported';
-export interface FileRecord {resource_id?:string;file_id?:string;encoding?:string;newline?:string;host_id:string;path:string;name:string;mime:string;size:number;version:string;editable:boolean;root_id:string;relative_path?:string}
+export interface FileRecord {resource_id?:string;file_id?:string;encoding?:string;newline?:string;host_id:string;path:string;name:string;mime:string;size:number;version:string;editable:boolean;document_editable?:boolean;root_id:string;relative_path?:string}
 export function viewerKind(name:string,mime=''):ViewerKind {
  const ext=name.split('.').pop()?.toLowerCase()||'';
  if(ext==='pdf'||mime==='application/pdf')return 'pdf';

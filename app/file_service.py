@@ -2,8 +2,10 @@
 import contextlib
 import base64
 import errno
+import fcntl
 import hashlib
 import json
+import logging
 import mimetypes
 import os
 from pathlib import Path
@@ -98,7 +100,12 @@ def explicit_file_links(text, cwd=''):
         yield path
 
 
-def reference_host(host, path):
+def within(path, folder):
+    return bool(isinstance(folder, str) and folder.startswith('/') and
+                (path == folder or path.startswith(folder.rstrip('/') + '/')))
+
+
+def reference_host(host, path, roots=()):
     """Pick the host that holds an explicitly linked file.
 
     A remote chat keeps its own host. A Mac chat keeps the Mac when the file is
@@ -108,18 +115,43 @@ def reference_host(host, path):
     if host not in ('mac', 'local', None, '') or os.path.exists(path):
         return host
     import hosts
-    def covers(folder):
-        folder = str(folder or '').rstrip('/')
-        return bool(folder) and (path == folder or path.startswith(folder + '/'))
+    def covers(record):
+        folders = list(record.get('workspaces') or []) + [record.get('default_cwd')]
+        folders += [root['path'] for root in roots if root['host_id'] == record['id']]
+        return any(within(path, folder) for folder in folders)
     owners = [record['id'] for record in hosts.host_records()
               if record.get('transport') not in (None, 'local') and record.get('configured')
-              and record.get('read_alias')
-              and any(covers(w) for w in (record.get('workspaces') or []) + [record.get('default_cwd')])]
+              and record.get('read_alias') and covers(record)]
     if len(owners) == 1:
         return owners[0]
     if owners:
         raise FileError('remote_unsupported', 'Several configured hosts list this folder; open the file from a chat on that host.', 501)
     return host
+
+
+def mac_file_identity(path):
+    try:
+        info = os.stat(path, follow_symlinks=False)
+        if stat.S_ISREG(info.st_mode) and hasattr(info, 'st_birthtime'):
+            return [info.st_dev, info.st_ino, info.st_birthtime]
+    except OSError:
+        pass
+    return None
+
+
+def mac_file_location(identity):
+    """APFS can find a renamed file by volume and inode without a directory scan."""
+    try:
+        device, inode, _ = identity
+        lookup = f'/.vol/{int(device)}/{int(inode)}'
+        with open(lookup, 'rb', opener=lambda path, flags: os.open(path, flags | os.O_NONBLOCK)) as file:
+            value = fcntl.fcntl(file, getattr(fcntl, 'F_GETPATH', 50), bytes(1024))
+        path = os.fsdecode(value.partition(b'\0')[0])
+        if mac_file_identity(path) == identity:
+            return path
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
 
 
 def parts(path):
@@ -226,14 +258,26 @@ def decode_text(raw):
         raise FileError('unsupported_encoding', 'Only UTF-8 text editing is supported', 415)
 
 
+
+DOCUMENT_SUFFIXES = ('.md', '.markdown', '.mdown', '.html', '.htm')
+
+
+def is_rendered_document(name):
+    return name.lower().endswith(DOCUMENT_SUFFIXES)
+
+
+
 class FileService:
     def __init__(self, data=DATA, default_root=DEFAULT_ROOT):
         self.data = Path(data)
         self.lock = threading.RLock()
+        self.document_locks = [threading.RLock() for _ in range(32)]
         self.refs = {}
         self.moves = {}
         self.default_root = default_root
         self.roots = read_json(self.data / 'workbench-roots.json', {})
+        self.relocation_file = (self.data.parent / '.file-relocations.json'
+                                if self.data == DATA else self.data / 'file-relocations.json')
         if default_root and os.path.isdir(default_root):
             root = self._root(default_root, 'write')
             self.roots.setdefault(root['id'], root)
@@ -353,12 +397,15 @@ class FileService:
         with self.opened(rid, path, file_id) as (descriptor, info, *_):
             return self._raw(descriptor, info, MAX_READ)
 
-    def stat(self, rid=None, path='', file_id=None):
+    def stat(self, rid=None, path='', file_id=None, *, include_identity=False):
         root, path = self.remote_target(rid, path, file_id)
         if root and root.get('host_id') != 'mac':
             import remote_files
             parts(path)
-            resource = remote_files.request(root['host_id'],'stat',{'root':root['path'],'path':path})['resource']
+            payload = {'root':root['path'], 'path':path}
+            if include_identity:
+                payload['identity'] = True
+            resource = remote_files.request(root['host_id'], 'stat', payload)['resource']
             return dict(resource, host_id=root['host_id'], resource_id=root['host_id']+':'+resource['path'],root_id=rid if not file_id else None,file_id=file_id,editable=False, evidence_path=self.refs.get(str(file_id), {}).get('evidence_path') if file_id else None)
         with self.opened(rid, path, file_id) as (descriptor, info, root, components, _):
             raw = self._raw(descriptor, info, MAX_TEXT) if info.st_size <= MAX_TEXT else None
@@ -373,6 +420,10 @@ class FileService:
             return {'resource_id': 'mac:' + canonical, 'host_id': 'mac', 'path': canonical,
                     'name': components[-1], 'mime': mime(canonical), 'size': info.st_size,
                     'version': version(info, raw), 'editable': editable,
+                    'document_editable': bool(encoding and is_rendered_document(canonical)
+                                              and (root['access'] == 'write' or file_id)
+                                              and os.access(canonical, os.W_OK)
+                                              and os.access(os.path.dirname(canonical), os.W_OK)),
                     'root_id': root.get('id') or None, 'file_id': file_id,
                     'evidence_path': self.refs.get(str(file_id), {}).get('evidence_path') if file_id else None,
                     'relative_path': '/'.join(components),
@@ -431,7 +482,7 @@ class FileService:
                 paths.extend(explicit_file_links(turn.get('text') or '', cwd))
             if any(candidate == os.path.abspath(os.path.join(cwd, p)) for p in paths if isinstance(p, str) and p):
                 host = evidence.get('execution_host') or evidence.get('host_id') or evidence.get('node') or 'mac'
-                return candidate, 'mac' if host == 'local' else host
+                return candidate, 'mac' if host == 'local' else host, cwd
 
         match = resolve(chat)
         if not match and latest_reply:
@@ -442,21 +493,138 @@ class FileService:
             if not chat:
                 raise FileError('not_found', 'Conversation was not found', 404)
             raise FileError('outside_root', 'This conversation does not include an openable link to that file.', 403)
-        candidate, host = match
-        host = reference_host(host, candidate)
+        candidate, chat_host, cwd = match
+        with self.lock:
+            roots = tuple(self.roots.values())
+        host = reference_host(chat_host, candidate, roots)
+        if chat_host == host and os.path.isabs(cwd):
+            roots += ({'host_id':host, 'path':os.path.realpath(cwd) if host == 'mac' else cwd},)
+        original = os.path.realpath(candidate) if host == 'mac' else candidate
+        try:
+            result = self._open_reference(host, original, candidate)
+        except FileError as error:
+            if error.code != 'not_found':
+                raise
+            recovered = self._recover_reference(host, original, roots)
+            if recovered is None:
+                raise
+            found_host, found_path = recovered
+            result = self._open_reference(found_host, found_path, candidate)
+            result['relocated_from_host'] = host
+        identity = result.pop('disk_identity', None)
+        if result['host_id'] == host:
+            if host == 'mac' and any(root['host_id'] == host and within(original, root['path'])
+                                     and within(result['path'], root['path']) for root in roots):
+                identity = mac_file_identity(result['path'])
+            try:
+                if identity:
+                    self._remember_file(host, original, identity)
+            except (OSError, ValueError):
+                logging.exception('Unable to remember a linked file location')
+        return result
+
+    def _open_reference(self, host, path, evidence_path):
         fid = uuid.uuid4().hex
         if host != 'mac':
             import remote_files
-            parent = remote_files.request(host, 'root', {'root':os.path.dirname(candidate)})['path']
-            resolved = os.path.join(parent, os.path.basename(candidate))
+            parent = remote_files.request(host, 'root', {'root':os.path.dirname(path)})['path']
+            path = os.path.join(parent, os.path.basename(path))
         else:
-            resolved = os.path.realpath(candidate)
-        self.refs[fid] = {'path':resolved, 'host_id':host, 'evidence_path':candidate}
+            path = os.path.realpath(path)
+        self.refs[fid] = {'path':path, 'host_id':host, 'evidence_path':evidence_path}
         try:
-            return dict(self.stat(file_id=fid), file_id=fid)
+            return dict(self.stat(file_id=fid, include_identity=host != 'mac'), file_id=fid)
         except Exception:
             self.refs.pop(fid, None)
             raise
+
+    def _remember_file(self, host, original, identity):
+        with self.lock:
+            state = read_json(self.relocation_file, {})
+            files = state.setdefault('files', {}).setdefault(host, {})
+            if files.get(original) != identity:
+                files[original] = identity
+                atomic_json(self.relocation_file, state)
+
+    def _record_moves(self, moves):
+        moves = [(host, src, target_host, dst) for host, src, target_host, dst in moves
+                 if (host, src) != (target_host, dst)]
+        if not moves:
+            return
+        try:
+            with self.lock:
+                state = read_json(self.relocation_file, {})
+                records = state.setdefault('moves', {})
+                for src_host, src, dst_host, dst in moves:
+                    records.setdefault(src_host, {})[src] = [dst_host, dst]
+                atomic_json(self.relocation_file, state)
+        except (OSError, ValueError):
+            logging.exception('Unable to record file moves')
+
+    def _recover_reference(self, host, path, roots):
+        state = read_json(self.relocation_file, {})
+        location, seen = (host, path), {(host, path)}
+        for _ in range(30):
+            choices = state.get('moves', {}).get(location[0], {})
+            source = max((source for source in choices if within(location[1], source)),
+                         key=len, default=None)
+            if source is None:
+                break
+            dest_host, dest = choices[source]
+            location = (dest_host, dest + location[1][len(source):])
+            if location in seen:
+                break
+            seen.add(location)
+        if location != (host, path):
+            return location
+
+        scope = [root['path'] for root in roots if root['host_id'] == host]
+        if host != 'mac':
+            import remote_files
+            remote = remote_files.host_config(host)
+            scope += list(remote.get('workspaces') or []) + [remote.get('default_cwd')]
+        folders = [folder for folder in scope if folder != '/' and within(path, folder)]
+        if not folders:
+            return None
+        identity = state.get('files', {}).get(host, {}).get(path)
+        if host == 'mac' and identity:
+            moved = mac_file_location(identity)
+            if moved:
+                return (host, moved) if any(within(moved, folder) for folder in folders) else None
+        name = os.path.basename(path)
+        if not Path(name).suffix or len(name) > 200:
+            return None
+        if host == 'mac':
+            folder = max((folder for folder in folders if os.path.isdir(folder)), key=len, default=None)
+            if folder is None:
+                return None
+            result = self._local_search({'host_id':'mac', 'path':folder}, name, exact=True)
+        else:
+            for folder in sorted(set(folders), key=len, reverse=True):
+                try:
+                    folder = remote_files.request(host, 'root', {'root':folder})['path']
+                    break
+                except FileError as error:
+                    if error.code != 'not_found':
+                        raise
+            else:
+                return None
+            payload = {'root':folder, 'query':name, 'relocation':True}
+            if identity:
+                payload['identity'] = identity
+            result = remote_files.request(host, 'search', payload)
+            verified = {entry['path'] for entry in result['entries'] if entry.get('identity_match')}
+            if len(verified) == 1 and not result.get('truncated'):
+                relative = '/'.join(parts(next(iter(verified))))
+                return host, os.path.join(folder, relative)
+        paths = {entry['path'] for entry in result['entries']
+                 if os.path.basename(entry['path']) == name}
+        if len(paths) > 1:
+            raise FileError('ambiguous_file', 'Several files in this workspace have the linked name.', 409)
+        if len(paths) == 1 and not result.get('truncated'):
+            relative = '/'.join(parts(next(iter(paths))))
+            return host, os.path.join(folder, relative)
+        return None
 
     def search(self, rid, query):
         if not isinstance(query, str) or not query.strip() or len(query) > 200:
@@ -465,6 +633,9 @@ class FileService:
         if root.get('host_id') != 'mac':
             import remote_files
             return remote_files.request(root['host_id'], 'search', {'root':root['path'], 'query':query})
+        return self._local_search(root, query)
+
+    def _local_search(self, root, query, exact=False):
         pending, entries, scanned = [[]], [], 0
         deadline = time.monotonic() + 2
         truncated = False
@@ -482,8 +653,10 @@ class FileService:
                                 truncated = True
                                 break
                             if item.is_dir(follow_symlinks=False):
+                                if exact and (item.name.startswith('.') or item.name in ('node_modules', '__pycache__')):
+                                    continue
                                 pending.append(components + [item.name])
-                            elif item.is_file(follow_symlinks=False) and query.casefold() in item.name.casefold():
+                            elif (item.name == query if exact else query.casefold() in item.name.casefold()) and item.is_file(follow_symlinks=False):
                                 info = item.stat(follow_symlinks=False)
                                 entries.append({'name':item.name, 'path':'/'.join(components+[item.name]),
                                                 'type':'file', 'size':info.st_size, 'mime':mime(item.name)})
@@ -519,21 +692,90 @@ class FileService:
             raise FileError('too_large', 'Text exceeds the 5 MiB save limit', 413)
         return result
 
+    def document_review(self, rid, path, file_id, comment=None):
+        file = self.stat(rid, path, file_id)
+        if not is_rendered_document(file['name']):
+            raise FileError('unsupported_document', 'This viewer supports HTML and Markdown documents', 415)
+        identity = file['resource_id']
+        key = hashlib.sha256(identity.encode()).hexdigest()
+        with self.document_locks[int(key[:2], 16) % len(self.document_locks)]:
+            checkpoint = read_json(self.data / 'file-backups' / 'previous' / (key + '.json'), {})
+            previous = decode_text(base64.b64decode(checkpoint['content']))[0] if checkpoint.get('content') is not None else None
+            location = self.data / 'document-comments' / (key + '.json')
+            comments = read_json(location, [])
+            if comment is not None:
+                text, quote = comment.get('text'), comment.get('quote', '')
+                if not isinstance(text, str) or not text.strip() or len(text) > 12000 or not isinstance(quote, str) or len(quote) > 2000:
+                    raise FileError('invalid_comment', 'Enter a comment of 1 to 12,000 characters')
+                comment_id = comment.get('id')
+                if not isinstance(comment_id, str) or not re.fullmatch(r'[a-f0-9-]{36}', comment_id):
+                    raise FileError('invalid_comment', 'Invalid comment identifier')
+                if not any(item['id'] == comment_id for item in comments):
+                    comments.append({'id':comment_id,'text':text.strip(),'quote':quote,'created':time.time()})
+                    atomic_json(location, comments)
+            return {'previous':previous, 'previous_at':checkpoint.get('at'), 'comments':comments}
+
+    def _checkpoint(self, identity, get_original):
+        key = hashlib.sha256(identity.encode()).hexdigest()
+        location = self.data / 'file-backups' / 'previous' / (key + '.json')
+        now = time.time()
+        if now - read_json(location, {}).get('at', 0) < 3600:
+            return
+        original = get_original()
+        decode_text(original)
+        atomic_json(location, {'at':now,'content':base64.b64encode(original).decode('ascii')})
+
+    def save_document(self, rid, path, file_id, base_version, text):
+        if not isinstance(text, str) or '\x00' in text:
+            raise FileError('invalid_text', 'Enter UTF-8 document text')
+        file = self.stat(rid, path, file_id)
+        if not file.get('document_editable'):
+            raise FileError('read_only', 'This HTML or Markdown file is read-only', 403)
+        identity = file['resource_id']
+        key = hashlib.sha256(identity.encode()).hexdigest()
+        with self.document_locks[int(key[:2], 16) % len(self.document_locks)]:
+            if file['host_id'] == 'mac':
+                return self._save_local(rid, path, base_version, text, file_id=file_id, document_identity=identity)
+            root, relative = self.remote_target(rid, path, file_id)
+            if len(text.encode('utf-8')) > MAX_TEXT:
+                raise FileError('too_large', 'Text exceeds the 5 MiB save limit', 413)
+            if file['version'] != base_version:
+                raise FileError('version_conflict', 'File changed on disk; compare or reload before saving', 409)
+            def original():
+                raw = self.read(rid, path, file_id)
+                if self.stat(rid, path, file_id)['version'] != base_version:
+                    raise FileError('version_conflict', 'File changed while saving; the buffer is retained', 409)
+                return raw
+            self._checkpoint(identity, original)
+            import remote_files
+            remote_files.request(root['host_id'], 'save_document', {
+                'root':root['path'], 'path':relative, 'base_version':base_version, 'text':text
+            })
+            return self.stat(rid, path, file_id)
+
     def save(self, rid, path, base_version, text):
         if self.get_root(rid).get('host_id') != 'mac':
-            raise FileError('read_only', 'Remote files are read-only', 403)
-        with self.lock, self.opened(rid, path) as (descriptor, info, root, components, parent):
-            if root['access'] != 'write':
+            raise FileError('read_only', 'Remote files are read-only outside rendered document editing', 403)
+        return self._save_local(rid, path, base_version, text)
+
+    def _save_local(self, rid, path, base_version, text, *, file_id=None, document_identity=None):
+        with self.lock, self.opened(rid, path, file_id) as (descriptor, info, root, components, parent):
+            if root['access'] != 'write' and not (document_identity and file_id):
                 raise FileError('read_only', 'This root is read-only', 403)
             raw = self._raw(descriptor, info, MAX_TEXT)
             if version(info, raw) != base_version:
                 raise FileError('version_conflict', 'File changed on disk; compare or reload before saving', 409, current_version=version(info, raw))
             output = self._encode(raw, text)
-            backup = self.data / 'file-backups' / (str(time.time_ns()) + '-' + uuid.uuid4().hex)
-            backup.parent.mkdir(parents=True, exist_ok=True)
-            with backup.open('xb') as handle:
-                handle.write(raw)
-            os.chmod(backup, 0o600)
+            if output == raw:
+                return self.stat(rid, path, file_id)
+            if document_identity:
+                self._checkpoint(document_identity, lambda: raw)
+            else:
+                backup = self.data / 'file-backups' / (str(time.time_ns()) + '-' + uuid.uuid4().hex)
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                with backup.open('xb') as handle:
+                    handle.write(raw)
+                os.chmod(backup, 0o600)
             temporary = '.workbench-' + uuid.uuid4().hex
             fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, stat.S_IMODE(info.st_mode), dir_fd=parent)
             try:
@@ -550,7 +792,7 @@ class FileService:
                     os.unlink(temporary, dir_fd=parent)
                 except FileNotFoundError:
                     pass
-        return self.stat(rid, path)
+        return self.stat(rid, path, file_id)
 
     def copy(self, rid, path, base_version, destination, text):
         with self.lock:
@@ -614,6 +856,8 @@ class FileService:
                 if name.lower() != components[-1].lower() and name in os.listdir(parent):
                     raise FileError('destination_exists', name + ' already exists here', 409)
                 os.rename(components[-1], name, src_dir_fd=parent, dst_dir_fd=parent)
+            source = os.path.join(root['path'], *components)
+            self._record_moves([('mac', source, 'mac', os.path.join(os.path.dirname(source), name))])
         return {'ok':True, 'root_id':rid, 'path':'/'.join(components[:-1] + [name])}
 
     def trash(self, rid, paths):
@@ -680,7 +924,14 @@ class FileService:
         hosts = {root.get('host_id', 'mac') for root, _ in sources} | {dest.get('host_id', 'mac')}
         if hosts != {'mac'}:
             import cross_host_transfer
-            return cross_host_transfer.transfer(self,items,dest,dest_dir,copy,conflict,confirmed_move)
+            receipt = cross_host_transfer.transfer(self,items,dest,dest_dir,copy,conflict,confirmed_move)
+            if not copy:
+                self._record_moves(
+                    (d['host_id'], os.path.join(self.get_root(d['root_id'])['path'], d['path']),
+                     d['dest_host_id'], os.path.join(dest['path'], d['dest_path']))
+                    for d in receipt['moved']
+                )
+            return receipt
         with self.lock:
             folder = self._local_path(dest, parts(dest_dir))
             if not os.path.isdir(folder) or os.path.islink(folder):
@@ -730,6 +981,7 @@ class FileService:
                 raise
             token = uuid.uuid4().hex
             self.moves[token] = done
+            self._record_moves(('mac', d['src'], 'mac', d['dst']) for d in done if not d['copy'])
             while len(self.moves) > 20:
                 self.moves.pop(next(iter(self.moves)))
         return {'ok': True, 'token': token if done else None,
@@ -762,6 +1014,7 @@ class FileService:
                     raise FileError('undo_conflict', 'The moved items changed since the move, so Undo was not applied', 409)
             self.moves.pop(str(token))
             self._reverse(done)
+            self._record_moves(('mac', d['dst'], 'mac', d['src']) for d in done if not d['copy'])
         return {'ok': True, 'restored': len(done)}
 
     def diff(self, rid, path):
@@ -882,6 +1135,20 @@ def latest_broker_reply(key):
 def save(req, query, body):
     return {'ok':True,'resource':instance().save(body.get('root_id'),body.get('path'),body.get('base_version'),body.get('text'))}
 
+
+
+@guarded
+def document_save(req, query, body):
+    return {'ok':True,'resource':instance().save_document(body.get('root_id'), body.get('path',''),
+                                                          body.get('file_id'), body.get('base_version'),
+                                                          body.get('text'))}
+
+
+@guarded
+def document_review(req, query, body):
+    values = body if req.command == 'POST' else query
+    return {'ok':True,**instance().document_review(values.get('root_id'), values.get('path',''),
+                                                   values.get('file_id'), body if req.command == 'POST' else None)}
 
 @guarded
 def copy(req, query, body):
@@ -1011,6 +1278,8 @@ def remote_content(req, query, root, remote_path):
 ROUTES = {('GET','/api/files/roots'):roots,('POST','/api/files/roots'):roots,
           ('GET','/api/files/list'):listing,('GET','/api/files/search'):search,('GET','/api/files/stat'):metadata,
           ('GET','/api/files/diff'):diff,
+          ('POST','/api/files/document-save'):document_save,
+          ('GET','/api/files/document-review'):document_review,('POST','/api/files/document-review'):document_review,
           ('GET','/api/files/content'):content,('HEAD','/api/files/content'):content,
           ('POST','/api/files/reference'):reference,('POST','/api/files/save'):save,
           ('POST','/api/files/create'):create,('POST','/api/files/copy'):copy,('POST','/api/files/move'):move,('POST','/api/files/move/undo'):undo_move,

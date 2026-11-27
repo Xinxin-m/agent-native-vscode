@@ -58,16 +58,18 @@ class AttentionWatch:
 
 
 class Banners:
-    """One macOS banner per new notification that needs an answer.
+    """One macOS banner per new notification that needs an answer or asks for one (quota warnings).
 
-    The first poll only learns what is already open, so a restart never repeats old items."""
+    The first poll only learns what is already listed, so a restart (of this watcher or of the
+    server that adds the banner flag) never repeats old items."""
     def __init__(self, post):
         self.post, self.known = post, None
 
     def process(self, items, config):
-        ids = {item['id'] for item in items if item.get('needs_answer') and item.get('state') == 'open'}
-        new = [item for item in items if item['id'] in ids - (self.known if self.known is not None else ids)]
-        self.known = ids | (self.known or set())
+        seen = {item['id'] for item in items}
+        new = [item for item in items if self.known is not None and item['id'] not in self.known
+               and (item.get('needs_answer') or item.get('banner')) and item.get('state') == 'open']
+        self.known = seen | (self.known or set())
         if config.get('notification_banners') is False or os.environ.get('CHAT_DASHBOARD_NO_BANNER'):
             return
         for item in new:

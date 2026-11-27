@@ -1,5 +1,5 @@
 import {terminal} from '../state/runs';
-import {isReceipt,sameMessage,sentLabel,unrecorded} from './pendingMessages';
+import {compactFollowup,isReceipt,normalized,sameMessage,sentLabel,unrecorded} from './pendingMessages';
 // Patching execution only keeps a local unsent draft, attachments and retry ID.
 export function sharedRunPatch(state:any,current:any,next:any){
  if(!next?.id||next.id===state.runId||state.forkSourceKey||(state.runId&&(current?.id!==state.runId||!terminal(current?.status))))return {};
@@ -38,7 +38,10 @@ export function submittedMessages(turns:any[],sent:any[],run:any,events:any[]=[]
  }
  const acknowledged=pending&&messages.some(s=>s.receiptSeq>(pending.cursor??-1)&&sameMessage(s,{requestId:pending.requestId,text:pending.message}));
  if(pending?.runId===run?.id&&!acknowledged)messages.push({text:pending.message,runId:run.id,operation:'steer',sentAt:pending.sentAt,delivery:pending.phase==='sending'?'Sending…':pending.phase==='unconfirmed'?'Confirmation pending':sentLabel(run?.provider)});
- if(run?.message&&!run?.quota_failover_from&&!['compact','remote_control'].includes(run.operation)&&!messages.some(s=>s.operation!=='steer'&&String(s.text||'').trim()===String(run.message).trim()))messages.unshift({text:run.message,runId:run.id,ts:run.created_at});
+ // Claude may retain a leading /compact command in the transcript while the
+ // broker records only the follow-up prompt.
+ const claudeRunPrompt=run?.provider==='claude';
+ if(run?.message&&!run?.quota_failover_from&&!['compact','remote_control'].includes(run.operation)&&!messages.some(s=>s.operation!=='steer'&&normalized(claudeRunPrompt?compactFollowup(s.text):s.text)===normalized(run.message)))messages.unshift({text:run.message,runId:run.id,ts:run.created_at,claudeRunPrompt});
  return unrecorded(turns,messages,Date.parse(run?.created_at||''));
 }
 export function nativeRunError(error:any){

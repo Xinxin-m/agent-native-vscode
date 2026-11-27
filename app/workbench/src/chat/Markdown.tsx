@@ -4,22 +4,38 @@ import MarkdownIt from 'markdown-it';
 import katex from 'katex';
 import DOMPurify from 'dompurify';
 import {useWorkbench} from '../state/context';
-import {parseFileLink,parseRenderedLink,isInlineLink} from '../open/links';
+import {parseFileLink,isInlineLink,copyableLink} from '../open/links';
+import {chatFileLink,withChatFileSequence} from '../open/chatFileLinks';
+import {startChatFileDrag} from '../open/chatFileDrag';
 import {searchParts} from '../navigation/chats';
 import {api,query} from '../api/client';
 import type {Destination,Resource} from '../state/types';
 import 'katex/dist/katex.min.css';
 const md=new MarkdownIt({html:false,linkify:true,breaks:false,typographer:false});
+// Underline is stored as a standard inline HTML mark by the Markdown editor.
+md.inline.ruler.before('html_inline','underline_mark',(state,silent)=>{
+ const tag=state.src.slice(state.pos).match(/^<\/?u>/i)?.[0];
+ if(!tag)return false;
+ if(!silent)state.push('html_inline','',0).content=tag.toLowerCase();
+ state.pos+=tag.length;
+ return true;
+});
+export function renderMarkdownHtml(text:string){return md.render(formatUnfencedCode(text||''),{});}
 // Bare absolute paths in prose get the same copy/open controls as authored links.
 md.core.ruler.after('linkify','local_paths',state=>{for(const block of state.tokens){if(block.type!=='inline'||!block.children)continue;const children:any[]=[];let linked=false;for(const token of block.children){if(token.type==='link_open')linked=true;if(token.type!=='text'||linked){children.push(token);if(token.type==='link_close')linked=false;continue;}const pattern=/(?:\/|~\/)[^\s<>"'`]+/g;let from=0;for(const match of token.content.matchAll(pattern)){const path=match[0].replace(/[.,;:!?)}\]]+$/,'');if(!path.includes('/',1))continue;const start=match.index!;if(start&&/[\w:]/.test(token.content[start-1]))continue;if(start>from){const text=new state.Token('text','',0);text.content=token.content.slice(from,start);children.push(text);}const open=new state.Token('link_open','a',1);open.attrSet('href',path);const text=new state.Token('text','',0);text.content=path;children.push(open,text,new state.Token('link_close','a',-1));from=start+path.length;}if(from<token.content.length){const text=new state.Token('text','',0);text.content=token.content.slice(from);children.push(text);}}block.children=children;}});
 const validateLink=md.validateLink;md.validateLink=href=>/^file:\/\//i.test(href)||validateLink(href);
 md.renderer.rules.link_open=(tokens,i,options,env,renderer)=>{const href=tokens[i].attrGet('href');if(href&&/^file:\/\//i.test(href))tokens[i].attrSet('href',href.replace(/^file:\/\//i,''));return renderer.renderToken(tokens,i,options);};
+md.renderer.rules.table_open=(tokens,i,options,env,renderer)=>
+  '<div class="chat-table-scroll" role="region" aria-label="Table" tabindex="0">'+renderer.renderToken(tokens,i,options);
+md.renderer.rules.table_close=(tokens,i,options,env,renderer)=>
+  renderer.renderToken(tokens,i,options)+'</div>';
 md.renderer.rules.heading_open=(tokens,i,options,env,renderer)=>{const slug=(tokens[i+1]?.content||'section').toLowerCase().replace(/[^\p{L}\p{N}\s_-]/gu,'').trim().replace(/\s+/g,'-')||'section';env.headings??={};const count=env.headings[slug]||0;env.headings[slug]=count+1;tokens[i].attrSet('id',slug+(count?'-'+count:''));return renderer.renderToken(tokens,i,options);};
 const math=(text:string,displayMode=false)=>{try{return katex.renderToString(text,{displayMode,throwOnError:false,trust:false,strict:'ignore'})}catch{return md.utils.escapeHtml(text)}};
 md.inline.ruler.before('escape','math_inline',(state:any,silent:boolean)=>{
  const start=state.pos,src=state.src,paren=src.startsWith('\\(',start),dollar=src[start]==='$'&&src[start+1]!=='$';if(!paren&&!dollar)return false;
  const begin=start+(paren?2:1),end=src.indexOf(paren?'\\)':'$',begin);if(end<0||end===begin||src.slice(begin,end).includes('\n'))return false;
- if(dollar&&(/\s/.test(src[begin])||/\s/.test(src[end-1])))return false;
+ // The dollar in a following currency amount cannot close an equation.
+ if(dollar&&(/\s/.test(src[begin])||/\s/.test(src[end-1])||/[0-9]/.test(src.charAt(end+1))))return false;
  if(!silent){const token=state.push('math_inline','math',0);token.content=src.slice(begin,end)}state.pos=end+(paren?2:1);return true;
 });
 md.renderer.rules.math_inline=(tokens,i)=>math(tokens[i].content);
@@ -36,15 +52,25 @@ md.renderer.rules.image=(tokens,i)=>{const token=tokens[i],src=token.attrGet('sr
 md.renderer.rules.code_inline=(tokens,i)=>{const text=tokens[i].content,escaped=md.utils.escapeHtml(text);return isInlineLink(text)?`<a href="${md.utils.escapeHtml(text.replace(/^file:\/\//i,''))}" data-file-link="true"><code>${escaped}</code></a>`:`<code>${escaped}</code>`};
 export function Markdown({text,host_id='mac',cwd='',chat_key,searchQuery=''}:{text:string;host_id?:string;cwd?:string;chat_key?:string;searchQuery?:string}){
  const wb=useWorkbench(),container=useRef<HTMLDivElement>(null),menuRef=useRef<HTMLDivElement>(null);const [menu,setMenu]=useState<{resource:Resource;x:number;y:number}|null>(null);
- const markup=useMemo(()=>DOMPurify.sanitize(md.render(formatUnfencedCode(text||''),{}),{USE_PROFILES:{html:true,mathMl:true,svg:true},ADD_ATTR:['target'],FORBID_TAGS:['script','iframe','object','embed','form','input','style']}),[text]);
+ const markup=useMemo(()=>DOMPurify.sanitize(renderMarkdownHtml(text),{USE_PROFILES:{html:true,mathMl:true,svg:true},ADD_ATTR:['target'],FORBID_TAGS:['script','iframe','object','embed','form','input','style']}),[text]);
  useEffect(()=>{const root=container.current;if(!root)return;root.querySelectorAll('mark[data-chat-search-highlight]').forEach(mark=>mark.replaceWith(document.createTextNode(mark.textContent||'')));root.normalize();if(!searchQuery.trim())return;const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT),nodes:Text[]=[];let node:Node|null;while((node=walker.nextNode()))if(!(node.parentElement?.closest('.katex,button')))nodes.push(node as Text);for(const textNode of nodes){const parts=searchParts(textNode.textContent,searchQuery);if(!parts.some(part=>part.match))continue;const fragment=document.createDocumentFragment();for(const part of parts){if(!part.match){fragment.append(document.createTextNode(part.text));continue;}const mark=document.createElement('mark');mark.className='search-highlight';mark.dataset.chatSearchHighlight='true';mark.textContent=part.text;fragment.append(mark);}textNode.replaceWith(fragment);}},[markup,searchQuery]);
 
  useEffect(()=>{let cancelled=false;const images=[...container.current?.querySelectorAll<HTMLImageElement>('img[data-local-image]')||[]];if(images.length)void api(query('/api/files/roots',{host_id})).then(async data=>{for(const img of images){const file=parseFileLink(img.dataset.localImage||'',cwd,host_id);if(!file?.path)continue;const root=(data.roots||[]).filter((r:any)=>(r.host_id||'mac')===host_id&&(file.path===r.path||file.path.startsWith(r.path.replace(/\/$/,'')+'/'))).sort((a:any,b:any)=>b.path.length-a.path.length)[0];if(cancelled)return;if(root)img.src=query('/api/files/content',{root_id:root.id||root.root_id,path:file.path.slice(root.path.length).replace(/^\//,'')||'.'});else if(chat_key){try{const result=await api('/api/files/reference',{chat_key,path:file.path});if(!cancelled&&result.resource?.file_id)img.src=query('/api/files/content',{file_id:result.resource.file_id})}catch{img.alt+=' (open file to inspect)'}}}}).catch(()=>{});return()=>{cancelled=true}},[markup,host_id,cwd,chat_key]);
  useEffect(()=>{if(!menu)return;const close=()=>setMenu(null),outside=(e:PointerEvent)=>{if(!menuRef.current?.contains(e.target as Node))close();},key=(e:KeyboardEvent)=>{if(e.key==='Escape')close();};document.addEventListener('pointerdown',outside,true);window.addEventListener('keydown',key);window.addEventListener('workbench-dismiss-popovers',close);return()=>{document.removeEventListener('pointerdown',outside,true);window.removeEventListener('keydown',key);window.removeEventListener('workbench-dismiss-popovers',close);}},[menu]);
- return <><div className="workbench-markdown" ref={container} dangerouslySetInnerHTML={{__html:markup}} onClick={async e=>{
+ return <><div className="workbench-markdown" ref={container} data-host={host_id} data-cwd={cwd} data-chat-key={chat_key} dangerouslySetInnerHTML={{__html:markup}} onDragStart={e=>{
+  const link=(e.target as Element).closest('a[href],img[data-local-image]');
+  if(!link)return;
+  const resource=chatFileLink(link);
+  if(resource?.kind!=='file')return;
+  startChatFileDrag(e.nativeEvent,link,withChatFileSequence(link,resource));
+ }} onClick={async e=>{
   const el=e.target as HTMLElement,copy=el.closest('[data-copy-code]');if(copy){const code=copy.closest('.chat-code')?.querySelector('code')?.textContent||'';try{await navigator.clipboard.writeText(code);wb?.notify('Code copied')}catch{wb?.notify('Clipboard is unavailable')}return}
-  const image=el.closest('img[data-local-image]');if(image){const file=parseFileLink(image.getAttribute('data-local-image')||'',cwd,host_id);if(file){e.preventDefault();wb?.open({...file,meta:{chat_key}})}return;}
-  const a=el.closest('a');if(!a)return;const href=a.getAttribute('href')||'';if(href.startsWith('#')){e.preventDefault();let anchor=href.slice(1);try{anchor=decodeURIComponent(anchor);}catch{}if(anchor)container.current?.querySelector('#'+CSS.escape(anchor))?.scrollIntoView({block:'start'});else container.current?.scrollIntoView({block:'start'});return;}const resource=parseRenderedLink(href,cwd,host_id);if(resource){e.preventDefault();wb?.open({...resource,meta:{chat_key}},e.metaKey||e.ctrlKey?'browser-tab':undefined)}
- }} onContextMenu={e=>{const a=(e.target as HTMLElement).closest('a');if(!a)return;const resource=parseRenderedLink(a.getAttribute('href')||'',cwd,host_id);if(resource){e.preventDefault();setMenu({resource:{...resource,meta:{chat_key}},x:e.clientX,y:e.clientY})}}}/>{menu&&<div ref={menuRef} className="chat-link-menu" role="menu" style={{left:Math.min(menu.x,window.innerWidth-200),top:Math.min(menu.y,window.innerHeight-250)}}>{menu.resource.kind==='file'&&<button role="menuitem" onClick={async()=>{try{await navigator.clipboard.writeText(menu.resource.path||'');wb?.notify('Path copied')}catch{wb?.notify('Clipboard is unavailable')}setMenu(null)}}>Copy Path</button>}{([['tab','Open in current pane'],['right','Open in pane to the right'],['below','Open in pane below'],['browser-tab','Open in external browser tab'],['default-browser','Open in default browser']] as [Destination,string][]).map(([destination,label])=><button role="menuitem" key={destination} onClick={()=>{wb?.open(menu.resource,destination);setMenu(null)}}>{label}</button>)}</div>}</>;
+  const image=el.closest('img[data-local-image]');if(image){const file=chatFileLink(image);if(file){e.preventDefault();wb?.open(withChatFileSequence(image,file))}return;}
+  const a=el.closest('a');if(!a)return;const href=a.getAttribute('href')||'';if(href.startsWith('#')){e.preventDefault();let anchor=href.slice(1);try{anchor=decodeURIComponent(anchor);}catch{}if(anchor)container.current?.querySelector('#'+CSS.escape(anchor))?.scrollIntoView({block:'start'});else container.current?.scrollIntoView({block:'start'});return;}const resource=chatFileLink(a);if(resource){e.preventDefault();wb?.open(withChatFileSequence(a,resource),e.metaKey||e.ctrlKey?'browser-tab':undefined)}
+ }} onContextMenu={e=>{const a=(e.target as HTMLElement).closest('a');if(!a)return;const resource=chatFileLink(a);if(resource){e.preventDefault();setMenu({resource:withChatFileSequence(a,resource),x:e.clientX,y:e.clientY})}}}/>{menu&&<div ref={menuRef} className="chat-link-menu" role="menu" style={{left:Math.min(menu.x,window.innerWidth-200),top:Math.min(menu.y,window.innerHeight-250)}}><button role="menuitem" onClick={async()=>{
+  try{await navigator.clipboard.writeText(copyableLink(menu.resource,location.origin));wb?.notify('Link copied')}
+  catch{wb?.notify('Clipboard is unavailable')}
+  setMenu(null);
+ }}>Copy link</button>{([['tab','Open in current pane'],['right','Open in pane to the right'],['below','Open in pane below'],['default-browser-window','Open in default browser window']] as [Destination,string][]).map(([destination,label])=><button role="menuitem" key={destination} onClick={()=>{wb?.open(menu.resource,destination);setMenu(null)}}>{label}</button>)}</div>}</>;
 }
 export default Markdown;

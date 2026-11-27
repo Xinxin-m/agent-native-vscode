@@ -25,3 +25,13 @@ it('a chat that was running and then failed shows one mark: failed, until the tr
  const mark=(ts_last:string)=>{const a=chatActivity(resource,{chats:[{key:'chat',ts_last,live_status:'working',unseen:true}]},[run],[],{},[session]);return rowStatus(a.live,a.unread,{...a,failed:a.failed||a.recovery});};
  expect(mark('2026-11-23T07:03:38Z')).toBe('failed');
  expect(mark('2026-11-23T20:28:59Z')).toBe('working');});
+
+it('gives a stalled broker run priority over the live process spinner',()=>{
+ const key='codex-s',resource={kind:'chat',key} as const;
+ const session={chat_key:key,alive:true,status:'running',observed_at:Date.now()/1000,live_status:'working'};
+ const run={key,status:'running',stalled:true};
+ const get=(r:any)=>chatActivity(resource,{chats:[{key,live_status:'working'}]},[r],[],{},[session]);
+ expect(get(run)).toMatchObject({live:'stalled',running:false});
+ expect(rowStatus(get(run).live,true)).toBe('stalled');
+ expect(get({...run,stalled:false})).toMatchObject({live:'working',running:true});
+});

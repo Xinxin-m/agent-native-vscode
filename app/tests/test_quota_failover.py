@@ -250,7 +250,8 @@ print(json.dumps({'type':'assistant','session_id':'old','isApiErrorMessage':True
                                  {'id': 'corporate', 'tool': 'claude', 'config_dir': str(target)}],
                     'state': {'active': {'claude': 'personal'}, 'global_active': {}}}
         import clis
-        with patch.object(host_connector, '_local_accounts', return_value=profiles), \
+        with patch('accounts._auto_cfg', return_value={'pools': False}), \
+             patch.object(host_connector, '_local_accounts', return_value=profiles), \
              patch.object(host_connector, '_base_env', return_value={'PATH': os.environ['PATH']}), \
              patch.object(host_connector, 'assert_session_not_running') as idle, \
              patch.object(clis, 'cli', return_value=sys.executable):

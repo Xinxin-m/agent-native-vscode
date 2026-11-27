@@ -26,6 +26,7 @@ import re
 import subprocess
 import threading
 import time
+from concurrent.futures import Future
 from automation import automation_kind
 import json_cache
 
@@ -33,8 +34,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, 'data')
 _LOCK = threading.Lock()
 _PROBES = {}
-_PROBING = set()
+_PROBING = {}
 PROBE_FRESH_S = 120
+PROBE_TIMEOUT_S = 20
 
 
 def _read(path, default):
@@ -127,23 +129,67 @@ def get_host(host_id):
 
 
 def probe_host(host_id):
-    """One explicit probe, no retries or scheduling and no state/config writes."""
+    """Share one bounded probe per host across overlapping requests."""
     host = get_host(host_id)
     if host.get('transport') == 'local':
         return dict(host, observed_at=time.time())
     if not host.get('configured'):
         raise ValueError('Configure the SSH host and install its connector first')
     import host_connector
-    started = time.time()
+    timeout = host_connector.ssh_timeout(host, PROBE_TIMEOUT_S)
     with _LOCK:
-        if host_id in _PROBING:
-            raise ValueError('A probe for this host is already running')
-        _PROBING.add(host_id)
+        pending = _PROBING.get(host_id)
+        if pending is None:
+            _PROBING[host_id] = active = Future()
+    if pending is not None:
+        try:
+            return dict(host, **pending.result(timeout=timeout + 2))
+        except TimeoutError:
+            return dict(host, state='offline', can_execute=False, error='SSH host check timed out.')
+
+    try:
+        state = _probe_inventory(host, timeout)
+    except BaseException as exc:
+        with _LOCK:
+            del _PROBING[host_id]
+            active.set_exception(exc)
+        raise
+    with _LOCK:
+        _PROBES[host_id] = state
+        del _PROBING[host_id]
+        active.set_result(state)
+    return dict(host, **state)
+
+
+def _ssh_probe_error(stderr, host):
+    # SSH and its proxy can report private usernames, paths and endpoints.
+    # Match known failure classes and only return fixed messages.
+    detail = (stderr or '').lower()
+    if host.get('kind') == 'slurm':
+        if 'no running slurm job named' in detail:
+            return 'There is no running Slurm allocation for this execution host.'
+        if 'pam_slurm_adopt' in detail or 'outside a slurm job cgroup' in detail:
+            return 'The selected compute node is no longer in your Slurm allocation.'
+    if 'host key verification failed' in detail or 'no trusted host key' in detail or 'remote host identification has changed' in detail:
+        return 'SSH could not verify the execution host key.'
+    if 'permission denied (' in detail or 'too many authentication failures' in detail:
+        return 'SSH authentication failed for this execution host.'
+    if 'timed out' in detail or 'operation timeout' in detail:
+        return 'The SSH connection to the execution host timed out.'
+    if "can't open file" in detail and 'no such file or directory' in detail:
+        return 'The Library connector is missing on the execution host.'
+    return 'SSH connector unavailable. Check its installation, SSH alias and host key.'
+
+
+def _probe_inventory(host, timeout):
+    import host_connector
+    host_id = host['id']
+    started = time.monotonic()
     try:
         argv = host_connector.ssh_command(host, 'inventory')
-        result = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=20)
+        result = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
         if result.returncode:
-            raise ValueError('SSH connector unavailable; check its installation, SSH alias and host key')
+            raise ValueError(_ssh_probe_error(result.stderr, host))
         if len(result.stdout) > 2_000_000:
             raise ValueError('Connector inventory exceeds the response limit')
         remote = json.loads(result.stdout)
@@ -170,15 +216,16 @@ def probe_host(host_id):
         with _LOCK:
             previous = dict(_PROBES.get(host_id) or {})
         state = {k: previous[k] for k in ('sessions', 'accounts', 'last_ok', 'machine_id', 'hostname', 'job_id') if k in previous}
+        if isinstance(exc, subprocess.TimeoutExpired):
+            error = 'SSH host check timed out.'
+        elif isinstance(exc, OSError):
+            error = 'The SSH client could not run the host check.'
+        else:
+            error = str(exc)[:240]
         state.update(state='offline' if isinstance(exc, (OSError, subprocess.TimeoutExpired)) else 'error',
-                     can_execute=False, observed_at=time.time(), error=str(exc)[:240])
-    finally:
-        with _LOCK:
-            _PROBING.discard(host_id)
-    state['seconds'] = round(time.time() - started, 2)
-    with _LOCK:
-        _PROBES[host_id] = state
-    return dict(host, **state)
+                     can_execute=False, observed_at=time.time(), error=error)
+    state['seconds'] = round(time.monotonic() - started, 2)
+    return state
 
 
 def session_control(host_id, operation, session, policy=None):

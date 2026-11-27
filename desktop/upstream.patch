@@ -698,7 +698,7 @@ index 5a31ed48c37..9d01fa2e0dd 100644
 +	MenuRegistry.appendMenuItem(menu, { command: { id: '_library.paneMore', title: localize('library.paneMore', "Open in this pane"), icon: Codicon.chevronDown }, group: 'navigation', order: 1.5, when: ContextKeyExpr.has('config.library.layout') });
 +}
 diff --git a/src/vs/workbench/browser/parts/editor/editorCommands.ts b/src/vs/workbench/browser/parts/editor/editorCommands.ts
-index df8bd3f41d7..fefcc023fba 100644
+index df8bd3f41d7..78605e0e9a4 100644
 --- a/src/vs/workbench/browser/parts/editor/editorCommands.ts
 +++ b/src/vs/workbench/browser/parts/editor/editorCommands.ts
 @@ -1,3 +1,4 @@
@@ -706,7 +706,12 @@ index df8bd3f41d7..fefcc023fba 100644
  /*---------------------------------------------------------------------------------------------
   *  Copyright (c) Microsoft Corporation. All rights reserved.
   *  Licensed under the MIT License. See License.txt in the project root for license information.
-@@ -38,7 +39,7 @@ import { EditorGroupLayout, GroupDirection, GroupLocation, GroupsOrder, IEditorG
+@@ -34,11 +35,11 @@ import { IMultiDiffEditorOptions } from '../../../../editor/common/multiDiffEdit
+ import { EditorInput } from '../../../common/editor/editorInput.js';
+ import { SideBySideEditorInput } from '../../../common/editor/sideBySideEditorInput.js';
+ import { EditorGroupColumn, columnToEditorGroup } from '../../../services/editor/common/editorGroupColumn.js';
+-import { EditorGroupLayout, GroupDirection, GroupLocation, GroupsOrder, IEditorGroup, IEditorGroupsService, IEditorReplacement, IModalEditorPart, preferredSideBySideGroupDirection } from '../../../services/editor/common/editorGroupsService.js';
++import { EditorGroupLayout, GroupDirection, GroupLocation, GroupsOrder, IEditorGroup, IEditorGroupsService, IEditorReplacement, IAuxiliaryEditorPart, IModalEditorPart, preferredSideBySideGroupDirection } from '../../../services/editor/common/editorGroupsService.js';
  import { mainWindow } from '../../../../base/browser/window.js';
  import { IEditorResolverService } from '../../../services/editor/common/editorResolverService.js';
  import { OpenWithEditorPicker } from '../../../services/editor/browser/openWithEditorPicker.js';
@@ -715,7 +720,28 @@ index df8bd3f41d7..fefcc023fba 100644
  import { IPathService } from '../../../services/path/common/pathService.js';
  import { ITextFileService } from '../../../services/textfile/common/textfiles.js';
  import { IUntitledDocumentTelemetryService } from '../../../services/untitled/common/untitledDocumentTelemetry.js';
-@@ -551,8 +552,11 @@ function registerOpenEditorAPICommands(): void {
+@@ -414,6 +415,20 @@ function registerEditorGroupsLayoutCommands(): void {
+ 		}
+ 	});
+ 
++	CommandsRegistry.registerCommand('_library.besideFileColumn', (accessor: ServicesAccessor, resource: URI) => {
++		const service = accessor.get(IEditorGroupsService);
++		const current = service.activeGroup;
++		const part = service.getPart(current);
++		const groups = part.getGroups(GroupsOrder.GRID_APPEARANCE);
++		const open = groups.find(group => group.findEditors(URI.revive(resource)).length);
++		const target = open
++			?? part.findGroup({ direction: GroupDirection.RIGHT }, current)
++			?? part.findGroup({ direction: GroupDirection.LEFT }, current)
++			?? groups.find(group => group !== current)
++			?? part.addGroup(current, GroupDirection.RIGHT);
++		return service.getGroups(GroupsOrder.GRID_APPEARANCE).indexOf(target) + 1;
++	});
++
+ 	CommandsRegistry.registerCommand({
+ 		id: 'vscode.getEditorLayout',
+ 		handler: (accessor: ServicesAccessor) => {
+@@ -551,8 +566,11 @@ function registerOpenEditorAPICommands(): void {
  		const configurationService = accessor.get(IConfigurationService);
  
  		const [columnArg, optionsArg] = columnAndOptions ?? [];
@@ -728,7 +754,7 @@ index df8bd3f41d7..fefcc023fba 100644
  	});
  
  	// partial, renderer-side API command to open diff editor only supporting
-@@ -1764,3 +1768,67 @@ export function setup(): void {
+@@ -1764,3 +1782,89 @@ export function setup(): void {
  	registerFocusEditorGroupWihoutWrapCommands();
  	registerModalEditorCommands();
  }
@@ -762,6 +788,25 @@ index df8bd3f41d7..fefcc023fba 100644
 +	{ label: localize('library.openFolder', "Open folder"), command: 'library.addWorkspace' }
 +]));
 +
++// Reuse one themed utility window and address its actual column from the extension host.
++let libraryUtilityWindow: Promise<IAuxiliaryEditorPart> | undefined;
++CommandsRegistry.registerCommand('_library.utilityColumn', async (accessor, popup: boolean) => {
++	const groups = accessor.get(IEditorGroupsService);
++	let target = groups.mainPart.activeGroup;
++	if (popup) {
++		if (!libraryUtilityWindow) {
++			libraryUtilityWindow = groups.createAuxiliaryEditorPart({ compact: true, bounds: { width: 980, height: 760 } }).then(part => {
++				part.onWillDispose(() => { libraryUtilityWindow = undefined; });
++				return part;
++			}, error => { libraryUtilityWindow = undefined; throw error; });
++		}
++		target = (await libraryUtilityWindow).activeGroup;
++	} else if (groups.getPart(groups.activeGroup) !== (libraryUtilityWindow && await libraryUtilityWindow)) {
++		target = groups.activeGroup;
++	}
++	return groups.getGroups(GroupsOrder.GRID_APPEARANCE).indexOf(target) + 1;
++});
++
 +// Restored webviews may not have reached the extension serializer yet.
 +CommandsRegistry.registerCommand('_library.revealExisting', async (accessor, candidate: unknown, column?: number) => {
 +	const identity = (value: unknown): string | undefined => {
@@ -772,8 +817,11 @@ index df8bd3f41d7..fefcc023fba 100644
 +			if (typeof resource.draftId === 'string' && resource.draftId) { return `draft:${resource.draftId}`; }
 +			return undefined;
 +		}
++		if (resource.kind === 'notifications') {
++			return (resource as { meta?: { view?: string } }).meta?.view === 'history' ? 'notifications:history' : 'notifications';
++		}
 +		if (resource.kind === 'project-map' && typeof resource.project_id === 'string' && resource.project_id) { return `project-map:${resource.project_id}`; }
-+		return resource.kind === 'settings' || resource.kind === 'accounts' || resource.kind === 'projects' || resource.kind === 'overview' ? resource.kind : undefined;
++		return resource.kind === 'settings' || resource.kind === 'accounts' || resource.kind === 'projects' || resource.kind === 'recent' || resource.kind === 'overview' ? resource.kind : undefined;
 +	};
 +	const requested = identity(candidate);
 +	if (!requested) { return false; }
@@ -797,7 +845,7 @@ index df8bd3f41d7..fefcc023fba 100644
 +	return false;
 +});
 diff --git a/src/vs/workbench/browser/parts/editor/editorDropTarget.ts b/src/vs/workbench/browser/parts/editor/editorDropTarget.ts
-index 4e4c281a68e..6798dde8ac9 100644
+index 4e4c281a68e..efbe002bf7a 100644
 --- a/src/vs/workbench/browser/parts/editor/editorDropTarget.ts
 +++ b/src/vs/workbench/browser/parts/editor/editorDropTarget.ts
 @@ -4,6 +4,7 @@
@@ -898,7 +946,16 @@ index 4e4c281a68e..6798dde8ac9 100644
  
  		// An even split shows the size the new group gets: half, within the least sizes of the group and of an editor
  		const vertically = splitDirection === GroupDirection.UP || splitDirection === GroupDirection.DOWN;
-@@ -879,7 +911,7 @@ export class EditorDropTarget extends Themable {
+@@ -842,6 +874,8 @@ export class EditorDropTarget extends Themable {
+ 		for (const target of [this.container, getWindow(this.container)]) {
+ 			this._register(addDisposableListener(target, EventType.DRAG_END, () => this.onDragEnd()));
+ 		}
++		// A drag that ends inside a webview does not bubble to the editor window.
++		this._register(addDisposableListener(getWindow(this.container), 'library-webview-drag-end', () => this.onDragEnd()));
+ 	}
+ 
+ 	/** Whether the drag goes to the editors, without an overlay: as one dropped into an editor while the key is held. */
+@@ -879,7 +913,7 @@ export class EditorDropTarget extends Themable {
  		) {
  			const dndContributions = Registry.as<IDragAndDropContributionRegistry>(DragAndDropExtensions.DragAndDropContribution).getAll();
  			const dndContributionKeys = Array.from(dndContributions).map(e => e.dataFormatKey);
@@ -966,9 +1023,18 @@ index 97b5592d1ff..ff767104121 100644
  				}
  			}
 diff --git a/src/vs/workbench/browser/parts/editor/editorTabsControl.ts b/src/vs/workbench/browser/parts/editor/editorTabsControl.ts
-index c8330623fcb..1d1975ddf1b 100644
+index c8330623fcb..eb88fa7f91e 100644
 --- a/src/vs/workbench/browser/parts/editor/editorTabsControl.ts
 +++ b/src/vs/workbench/browser/parts/editor/editorTabsControl.ts
+@@ -9,7 +9,7 @@ import { DataTransfers } from '../../../../base/browser/dnd.js';
+ import { $, Dimension, getWindow, isMouseEvent, setVisibility } from '../../../../base/browser/dom.js';
+ import { StandardMouseEvent } from '../../../../base/browser/mouseEvent.js';
+ import { ActionsOrientation, IActionViewItem, prepareActions } from '../../../../base/browser/ui/actionbar/actionbar.js';
+-import { IAction, ActionRunner } from '../../../../base/common/actions.js';
++import { IAction, ActionRunner, Separator } from '../../../../base/common/actions.js';
+ import { ResolvedKeybinding } from '../../../../base/common/keybindings.js';
+ import { DisposableStore, IDisposable } from '../../../../base/common/lifecycle.js';
+ import { createActionViewItem } from '../../../../platform/actions/browser/menuEntryActionViewItem.js';
 @@ -40,7 +40,7 @@ import { IModelService } from '../../../../editor/common/services/model.js';
  import { IEditorTitleControlDimensions } from './editorTitleControl.js';
  import { IReadonlyEditorGroupModel } from '../../../common/editor/editorGroupModel.js';
@@ -992,7 +1058,7 @@ index c8330623fcb..1d1975ddf1b 100644
  
  export class EditorCommandsContextActionRunner extends ActionRunner {
  
-@@ -600,15 +607,18 @@ export abstract class EditorTabsControl extends Themable implements IEditorTabsC
+@@ -600,15 +607,31 @@ export abstract class EditorTabsControl extends Themable implements IEditorTabsC
  			anchor = new StandardMouseEvent(getWindow(node), e);
  		}
  
@@ -1000,11 +1066,24 @@ index c8330623fcb..1d1975ddf1b 100644
 +		const identity = libraryChatIdentity(editor);
 +		const context = { groupId: this.groupView.id, editorIndex: this.groupView.getIndexOfEditor(editor), libraryChatKey: identity.key };
 +		const menuContext = identity.isChat ? this.contextMenuContextKeyService.createOverlay([['libraryChatTitleMenu', true], ['libraryChatHasIdentity', !!identity.key]]) : this.contextMenuContextKeyService;
-+		const copyCommands = ['library.copyChat.reference', 'library.copyChat.sessionId', 'library.copyChat.transcriptPath', 'library.copyChat.resumeCommand'];
++		const copyCommands = ['library.copyChat.transcriptPath', 'library.copyChat.reference', 'library.copyChat.sessionId', 'library.copyChat.resumeCommand'];
  		this.contextMenuService.showContextMenu({
  			getAnchor: () => anchor,
 -			menuId: MenuId.EditorTitleContext,
-+			...(identity.isChat ? { getActions: () => this.menuService.getMenuActions(MenuId.EditorTitleContext, menuContext, { shouldForwardArgs: true, arg: this.resourceContext.get() }).flatMap(([, actions]) => actions).filter(action => copyCommands.includes(action.id)).sort((a, b) => copyCommands.indexOf(a.id) - copyCommands.indexOf(b.id)) } : { menuId: MenuId.EditorTitleContext }),
++			getActions: () => {
++				const groups = this.menuService.getMenuActions(MenuId.EditorTitleContext, menuContext, { shouldForwardArgs: true, arg: this.resourceContext.get() });
++				if (identity.isChat) {
++					const actions = groups.flatMap(([, items]) => items);
++					const copies = actions.filter(action => copyCommands.includes(action.id)).sort((a, b) => copyCommands.indexOf(a.id) - copyCommands.indexOf(b.id));
++					const grouping = actions.filter(action => ['library.createTabGroup', 'library.addTabToGroup', 'library.removeTabFromGroup'].includes(action.id));
++					return Separator.join(copies, grouping);
++				}
++				const hidden = new Set(['workbench.action.reopenWithEditor', 'revealInExplorer', 'workbench.action.keepEditor', 'workbench.action.pinEditor', 'workbench.action.unpinEditor']);
++				const path = groups.flatMap(([, actions]) => actions).filter(action => action.id === 'copyFilePath');
++				return Separator.join(path, ...groups.filter(([group]) => group !== '1_close').map(([, actions]) =>
++					actions.filter(action => action.id !== 'copyFilePath' && !hidden.has(action.id) && !/^(?:follow$|close(?: |$))/i.test(action.label))
++				));
++			},
  			menuActionOptions: { shouldForwardArgs: true, arg: this.resourceContext.get() },
 -			contextKeyService: this.contextMenuContextKeyService,
 -			getActionsContext: () => ({ groupId: this.groupView.id, editorIndex: this.groupView.getIndexOfEditor(editor) }),
@@ -1066,19 +1145,21 @@ index 3d6d8ebfc80..635eecd9ff9 100644
 +.monaco-workbench .part.editor .tabs-container > .tab > .library-tab-group { position: relative; z-index: 5; flex: 0 0 auto; border: 0; border-radius: 5px; padding: 3px 8px; margin: 0 5px; color: var(--vscode-badge-foreground); background: var(--vscode-badge-background); cursor: pointer; font: inherit; }
 +.monaco-workbench .part.editor .tabs-container > .tab > .library-tab-group:focus-visible { outline: 1px solid var(--vscode-focusBorder); }
 diff --git a/src/vs/workbench/browser/parts/editor/multiEditorTabsControl.ts b/src/vs/workbench/browser/parts/editor/multiEditorTabsControl.ts
-index b67d48d0768..05973862950 100644
+index b67d48d0768..01bdb304125 100644
 --- a/src/vs/workbench/browser/parts/editor/multiEditorTabsControl.ts
 +++ b/src/vs/workbench/browser/parts/editor/multiEditorTabsControl.ts
-@@ -4,6 +4,8 @@
+@@ -4,6 +4,10 @@
   *--------------------------------------------------------------------------------------------*/
  
  import './media/multieditortabscontrol.css';
 +import { IStorageService } from '../../../../platform/storage/common/storage.js';
++import { toAction } from '../../../../base/common/actions.js';
++import { libraryGroupColors, type LibraryGroupColor } from './libraryTabGroupModel.js';
 +import { onDidChangeLibraryTabGroups, reconcileTabMove, saveTabGroups, tabGroups, tabIdentity } from './libraryTabGroups.js';
  import { isLinux, isMacintosh, isWindows } from '../../../../base/common/platform.js';
  import { shorten } from '../../../../base/common/labels.js';
  import { EditorResourceAccessor, Verbosity, IEditorPartOptions, SideBySideEditor, DEFAULT_EDITOR_ASSOCIATION, EditorInputCapabilities, IUntypedEditorInput, preventEditorClose, EditorCloseMethod, EditorsOrder, IToolbarActions } from '../../../common/editor.js';
-@@ -32,7 +34,8 @@ import { activeContrastBorder, contrastBorder, editorBackground } from '../../..
+@@ -32,7 +36,8 @@ import { activeContrastBorder, contrastBorder, editorBackground } from '../../..
  import { ResourcesDropHandler, DraggedEditorIdentifier, DraggedEditorGroupIdentifier, extractTreeDropData, isWindowDraggedOver } from '../../dnd.js';
  import { Color } from '../../../../base/common/color.js';
  import { INotificationService } from '../../../../platform/notification/common/notification.js';
@@ -1088,7 +1169,7 @@ index b67d48d0768..05973862950 100644
  import { addDisposableListener, EventType, EventHelper, Dimension, scheduleAtNextAnimationFrame, findParentWithClass, clearNode, DragAndDropObserver, isMouseEvent, getWindow, ModifierKeyEmitter, $, isHTMLElement, getTotalWidth, getContentWidth } from '../../../../base/browser/dom.js';
  import { localize } from '../../../../nls.js';
  import { CONNECTED_EDITOR_TABS_SELECTOR, IEditorGroupMenuIds, IEditorGroupsView, EditorServiceImpl, IEditorGroupView, IInternalEditorOpenOptions, IEditorPartsView, prepareMoveCopyEditors } from './editor.js';
-@@ -174,9 +177,19 @@ export class MultiEditorTabsControl extends EditorTabsControl {
+@@ -174,9 +179,19 @@ export class MultiEditorTabsControl extends EditorTabsControl {
  		@IHostService hostService: IHostService,
  		@IMenuService menuService: IMenuService,
  		@IModelService modelService: IModelService,
@@ -1108,6 +1189,29 @@ index b67d48d0768..05973862950 100644
  		// Resolve the correct path library for the OS we are on
  		// If we are connected to remote, this accounts for the
  		// remote OS.
+@@ -342,7 +357,7 @@ export class MultiEditorTabsControl extends EditorTabsControl {
+ 		this._register(tabsScrollbar.onScroll(e => {
+ 			if (e.scrollLeftChanged) {
+ 				scrollable.scrollLeft = e.scrollLeft;
+-				this.updateConnectedTabClipping(e.scrollLeft);
++				this.updateConnectedTabClipping(scrollable.scrollLeft);
+ 			}
+ 		}));
+ 
+@@ -422,11 +437,9 @@ export class MultiEditorTabsControl extends EditorTabsControl {
+ 		// Forward scrolling inside the container to our custom scrollbar
+ 		this._register(addDisposableListener(tabsContainer, EventType.SCROLL, () => {
+ 			if (tabsContainer.classList.contains('scroll')) {
+-				tabsScrollbar.setScrollPosition({
+-					scrollLeft: tabsContainer.scrollLeft // during DND the container gets scrolled so we need to update the custom scrollbar
+-				});
+-				this.updateConnectedTabClipping(tabsContainer.scrollLeft);
++				tabsScrollbar.setScrollPosition({ scrollLeft: tabsContainer.scrollLeft });
+ 			}
++			this.updateConnectedTabClipping(tabsContainer.scrollLeft);
+ 		}));
+ 
+ 		// New file when double-clicking on tabs container (but not tabs)
 @@ -655,6 +668,7 @@ export class MultiEditorTabsControl extends EditorTabsControl {
  
  	openEditor(editor: EditorInput, options?: IInternalEditorOpenOptions): boolean {
@@ -1135,7 +1239,15 @@ index b67d48d0768..05973862950 100644
  
  		// Redraw tabs in the range of the move
  		this.forEachTab((editor, tabIndex, tabContainer, tabLabelWidget, tabLabel, tabActionBar) => {
-@@ -1450,7 +1467,9 @@ export class MultiEditorTabsControl extends EditorTabsControl {
+@@ -1288,6 +1305,7 @@ export class MultiEditorTabsControl extends EditorTabsControl {
+ 
+ 		// Context menu
+ 		disposables.add(addDisposableListener(tab, EventType.CONTEXT_MENU, e => {
++			if (isHTMLElement(e.target) && e.target.closest('.library-tab-group')) { return; }
+ 			EventHelper.stop(e, true);
+ 
+ 			const editor = this.tabsModel.getEditorByIndex(tabIndex);
+@@ -1450,7 +1468,9 @@ export class MultiEditorTabsControl extends EditorTabsControl {
  			if (isTab) {
  				dropTarget = this.computeDropTarget(e, tabIndex, element);
  			} else {
@@ -1146,7 +1258,7 @@ index b67d48d0768..05973862950 100644
  			}
  		} else {
  			dropTarget = undefined;
-@@ -1789,7 +1808,37 @@ export class MultiEditorTabsControl extends EditorTabsControl {
+@@ -1789,7 +1809,59 @@ export class MultiEditorTabsControl extends EditorTabsControl {
  		}
  	}
  
@@ -1167,10 +1279,32 @@ index b67d48d0768..05973862950 100644
 +				header.addEventListener('mouseup', e => e.stopPropagation());
 +				header.addEventListener('keydown', e => { if (!e.metaKey && !e.ctrlKey && !e.altKey && (e.key === 'Enter' || e.key === ' ')) { e.stopPropagation(); } });
 +				header.addEventListener('click', e => { e.stopPropagation(); const id = header?.dataset.groupId; if (id) { model.toggle(pane, id); saveTabGroups(this.libraryStorage); } });
++				header.addEventListener('contextmenu', e => {
++					e.preventDefault(); e.stopPropagation();
++					const id = header!.dataset.groupId;
++					const selected = model.groups(pane).find(item => item.id === id);
++					if (!selected) return;
++					this.contextMenuService.showContextMenu({
++						getAnchor: () => header!,
++						getActions: () => [
++							toAction({id:'library.renameGroup',label:'Rename group',run:async () => {
++								const name = (await this.quickInputService.input({title:'Rename tab group',value:selected.name,validateInput:async value => value.trim() ? undefined : 'Enter a name'}))?.trim();
++								if (name) { model.update(pane, selected.id, {name}); saveTabGroups(this.libraryStorage); }
++							}}),
++							toAction({id:'library.colorGroup',label:'Set group color',run:async () => {
++								const colors = Object.keys(libraryGroupColors) as LibraryGroupColor[];
++								const color = await this.quickInputService.pick(colors.map(label => ({label})), {title:'Set tab group color'});
++								if (color) { model.update(pane, selected.id, {color:color.label}); saveTabGroups(this.libraryStorage); }
++							}})
++						]
++					});
++				});
 +				tab.prepend(header);
 +			}
 +			header.dataset.groupId = group.id;
 +			header.textContent = group.name;
++			header.style.backgroundColor = group.color ? libraryGroupColors[group.color] : '';
++			header.style.color = group.color ? '#fff' : '';
 +			header.setAttribute('aria-expanded', String(!group.collapsed));
 +			header.setAttribute('aria-label', `${group.name}, ${group.collapsed ? 'expand' : 'collapse'} tab group`);
 +		} else { header?.remove(); }
@@ -1184,7 +1318,7 @@ index b67d48d0768..05973862950 100644
  		const isTabSticky = this.tabsModel.isSticky(tabIndex);
  		const options = this.groupsView.partOptions;
  
-@@ -1851,6 +1900,11 @@ export class MultiEditorTabsControl extends EditorTabsControl {
+@@ -1851,6 +1923,11 @@ export class MultiEditorTabsControl extends EditorTabsControl {
  			description = tabLabel.description || '';
  		}
  
@@ -1196,7 +1330,7 @@ index b67d48d0768..05973862950 100644
  		if (tabLabel.ariaLabel) {
  			tabContainer.setAttribute('aria-label', tabLabel.ariaLabel);
  			// Set aria-description to empty string so that screen readers would not read the title as well
-@@ -1998,7 +2052,7 @@ export class MultiEditorTabsControl extends EditorTabsControl {
+@@ -1998,7 +2075,7 @@ export class MultiEditorTabsControl extends EditorTabsControl {
  		// Inactive: only show "Unlock" and secondary actions
  		else {
  			return {
@@ -1205,7 +1339,30 @@ index b67d48d0768..05973862950 100644
  				secondary: editorActions.secondary
  			};
  		}
-@@ -2848,6 +2902,18 @@ export class MultiEditorTabsControl extends EditorTabsControl {
+@@ -2485,10 +2562,11 @@ export class MultiEditorTabsControl extends EditorTabsControl {
+ 		this.connectedTabOverflowEdge?.classList.toggle('connected-tab-adjacent-sticky', stickyTabsWidth > 0);
+ 
+ 		this.clearConnectedTabClipping();
+-		const activeTabFill = activeTab?.firstElementChild;
++		const activeTabFill = activeTab?.querySelector<HTMLElement>(':scope > .tab-fill');
++		const activeTabEdge = activeTab?.querySelector<HTMLElement>(':scope > .tab-connected-edge');
+ 		const overflowEdge = this.connectedTabOverflowEdge;
+ 		overflowEdge?.classList.toggle('connected-tab-top-row', !!activeTab?.classList.contains('connected-tab-top-row'));
+-		if (activeTab && !activeTab.classList.contains('connected-tab-upper-row') && isHTMLElement(activeTabFill) && overflowEdge && !activeTabPositionStatic && this.parent.closest(CONNECTED_EDITOR_TABS_SELECTOR)) {
++		if (activeTab && !activeTab.classList.contains('connected-tab-upper-row') && activeTabFill && activeTabEdge && overflowEdge && !activeTabPositionStatic && this.parent.closest(CONNECTED_EDITOR_TABS_SELECTOR)) {
+ 			// DOM bounds reflect native scroll clamping before the custom scrollbar dimensions update.
+ 			const scrollLeft = tabsContainer.scrollLeft;
+ 			const tabsBounds = tabsContainer.getBoundingClientRect();
+@@ -2496,7 +2574,7 @@ export class MultiEditorTabsControl extends EditorTabsControl {
+ 			const scrollableBounds = tabsScrollbar.getDomNode().getBoundingClientRect();
+ 			const targetWindow = getWindow(activeTabFill);
+ 			overflowEdge.style.setProperty('--modern-ui-connected-tab-border', targetWindow.getComputedStyle(activeTab).getPropertyValue('--modern-ui-connected-tab-border'));
+-			const edgeStyle = targetWindow.getComputedStyle(assertReturnsDefined(activeTabFill.nextElementSibling));
++			const edgeStyle = targetWindow.getComputedStyle(activeTabEdge);
+ 			overflowEdge.classList.toggle('connected-tab-square-left', edgeStyle.borderTopLeftRadius === '0px');
+ 			overflowEdge.style.setProperty('--modern-ui-connected-tab-overflow-top-border', edgeStyle.borderTopColor);
+ 			overflowEdge.style.setProperty('--modern-ui-connected-tab-overflow-top-background', edgeStyle.backgroundImage);
+@@ -2848,6 +2926,18 @@ export class MultiEditorTabsControl extends EditorTabsControl {
  			this.treeItemsTransfer.clearData(DraggedTreeItemsIdentifier.prototype);
  		}
  
@@ -1447,10 +1604,10 @@ index d0f5bd1bd21..2bf49e34c4f 100644
  }
  
 diff --git a/src/vs/workbench/browser/parts/notifications/media/notificationsToasts.css b/src/vs/workbench/browser/parts/notifications/media/notificationsToasts.css
-index d9185ce03f9..a829a268928 100644
+index d9185ce03f9..4719f8e354a 100644
 --- a/src/vs/workbench/browser/parts/notifications/media/notificationsToasts.css
 +++ b/src/vs/workbench/browser/parts/notifications/media/notificationsToasts.css
-@@ -82,3 +82,11 @@
+@@ -82,3 +82,32 @@
  .monaco-workbench > .notifications-toasts .codicon.codicon-info {
  	color: var(--vscode-notificationsInfoIcon-foreground) !important;
  }
@@ -1461,6 +1618,27 @@ index d9185ce03f9..a829a268928 100644
 +	width: 30px;
 +	min-height: 24px;
 +	justify-content: center;
++}
++
++.monaco-workbench .notifications-toasts .library-dismiss-toasts {
++	align-self: flex-end;
++	margin: 0 4px 4px;
++	padding: 3px 8px;
++	border: 1px solid var(--vscode-notificationToast-border, var(--vscode-contrastBorder, transparent));
++	border-radius: var(--vscode-cornerRadius-small);
++	background: var(--vscode-notifications-background);
++	color: var(--vscode-notifications-foreground);
++	font: inherit;
++	cursor: pointer;
++	box-shadow: var(--vscode-shadow-sm);
++}
++
++.monaco-workbench .notifications-toasts .library-dismiss-toasts:hover {
++	background: var(--vscode-toolbar-hoverBackground);
++}
++
++.monaco-workbench .notifications-toasts .library-dismiss-toasts:focus-visible {
++	outline: 1px solid var(--vscode-focusBorder);
 +}
 diff --git a/src/vs/workbench/browser/parts/notifications/notificationsCommands.ts b/src/vs/workbench/browser/parts/notifications/notificationsCommands.ts
 index 70b99a4bbb0..3efc1fcf249 100644
@@ -1554,47 +1732,156 @@ index 70b99a4bbb0..3efc1fcf249 100644
  		}
  	}));
 diff --git a/src/vs/workbench/browser/parts/notifications/notificationsToasts.ts b/src/vs/workbench/browser/parts/notifications/notificationsToasts.ts
-index 0b62b5801da..396bad6ed6a 100644
+index 0b62b5801da..98a44fa2fb0 100644
 --- a/src/vs/workbench/browser/parts/notifications/notificationsToasts.ts
 +++ b/src/vs/workbench/browser/parts/notifications/notificationsToasts.ts
-@@ -266,6 +266,7 @@ export class NotificationsToasts extends Themable implements INotificationsToast
+@@ -50,11 +50,7 @@ export class NotificationsToasts extends Themable implements INotificationsToast
+ 	private static readonly MAX_WIDTH = 450;
+ 	private static readonly MAX_NOTIFICATIONS = 3;
+ 
+-	private static readonly PURGE_TIMEOUT: { [severity: number]: number } = {
+-		[Severity.Info]: 10000,
+-		[Severity.Warning]: 12000,
+-		[Severity.Error]: 15000
+-	};
++	private static readonly durationKey = 'library.notificationPopupSeconds';
+ 
+ 	private static readonly SPAM_PROTECTION = {
+ 		// Count for the number of notifications over 800ms...
+@@ -88,7 +84,7 @@ export class NotificationsToasts extends Themable implements INotificationsToast
+ 		@IWorkbenchLayoutService private readonly layoutService: IWorkbenchLayoutService,
+ 		@IThemeService themeService: IThemeService,
+ 		@IEditorGroupsService private readonly editorGroupService: IEditorGroupsService,
+-		@IContextKeyService contextKeyService: IContextKeyService,
++		@IContextKeyService private readonly contextKeyService: IContextKeyService,
+ 		@ILifecycleService private readonly lifecycleService: ILifecycleService,
+ 		@IHostService private readonly hostService: IHostService,
+ 		@IWorkbenchEnvironmentService private readonly environmentService: IWorkbenchEnvironmentService,
+@@ -255,6 +251,11 @@ export class NotificationsToasts extends Themable implements INotificationsToast
+ 		if (!notificationsToastsContainer) {
+ 			notificationsToastsContainer = this.notificationsToastsContainer = $('.notifications-toasts');
+ 
++			const dismiss = $('button.library-dismiss-toasts') as HTMLButtonElement;
++			dismiss.type = 'button';
++			dismiss.textContent = localize('library.dismissToasts', "Dismiss all notifications");
++			this._register(addDisposableListener(dismiss, EventType.CLICK, () => this.hide()));
++			notificationsToastsContainer.appendChild(dismiss);
+ 			this.container.appendChild(notificationsToastsContainer);
+ 		}
+ 
+@@ -266,8 +267,9 @@ export class NotificationsToasts extends Themable implements INotificationsToast
  
  		// Container
  		const notificationToastContainer = $('.notification-toast-container');
 +		notificationToastContainer.classList.toggle('library-account-notice', Boolean(item.toastTimeout));
  
- 		const firstToast = notificationsToastsContainer.firstChild;
+-		const firstToast = notificationsToastsContainer.firstChild;
++		const firstToast = notificationsToastsContainer.querySelector('.notification-toast-container');
  		if (firstToast) {
-@@ -370,6 +371,29 @@ export class NotificationsToasts extends Themable implements INotificationsToast
+ 			notificationsToastsContainer.insertBefore(notificationToastContainer, firstToast); // always first
+ 		} else {
+@@ -343,7 +345,7 @@ export class NotificationsToasts extends Themable implements INotificationsToast
+ 			this.removeToast(item);
+ 		});
+ 
+-		// Automatically purge non-sticky notifications
++		// Hiding a toast leaves its message and actions in the notification center.
+ 		this.purgeNotification(item, notificationToastContainer, notificationList, itemDisposables);
+ 
+ 		// Theming
+@@ -370,51 +372,42 @@ export class NotificationsToasts extends Themable implements INotificationsToast
  	}
  
  	private purgeNotification(item: INotificationViewItem, notificationToastContainer: HTMLElement, notificationList: NotificationsList, disposables: DisposableStore): void {
-+		if (item.toastTimeout) {
-+			const timeout = item.toastTimeout;
-+			if (!timeout.milliseconds) {
+-
+-		// Track mouse over item
+-		let isMouseOverToast = false;
+-		disposables.add(addDisposableListener(notificationToastContainer, EventType.MOUSE_OVER, () => isMouseOverToast = true));
+-		disposables.add(addDisposableListener(notificationToastContainer, EventType.MOUSE_OUT, () => isMouseOverToast = false));
+-
+-		// Install Timers to Purge Notification
+-		let purgeTimeoutHandle: Timeout;
+-		let listener: IDisposable;
+-
+-		const hideAfterTimeout = () => {
+-
+-			purgeTimeoutHandle = setTimeout(() => {
+-
+-				// If the window does not have focus, we wait for the window to gain focus
+-				// again before triggering the timeout again. This prevents an issue where
+-				// focussing the window could immediately hide the notification because the
+-				// timeout was triggered again.
+-				if (!this.hostService.hasFocus) {
+-					if (!listener) {
+-						listener = this.hostService.onDidChangeFocus(focus => {
+-							if (focus) {
+-								hideAfterTimeout();
+-							}
+-						});
+-						disposables.add(listener);
+-					}
++		const key = NotificationsToasts.durationKey;
++		const duration = () => {
++			const seconds = this.contextKeyService.getContextKeyValue<number>(key);
++			return typeof seconds === 'number' ? seconds * 1000 : item.toastTimeout?.milliseconds ?? 4000;
++		};
++		const clock = getWindow(notificationToastContainer).performance;
++		let previous = clock.now();
++		let remaining = duration();
++		let timer: ReturnType<typeof setInterval> | undefined;
++		const reset = () => {
++			clearInterval(timer);
++			remaining = duration();
++			previous = clock.now();
++			if (remaining === 0) {
 +				return;
 +			}
-+			let remaining = timeout.milliseconds;
-+			const clock = getWindow(notificationToastContainer).performance;
-+			let previous = clock.now();
-+			const timer = setInterval(() => {
++			timer = setInterval(() => {
 +				const current = clock.now();
-+				if (this.hostService.hasFocus && !notificationList.hasFocus()
-+					&& !notificationToastContainer.matches(':hover') && !timeout.isPaused()) {
++				if (notificationToastContainer.isConnected && this.hostService.hasFocus && !notificationList.hasFocus()
++					&& !notificationToastContainer.matches(':hover') && !item.toastTimeout?.isPaused()) {
 +					remaining -= current - previous;
-+				}
+ 				}
+-
+-				// Otherwise...
+-				else if (
+-					item.sticky ||								// never hide sticky notifications
+-					notificationList.hasFocus() ||				// never hide notifications with focus
+-					isMouseOverToast							// never hide notifications under mouse
+-				) {
+-					hideAfterTimeout();
+-				} else {
 +				previous = current;
 +				if (remaining <= 0) {
-+					this.removeToast(item);
-+				}
+ 					this.removeToast(item);
+ 				}
+-			}, NotificationsToasts.PURGE_TIMEOUT[item.severity]);
 +			}, 50);
-+			disposables.add(toDisposable(() => clearInterval(timer)));
-+			return;
-+		}
-+
+ 		};
+-
+-		hideAfterTimeout();
+-
+-		disposables.add(toDisposable(() => clearTimeout(purgeTimeoutHandle)));
++		const keys = new Set([key]);
++		disposables.add(this.contextKeyService.onDidChangeContext(event => {
++			if (event.affectsSome(keys)) {
++				reset();
++			}
++		}));
++		reset();
++		disposables.add(toDisposable(() => clearInterval(timer)));
+ 	}
  
- 		// Track mouse over item
- 		let isMouseOverToast = false;
+ 	private removeToast(item: INotificationViewItem): void {
+@@ -664,6 +657,8 @@ export class NotificationsToasts extends Themable implements INotificationsToast
+ 		// Allow the full height for 1 toast but adjust for multiple toasts
+ 		// so that a stack of notifications does not exceed all the way up
+ 
++		const actionHeight = this.notificationsToastsContainer?.querySelector<HTMLElement>('.library-dismiss-toasts')?.offsetHeight ?? 0;
++		heightToGive = Math.max(0, heightToGive - actionHeight - 4);
+ 		let singleToastHeightToGive = heightToGive;
+ 		let multipleToastsHeightToGive = Math.round(heightToGive * 0.618);
+ 
 diff --git a/src/vs/workbench/browser/parts/paneCompositeBar.ts b/src/vs/workbench/browser/parts/paneCompositeBar.ts
 index 83595a02372..f2724a17058 100644
 --- a/src/vs/workbench/browser/parts/paneCompositeBar.ts
@@ -1873,6 +2160,38 @@ index 9c530bfbee3..adb243f696a 100644
  			}
  
  			// --- Global Actions (after layout so e.g. notification bell appears to the right of layout controls).
+diff --git a/src/vs/workbench/common/editor/editorGroupModel.ts b/src/vs/workbench/common/editor/editorGroupModel.ts
+index 1e0507653bd..dc5a7afd956 100644
+--- a/src/vs/workbench/common/editor/editorGroupModel.ts
++++ b/src/vs/workbench/common/editor/editorGroupModel.ts
+@@ -1230,7 +1230,7 @@ export class EditorGroupModel extends Disposable implements IEditorGroupModel {
+ 			this.locked = true;
+ 		}
+ 
+-		this.editors = coalesce(data.editors.map((e, index) => {
++		const restored = data.editors.map((e, index) => {
+ 			let editor: EditorInput | undefined;
+ 
+ 			const editorSerializer = registry.getEditorSerializer(e.id);
+@@ -1247,14 +1247,15 @@ export class EditorGroupModel extends Disposable implements IEditorGroupModel {
+ 			}
+ 
+ 			return editor;
+-		}));
++		});
+ 
+-		this.mru = coalesce(data.mru.map(i => this.editors[i]));
++		this.editors = coalesce(restored);
++		this.mru = coalesce(data.mru.map(i => restored[i]));
+ 
+ 		this.selection = this.mru.length > 0 ? [this.mru[0]] : [];
+ 
+ 		if (typeof data.preview === 'number') {
+-			this.preview = this.editors[data.preview];
++			this.preview = restored[data.preview] ?? null;
+ 		}
+ 
+ 		if (typeof data.sticky === 'number') {
 diff --git a/src/vs/workbench/common/notifications.ts b/src/vs/workbench/common/notifications.ts
 index d46ad101a73..d7760ba8824 100644
 --- a/src/vs/workbench/common/notifications.ts
@@ -2081,7 +2400,7 @@ index c6cae5ccaef..f6c875e487a 100644
 +.library-workspace-tab:hover .workspace-close, .workspace-close:focus-visible { opacity:1; }
 +.library-workspace-strip button:focus-visible { outline:1px solid var(--vscode-focusBorder); outline-offset:-1px; }
 diff --git a/src/vs/workbench/contrib/files/browser/views/explorerView.ts b/src/vs/workbench/contrib/files/browser/views/explorerView.ts
-index 46239023018..b1261b7df0f 100644
+index 46239023018..526e5b9c75b 100644
 --- a/src/vs/workbench/contrib/files/browser/views/explorerView.ts
 +++ b/src/vs/workbench/contrib/files/browser/views/explorerView.ts
 @@ -3,6 +3,7 @@
@@ -2140,7 +2459,20 @@ index 46239023018..b1261b7df0f 100644
  		this._register(this.contextService.onDidChangeWorkspaceName(() => {
  			setHeader();
  			this.updateWorkspaceTitleCase();
-@@ -836,6 +847,17 @@ export class ExplorerView extends ViewPane implements IExplorerView {
+@@ -617,6 +628,12 @@ export class ExplorerView extends ViewPane implements IExplorerView {
+ 				this.telemetryService.publicLog2<WorkbenchActionExecutedEvent, WorkbenchActionExecutedClassification>('workbenchActionExecuted', { id: 'workbench.files.openFile', from: 'explorer' });
+ 				try {
+ 					this.delegate?.willOpenElement(e.browserEvent);
++					if (this.libraryProductService?.applicationName?.startsWith('library-code') && !e.sideBySide && (element.resource.scheme === 'file' || element.resource.scheme === 'library-file')) {
++						const handled = await this.commandService.executeCommand<boolean>('library.openExplorerFile', element.resource, { preserveFocus: e.editorOptions.preserveFocus, preview: !e.editorOptions.pinned }).catch(() => false);
++						if (handled) {
++							return;
++						}
++					}
+ 					await this.editorService.openEditor({ resource: element.resource, options: { preserveFocus: e.editorOptions.preserveFocus, pinned: e.editorOptions.pinned, source: EditorOpenSource.USER } }, e.sideBySide ? SIDE_GROUP : ACTIVE_GROUP);
+ 				} finally {
+ 					this.delegate?.didOpenElement();
+@@ -836,6 +853,17 @@ export class ExplorerView extends ViewPane implements IExplorerView {
  		return DOM.getLargestChildWidth(parentNode, childNodes);
  	}
  
@@ -2158,7 +2490,7 @@ index 46239023018..b1261b7df0f 100644
  	setTreeInput(): Promise<void> {
  		return this.setTreeInputSequencer.queue(() => this.doSetTreeInput());
  	}
-@@ -849,15 +871,21 @@ export class ExplorerView extends ViewPane implements IExplorerView {
+@@ -849,15 +877,21 @@ export class ExplorerView extends ViewPane implements IExplorerView {
  		if (initialInputSetup) {
  			perf.mark('code/willResolveExplorer');
  		}
@@ -2538,7 +2870,7 @@ index ecc9222dc6d..0ff9e2651b5 100644
  	}
  
 diff --git a/src/vs/workbench/contrib/webview/browser/pre/index.html b/src/vs/workbench/contrib/webview/browser/pre/index.html
-index ab1372198da..d148d7a2b1b 100644
+index ab1372198da..5e2c726442f 100644
 --- a/src/vs/workbench/contrib/webview/browser/pre/index.html
 +++ b/src/vs/workbench/contrib/webview/browser/pre/index.html
 @@ -5,7 +5,7 @@
@@ -2546,7 +2878,7 @@ index ab1372198da..d148d7a2b1b 100644
  
  	<meta http-equiv="Content-Security-Policy"
 -		content="default-src 'none'; script-src 'sha256-VY65u6y1DZWK8Cb4MlVpSVlMYcM338BRDVhygiwXLLg=' 'self'; frame-src 'self'; style-src 'unsafe-inline';">
-+		content="default-src 'none'; script-src 'sha256-To5kxvLfCZgolC7zSeNzaWlwzjYA55nUQIlyczdl9ks=' 'self'; frame-src 'self'; style-src 'unsafe-inline';">
++		content="default-src 'none'; script-src 'sha256-G7q+Y4Pq1CthR5dKBGS8VjngT/+UhHxRFtynnAhprCI=' 'self'; frame-src 'self'; style-src 'unsafe-inline';">
  
  	<!-- Disable pinch zooming -->
  	<meta name="viewport"
@@ -2591,17 +2923,24 @@ index ab1372198da..d148d7a2b1b 100644
  		function handleInnerDragStartEvent(/** @type {DragEvent} */ e) {
  			if (e.defaultPrevented) {
  				// Extension code has already handled this event
-@@ -840,12 +843,23 @@
+@@ -839,13 +842,29 @@
+ 				return;
  			}
  
- 			// Only handle drags from outside editor for now
+-			// Only handle drags from outside editor for now
 -			if (e.dataTransfer.items.length && Array.prototype.every.call(e.dataTransfer.items, item => item.kind === 'file')) {
 -				hostMessaging.postMessage('drag-start', undefined);
-+			if (Array.from(e.dataTransfer.types).includes('application/library-resource') || (e.dataTransfer.items.length && Array.prototype.every.call(e.dataTransfer.items, item => item.kind === 'file'))) {
-+				if (e.type === 'dragstart' && e.isTrusted && Array.from(e.dataTransfer.types).includes('application/library-resource')) { activeLibraryDrag = true; }
++			const types = Array.from(e.dataTransfer.types);
++			const library = types.includes('application/library-resource');
++			if (library || (e.dataTransfer.items.length && Array.prototype.every.call(e.dataTransfer.items, item => item.kind === 'file'))) {
++				const source = e.type === 'dragstart' && e.isTrusted && library;
++				if (source) { activeLibraryDrag = true; }
++				const link = source && types.includes('application/library-chat-file-link')
++					? /** @type {Element | null} */ (e.target)?.closest?.('a[href],img[data-local-image]')
++					: undefined;
++				const linkRects = link ? Array.from(link.getClientRects(), ({ left, top, right, bottom }) => ({ left, top, right, bottom })) : undefined;
 +				hostMessaging.postMessage('drag-start', {
-+					library: Array.from(e.dataTransfer.types).includes('application/library-resource'),
-+					source: e.type === 'dragstart' && e.isTrusted && Array.from(e.dataTransfer.types).includes('application/library-resource'),
++					library, source, linkRects,
 +					at: (e.view?.performance?.timeOrigin ?? performance.timeOrigin) + e.timeStamp
 +				});
  			}
@@ -2617,7 +2956,7 @@ index ab1372198da..d148d7a2b1b 100644
  		function handleInnerDragEvent(/** @type {DragEvent} */ e) {
  			/**
  			 * To ensure that the drop event always fires as expected, you should always include a preventDefault() call in the part of your code which handles the dragover event.
-@@ -859,9 +873,11 @@
+@@ -859,9 +878,11 @@
  
  
  			// Only handle drags from outside editor for now
@@ -2631,7 +2970,7 @@ index ab1372198da..d148d7a2b1b 100644
  				});
  			}
  
-@@ -1283,6 +1299,8 @@
+@@ -1283,6 +1304,8 @@
  						});
  					});
  
@@ -2654,7 +2993,7 @@ index 268ea1ea4a0..c7eca891018 100644
  
  	setContextKeyService(scopedContextKeyService: IContextKeyService): void;
 diff --git a/src/vs/workbench/contrib/webview/browser/webviewElement.ts b/src/vs/workbench/contrib/webview/browser/webviewElement.ts
-index dbb9b44fb1d..fa03599b9af 100644
+index dbb9b44fb1d..842da544a66 100644
 --- a/src/vs/workbench/contrib/webview/browser/webviewElement.ts
 +++ b/src/vs/workbench/contrib/webview/browser/webviewElement.ts
 @@ -40,6 +40,7 @@ import { WebviewThemeDataProvider } from './themeing.js';
@@ -2693,8 +3032,8 @@ index dbb9b44fb1d..fa03599b9af 100644
 +			if (event?.library) {
 +				if (!this.window || !this.element || typeof event.source !== 'boolean' || !Number.isFinite(event.at)) { return; }
 +				const tracker = libraryDragSourceFor(this.window);
-+				if (event.source ? !tracker.begin(this.element, event.at) : !tracker.accept(event.at)) { return; }
-+				if (!event.source) { this._startBlockingIframeDragEvents(); }
++				if (event.source ? !tracker.begin(this.element, event.at, event.linkRects) : !tracker.accept(event.at)) { return; }
++				if (!event.source && tracker.dockingSource !== this.element) { this._startBlockingIframeDragEvents(); }
 +			} else {
 +				this._startBlockingIframeDragEvents();
 +			}
@@ -2703,7 +3042,7 @@ index dbb9b44fb1d..fa03599b9af 100644
 +		}));
 +
 +		this._register(this.on('drag-end', event => {
-+			if (!this.window || !Number.isFinite(event?.at)) { return; }
++			if (!this.window || !libraryDragSourceFor(this.window).end(event?.at)) { return; }
 +			this.window.dispatchEvent(new CustomEvent('library-webview-drag-end', { detail: event.at }));
  		}));
  
@@ -2738,10 +3077,18 @@ index dbb9b44fb1d..fa03599b9af 100644
  						let closed = false;
  						const close = () => {
 diff --git a/src/vs/workbench/contrib/webview/browser/webviewMessages.d.ts b/src/vs/workbench/contrib/webview/browser/webviewMessages.d.ts
-index f4e0901e636..04628b79bde 100644
+index f4e0901e636..80a6e60a6bf 100644
 --- a/src/vs/workbench/contrib/webview/browser/webviewMessages.d.ts
 +++ b/src/vs/workbench/contrib/webview/browser/webviewMessages.d.ts
-@@ -22,8 +22,12 @@ type KeyEvent = {
+@@ -5,6 +5,7 @@
+ 
+ import type { IMouseWheelEvent } from '../../../../base/browser/mouseEvent.js';
+ import type { WebviewMouseActivity } from '../common/webview.js';
++import type { FileLinkRect } from './libraryDragSource.js';
+ import type { WebviewStyles } from './webview.js';
+ 
+ type KeyEvent = {
+@@ -22,8 +23,17 @@ type KeyEvent = {
  
  type WebViewDragEvent = {
  	readonly shiftKey: boolean;
@@ -2749,12 +3096,17 @@ index f4e0901e636..04628b79bde 100644
 +	readonly at?: number;
  }
  
-+type WebViewDragStartEvent = { readonly library: boolean; readonly source: boolean; readonly at: number };
++type WebViewDragStartEvent = {
++	readonly library: boolean;
++	readonly source: boolean;
++	readonly at: number;
++	readonly linkRects?: readonly FileLinkRect[];
++};
 +
  export type FromWebviewMessage = {
  	'onmessage': { message: any; transfer?: ArrayBuffer[] };
  	'did-click-link': { uri: string };
-@@ -43,7 +47,8 @@ export type FromWebviewMessage = {
+@@ -43,7 +53,8 @@ export type FromWebviewMessage = {
  	'did-keydown': KeyEvent;
  	'did-keyup': KeyEvent;
  	'did-context-menu': { clientX: number; clientY: number; context: { [key: string]: unknown } };
@@ -2765,7 +3117,7 @@ index f4e0901e636..04628b79bde 100644
  	'updated-intrinsic-content-size': { width: number; height: number };
  };
 diff --git a/src/vs/workbench/contrib/webview/browser/webviewWindowDragMonitor.ts b/src/vs/workbench/contrib/webview/browser/webviewWindowDragMonitor.ts
-index 923f49b2ffd..b3341962ea4 100644
+index 923f49b2ffd..8f22c6546bb 100644
 --- a/src/vs/workbench/contrib/webview/browser/webviewWindowDragMonitor.ts
 +++ b/src/vs/workbench/contrib/webview/browser/webviewWindowDragMonitor.ts
 @@ -7,6 +7,7 @@ import * as DOM from '../../../../base/browser/dom.js';
@@ -2776,14 +3128,14 @@ index 923f49b2ffd..b3341962ea4 100644
  
  /**
   * Allows webviews to monitor when an element in the VS Code editor is being dragged/dropped.
-@@ -18,29 +19,37 @@ export class WebviewWindowDragMonitor extends Disposable {
+@@ -18,29 +19,53 @@ export class WebviewWindowDragMonitor extends Disposable {
  	constructor(targetWindow: CodeWindow, getWebview: () => IWebview | undefined) {
  		super();
  
 +		const tracker = libraryDragSourceFor(targetWindow);
  		const onDragStart = () => {
 -			getWebview()?.windowDidDragStart();
-+			getWebview()?.windowDidDragStart(tracker.source);
++			getWebview()?.windowDidDragStart(tracker.dockingSource);
  		};
  
 -		const onDragEnd = () => {
@@ -2803,14 +3155,33 @@ index 923f49b2ffd..b3341962ea4 100644
 +		}));
  		this._register(DOM.addDisposableListener(targetWindow, DOM.EventType.DRAG_END, onDragEnd));
 +		// Editor drop handlers may stop bubbling, so restore webviews during capture.
-+		this._register(DOM.addDisposableListener(targetWindow, DOM.EventType.DROP, onDragEnd, true));
++		this._register(DOM.addDisposableListener(targetWindow, DOM.EventType.DROP, (event: DragEvent) => {
++			if (event.dataTransfer?.types.includes('application/library-chat-file-link') && tracker.isFileLinkSource(event.clientX, event.clientY)) {
++				event.preventDefault();
++				event.stopPropagation();
++				const at = targetWindow.performance.timeOrigin + event.timeStamp;
++				targetWindow.dispatchEvent(new CustomEvent('library-webview-drag-end', { detail: at }));
++				return;
++			}
++			onDragEnd(event);
++		}, true));
  
- 		this._register(DOM.addDisposableListener(targetWindow, DOM.EventType.MOUSE_MOVE, currentEvent => {
- 			if (currentEvent.buttons === 0) {
+-		this._register(DOM.addDisposableListener(targetWindow, DOM.EventType.MOUSE_MOVE, currentEvent => {
+-			if (currentEvent.buttons === 0) {
 -				onDragEnd();
-+				onDragEnd(currentEvent);
++		const onPointerRelease = (event: MouseEvent) => {
++			if (event.buttons !== 0) { return; }
++			// Chromium can cancel a native drag without sending the source iframe a dragend.
++			if (tracker.source) {
++				const at = targetWindow.performance.timeOrigin + event.timeStamp;
++				targetWindow.dispatchEvent(new CustomEvent('library-webview-drag-end', { detail: at }));
++			} else {
++				onDragEnd(event);
  			}
- 		}));
+-		}));
++		};
++		this._register(DOM.addDisposableListener(targetWindow, DOM.EventType.MOUSE_UP, onPointerRelease, true));
++		this._register(DOM.addDisposableListener(targetWindow, DOM.EventType.MOUSE_MOVE, onPointerRelease));
  
  		this._register(DOM.addDisposableListener(targetWindow, DOM.EventType.DRAG, (event) => {
  			if (event.shiftKey) {
@@ -2819,7 +3190,7 @@ index 923f49b2ffd..b3341962ea4 100644
  			} else {
  				onDragStart();
  			}
-@@ -48,7 +57,7 @@ export class WebviewWindowDragMonitor extends Disposable {
+@@ -48,7 +73,7 @@ export class WebviewWindowDragMonitor extends Disposable {
  
  		this._register(DOM.addDisposableListener(targetWindow, DOM.EventType.DRAG_OVER, (event) => {
  			if (event.shiftKey) {
@@ -2900,6 +3271,23 @@ index 69ec6fc2aae..a22ff6bc7cd 100644
  	test('activateOnCommand', () => {
  
  		let lastEvent: string;
+diff --git a/src/vs/workbench/services/editor/browser/editorResolverService.ts b/src/vs/workbench/services/editor/browser/editorResolverService.ts
+index 780f278cd49..4da6f09e7f6 100644
+--- a/src/vs/workbench/services/editor/browser/editorResolverService.ts
++++ b/src/vs/workbench/services/editor/browser/editorResolverService.ts
+@@ -104,8 +104,10 @@ export class EditorResolverService extends Disposable implements IEditorResolver
+ 		@IUntitledTextEditorService private readonly untitledTextEditorService: IUntitledTextEditorService
+ 	) {
+ 		super();
+-		// Read in the cache on statup
+-		this.cache = new Set<string>(JSON.parse(this.storageService.get(EditorResolverService.cacheStorageID, StorageScope.PROFILE, JSON.stringify([]))));
++		// The built-in document editors are available even on the first launch, before
++		// the previous-session cache exists. Wait for registration before choosing an editor.
++		const libraryDocumentGlobs = ['*.md', '*.markdown', '*.mdown', '*.htm', '*.html', '*.pdf'];
++		this.cache = new Set<string>(JSON.parse(this.storageService.get(EditorResolverService.cacheStorageID, StorageScope.PROFILE, JSON.stringify(libraryDocumentGlobs))));
+ 		this.storageService.remove(EditorResolverService.cacheStorageID, StorageScope.PROFILE);
+ 
+ 		this._register(this.storageService.onWillSaveState(() => {
 diff --git a/src/vs/workbench/services/views/browser/viewDescriptorService.ts b/src/vs/workbench/services/views/browser/viewDescriptorService.ts
 index 4ea78aecb09..60c3badc217 100644
 --- a/src/vs/workbench/services/views/browser/viewDescriptorService.ts
@@ -3072,3 +3460,93 @@ index 90785b6ffbe..4a682a63cb0 100644
  	test('an editor dropped on an edge of a group of another part, which it cannot go to, adds no group and moves nothing', () => {
  		const { groupElement, operations } = setup({ fromOtherPart: true, moveVeto: 'Cannot leave' });
  
+diff --git a/src/vs/workbench/test/browser/parts/editor/editorGroupModel.test.ts b/src/vs/workbench/test/browser/parts/editor/editorGroupModel.test.ts
+index adf1ea1dcbe..827b3676a85 100644
+--- a/src/vs/workbench/test/browser/parts/editor/editorGroupModel.test.ts
++++ b/src/vs/workbench/test/browser/parts/editor/editorGroupModel.test.ts
+@@ -721,6 +721,21 @@ suite('EditorGroupModel', () => {
+ 		assert.strictEqual(deserialized.getEditors(EditorsOrder.MOST_RECENTLY_ACTIVE).length, 0);
+ 	});
+ 
++	test('restores the selected editor when an earlier saved tab is unavailable', function () {
++		inst().invokeFunction(accessor => Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory).start(accessor));
++		const group = createEditorGroupModel();
++		const first = input(), selected = input(), last = input();
++		for (const editor of [first, selected, last]) {
++			group.openEditor(editor, { active: true, pinned: true });
++		}
++		group.openEditor(selected, { active: true });
++		const saved = group.serialize();
++		const editors = saved.editors.map((editor, index) => index === 0 ? { ...editor, id: 'missing-serializer' } : editor);
++		const restored = createEditorGroupModel({ ...saved, editors });
++		assert.strictEqual(restored.count, 2);
++		assert.strictEqual(restored.isActive(selected), true);
++	});
++
+ 	test('group serialization (sticky editor)', function () {
+ 		inst().invokeFunction(accessor => Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory).start(accessor));
+ 		const group = createEditorGroupModel();
+diff --git a/src/vs/workbench/test/browser/parts/editor/multiEditorTabsControl.test.ts b/src/vs/workbench/test/browser/parts/editor/multiEditorTabsControl.test.ts
+index 89411bc0076..b35d3d40c69 100644
+--- a/src/vs/workbench/test/browser/parts/editor/multiEditorTabsControl.test.ts
++++ b/src/vs/workbench/test/browser/parts/editor/multiEditorTabsControl.test.ts
+@@ -21,12 +21,14 @@ import { IContextMenuDelegate } from '../../../../../base/browser/contextmenu.js
+ import { ICommandService } from '../../../../../platform/commands/common/commands.js';
+ import { IContextMenuService } from '../../../../../platform/contextview/browser/contextView.js';
+ import { ITelemetryService } from '../../../../../platform/telemetry/common/telemetry.js';
++import { IStorageService } from '../../../../../platform/storage/common/storage.js';
+ import { CapturingTelemetryService } from '../../../../../platform/telemetry/test/common/testTelemetryService.js';
+ import { ColorScheme } from '../../../../../platform/theme/common/theme.js';
+ import { IThemeService } from '../../../../../platform/theme/common/themeService.js';
+ import { TestColorTheme, TestThemeService } from '../../../../../platform/theme/test/common/testThemeService.js';
+ import { DEFAULT_EDITOR_PART_OPTIONS, IEditorGroupMenuIds, IEditorGroupsView, IEditorGroupView, IEditorPartsView } from '../../../../browser/parts/editor/editor.js';
+ import { MultiEditorTabsControl } from '../../../../browser/parts/editor/multiEditorTabsControl.js';
++import { saveTabGroups, tabGroups, tabIdentity } from '../../../../browser/parts/editor/libraryTabGroups.js';
+ import { MultiRowEditorControl } from '../../../../browser/parts/editor/multiRowEditorTabsControl.js';
+ import { EditorInputCapabilities, EditorsOrder, IEditorPartOptions, Verbosity } from '../../../../common/editor.js';
+ import { EditorGroupModel } from '../../../../common/editor/editorGroupModel.js';
+@@ -108,6 +110,7 @@ suite('MultiEditorTabsControl', () => {
+ 			override createEditorActions() { return { actions: { primary: [], secondary: [] }, onDidChange: Event.None }; }
+ 			override relayout() { }
+ 			override readonly onDidActiveEditorChange = Event.None;
++			override readonly onWillMoveEditor = Event.None;
+ 			override get disposed() { return false; }
+ 			override moveEditors(editors: { editor: EditorInput }[]): boolean {
+ 				newWindowTransfers.push(`move ${editors.map(({ editor }) => editor.getName()).join(', ')}`);
+@@ -557,6 +560,36 @@ suite('MultiEditorTabsControl', () => {
+ 		});
+ 	});
+ 
++	test('the connected outline follows the active tab when a group label precedes its fill', async () => {
++		const group = connectedGroup();
++		const storage = instantiationService.get(IStorageService);
++		const pane = String(groupView.id);
++		const key = tabIdentity(model.activeEditor!)!;
++		tabGroups(storage).assign(pane, 'outline-group', 'Research', [key]);
++		disposables.add(toDisposable(() => tabGroups(storage).remove(pane, [key])));
++		saveTabGroups(storage);
++
++		const tab = container.querySelector<HTMLElement>('.tabs-container > .tab.active')!;
++		assert(tab.firstElementChild?.classList.contains('library-tab-group'));
++		const edge = tab.querySelector<HTMLElement>('.tab-connected-edge')!;
++		edge.style.borderTopColor = 'rgb(17, 34, 51)';
++		await layoutConnectedGroup(group, 240);
++
++		const overlay = container.querySelector<HTMLElement>('.tab-connected-overflow-edge')!;
++		assert.strictEqual(overlay.style.getPropertyValue('--modern-ui-connected-tab-overflow-top-border'), 'rgb(17, 34, 51)');
++		const tabs = tab.parentElement!;
++		const fill = tab.querySelector<HTMLElement>('.tab-fill')!;
++		await layoutConnectedGroup(group, 120);
++		const positions = [0, tabs.scrollWidth - tabs.clientWidth, 0];
++		assert.ok(positions[1] > 0);
++		for (const left of positions) {
++			tabs.scrollLeft = left;
++			tabs.dispatchEvent(new mainWindow.Event(EventType.SCROLL));
++			const clipped = fill.getBoundingClientRect().left < tabs.getBoundingClientRect().left;
++			assert.strictEqual(tab.classList.contains('connected-tab-left-clipped'), clipped);
++		}
++	});
++
+ 	test('Connected active tabs cover the separator when Add Tab clips them', async () => {
+ 		const group = connectedGroup();
+ 		const root = group.closest<HTMLElement>('.monaco-workbench')!;

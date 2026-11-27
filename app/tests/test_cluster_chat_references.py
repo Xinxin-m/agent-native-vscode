@@ -1,7 +1,8 @@
 import json
+import sys
 from pathlib import Path
 import tempfile
-from unittest import TestCase
+from unittest import TestCase, skipUnless
 from unittest.mock import patch
 
 import file_service
@@ -15,7 +16,7 @@ class ClusterChatReferences(TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.data = Path(temporary.name)
+        self.data = Path(temporary.name).resolve()
         (self.data / 'chats').mkdir()
         self.service = file_service.FileService(self.data, default_root=None)
         self.reader = {
@@ -68,6 +69,59 @@ class ClusterChatReferences(TestCase):
             self.assertEqual(record['host_id'], 'mac')
             self.assertEqual(self.service.read(file_id=record['file_id']), b'local bytes')
             remote.assert_not_called()
+
+    def test_old_link_survives_library_folder_rename_and_restart(self):
+        root = self.service.register('mac', str(self.data), 'write')
+        report = self.data / 'old' / 'report.md'
+        report.parent.mkdir()
+        report.write_text('original report')
+        self.chat(f'[report]({report})')
+        self.service.rename(root['id'], 'old', 'renamed')
+        fresh_service = file_service.FileService(self.data, default_root=None)
+        record = fresh_service.reference('codex-123', str(report))
+        self.assertEqual(record['path'], str(self.data / 'renamed' / 'report.md'))
+        self.assertEqual(record['evidence_path'], str(report))
+        self.assertEqual(fresh_service.read(file_id=record['file_id']), b'original report')
+
+    @skipUnless(sys.platform == 'darwin', 'APFS file identities are Mac-specific')
+    def test_opened_link_follows_rename_outside_library(self):
+        self.service.register('mac', str(self.data), 'write')
+        original = self.data / 'old.html'
+        original.write_text('original report')
+        self.chat(f'[report]({original})')
+        self.service.reference('codex-123', str(original))
+        target = self.data / 'new.html'
+        original.rename(target)
+        self.assertEqual(self.service.reference('codex-123', str(original))['path'], str(target))
+
+    def test_missing_cluster_link_recovers_only_a_unique_match_in_its_workspace(self):
+        self.chat(f'[PDF]({self.cluster_file})')
+        moved = '/cluster/data/current/J_windows.pdf'
+        matches = ['current/J_windows.pdf']
+
+        def request(host, action, payload):
+            self.assertEqual(host, self.reader['id'])
+            if action == 'root' and payload['root'] == '/cluster/data/project/J-trend-windows':
+                raise file_service.FileError('not_found', 'Folder moved', 404)
+            if action == 'search':
+                self.assertEqual(payload['root'], '/cluster/data')
+                return {'entries': [{'path': path} for path in matches], 'truncated': False}
+            if action == 'root':
+                return {'path': payload['root']}
+            if action == 'stat':
+                return {'resource': {'path': moved, 'size': 24, 'mime': 'application/pdf'}}
+            self.fail(f'Unexpected remote operation {action}')
+
+        with patch.object(hosts, 'host_records', return_value=[self.reader]), \
+             patch.object(remote_files, 'request', side_effect=request):
+            matches.append('archive/J_windows.pdf')
+            with self.assertRaises(file_service.FileError) as error:
+                self.service.reference('codex-123', self.cluster_file)
+            self.assertEqual(error.exception.code, 'ambiguous_file')
+            matches.pop()
+            record = self.service.reference('codex-123', self.cluster_file)
+            self.assertEqual(record['path'], moved)
+            self.assertEqual(record['evidence_path'], self.cluster_file)
 
     def test_unavailable_cluster_does_not_fall_back_to_mac(self):
         self.chat(f'[PDF]({self.cluster_file})')

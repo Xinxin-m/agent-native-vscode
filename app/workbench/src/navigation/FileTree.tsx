@@ -9,6 +9,8 @@ import {refusal,moving,confirmation,parentPath,place,type DragItem,type Target,t
 import type {Resource} from '../state/types';
 import {creationLocation,initialWorkspace} from './fileCreation';
 import {dismissPopover} from './dismissPopover';
+import {useFeed} from '../notifications/feed';
+import {startPopupTimer} from '../notifications/popupTimer';
 import './file-tree.css';
 
 const keyOf=(rid:string,path:string)=>rid+'\n'+path;
@@ -79,8 +81,14 @@ export function FileTree({onContext,tab}:{onContext?:any,tab?:Tab}){
   if(row.type==='file')open(resource(row));else toggle(row.key);}
 
  const choose=(message:string,buttons:string[])=>new Promise<string>(resolve=>setAsk({message,buttons,resolve:choice=>{setAsk(null);resolve(choice);}}));
+ const popupRef=useRef<HTMLDivElement>(null),duration=useFeed().settings.duration_seconds;
+ useEffect(()=>{
+  const dismiss=()=>setToast(null);
+  window.addEventListener('library-dismiss-popups',dismiss);
+  return ()=>window.removeEventListener('library-dismiss-popups',dismiss);
+ },[]);
  const say=(text:string,token?:string,refresh?:string[],recovery?:any[])=>setToast({text,token,refresh,recovery});
- useEffect(()=>{if(toast&&!toast.recovery?.length){const t=setTimeout(()=>setToast(null),toast.token?12000:6000);return()=>clearTimeout(t);}},[toast]);
+ useEffect(()=>{if(toast&&popupRef.current&&!toast.recovery?.length)return startPopupTimer(popupRef.current,duration,()=>setToast(null));},[toast,duration]);
 
  async function drop(items:DragItem[],target:Target,copy:boolean){
   if(transferring)return;
@@ -209,7 +217,7 @@ export function FileTree({onContext,tab}:{onContext?:any,tab?:Tab}){
    {createError&&<p className="inline-error" role="alert">{createError}</p>}<div><button type="button" onClick={()=>setCreating(null)} disabled={creatingBusy}>Cancel</button><button className="primary" type="submit" disabled={creatingBusy||!newName.trim()}>{creating.type==='rename'?'Rename':creatingBusy?'Creating…':'Create'}</button></div>
   </form></div>}
   {ask&&<div className="dialog-backdrop" onPointerDown={()=>ask.resolve('Cancel')}><div className="history-dialog file-move-dialog" role="alertdialog" aria-modal="true" aria-label={ask.message} onPointerDown={e=>e.stopPropagation()} onKeyDown={e=>{if(e.key==='Escape')ask.resolve('Cancel');}}><p>{ask.message}</p><div>{ask.buttons.map((b,i)=><button key={b} autoFocus={i===0} className={i===0?'primary':''} onClick={()=>ask.resolve(b)}>{b}</button>)}</div></div></div>}
-  {toast&&<div className="toast file-move-toast" role="status"><span>{toast.text}</span>{toast.recovery?.length>0&&<details className="file-transfer-recovery"><summary>Recovery locations</summary>{toast.recovery.map((item,i)=><p key={i}>{hostLabel(item.host_id||'mac')}: {item.path}</p>)}<button className="text-button" onClick={()=>void navigator.clipboard.writeText(toast.recovery.map(item=>(item.host_id||'mac')+': '+item.path).join('\n'))}>Copy paths</button></details>}{toast.token&&<button className="text-button" onClick={()=>void undo()}>Undo</button>}<button className="icon-button" aria-label="Dismiss notification" title="Dismiss notification" onClick={()=>setToast(null)}><X size={14}/></button></div>}
+  {toast&&<div ref={popupRef} className="toast file-move-toast" role="status"><span>{toast.text}</span>{toast.recovery?.length>0&&<details className="file-transfer-recovery"><summary>Recovery locations</summary>{toast.recovery.map((item,i)=><p key={i}>{hostLabel(item.host_id||'mac')}: {item.path}</p>)}<button className="text-button" onClick={()=>void navigator.clipboard.writeText(toast.recovery.map(item=>(item.host_id||'mac')+': '+item.path).join('\n'))}>Copy paths</button></details>}{toast.token&&<button className="text-button" onClick={()=>void undo()}>Undo</button>}<button className="icon-button" aria-label="Dismiss all notifications" title="Dismiss all notifications" onClick={()=>window.dispatchEvent(new Event('library-dismiss-popups'))}><X size={14}/></button></div>}
  </>;
 }
 

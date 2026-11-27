@@ -1,5 +1,5 @@
 (function(root){'use strict';
-const items=[['reference','Copy reference for an agent'],['session_id','Copy session ID'],['transcript_path','Copy transcript path'],['resume_command','Copy resume command']];let dismiss;
+const items=[['transcript_path','Copy Path'],['reference','Copy reference for an agent'],['session_id','Copy session ID'],['resume_command','Copy resume command']];let dismiss;
 function open(event,key,options){if(!key)return;event.preventDefault();event.stopPropagation();dismiss?.();const menu=document.createElement('div');menu.className='session-reference-menu';menu.setAttribute('role','menu');menu.setAttribute('aria-label','Session reference');const previous=document.activeElement;document.body.append(menu);
  const close=()=>{menu.remove();document.removeEventListener('pointerdown',outside,true);document.removeEventListener('keydown',keydown,true);window.removeEventListener('blur',close);if(dismiss===close)dismiss=undefined};
  const outside=e=>{if(!menu.contains(e.target))close()};const keydown=e=>{if(e.key==='Escape'){e.preventDefault();close();previous?.focus?.({preventScroll:true})}if(['ArrowUp','ArrowDown'].includes(e.key)){e.preventDefault();const buttons=[...menu.querySelectorAll('button')],index=buttons.indexOf(document.activeElement);buttons[(index+(e.key==='ArrowDown'?1:-1)+buttons.length)%buttons.length]?.focus()}};dismiss=close;

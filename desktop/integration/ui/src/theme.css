@@ -48,7 +48,7 @@
 :root[data-theme=dark]{--user-bubble:#2d2d31;--ink:#ececee;--muted:#a3a3a9;--panel:#232325;--paper:#1e1e20;--rail:#1b1b1d;--line:#323236;--hover:#2c2c2f;--accent:#78b2ff;--accent-soft:#22324a;--bar:#78b2ff;--status-wait:#78b2ff;--status-new:#5ccf8a;--status-fail:#ff6b66}
 .mk-slot{display:grid;place-items:center;width:28px;flex:none;align-self:stretch}
 .mk{display:inline-block;flex:none;width:8px;height:8px;border-radius:50%}
-.mk.wait{background:var(--status-wait)}.mk.new{background:var(--status-new)}.mk.fail{background:var(--status-fail)}
+.mk.wait{background:var(--status-wait)}.mk.new{background:var(--status-new)}.mk.fail{background:var(--status-fail)}.mk.stall{border:1.5px solid var(--accent)}
 /* Running: the production turning circle (8 px, accent track at 22 percent, 0.8 s). */
 .mk.work{box-sizing:border-box;border-radius:50%;border:1.5px solid color-mix(in srgb,var(--accent) 22%,transparent);border-top-color:var(--accent);animation:mk-spin .8s linear infinite}
 @keyframes mk-spin{to{transform:rotate(360deg)}}

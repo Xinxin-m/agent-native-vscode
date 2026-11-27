@@ -3,7 +3,7 @@
  const normalized=text=>String(text||'').replace(/\s+/g,' ').trim();
  function appendRecovery(current,message){if(!message||current===message)return current;return current?current+'\n\n'+message:message;}
  // Consume transcript turns once, bounded by the send time so an old identical prompt cannot hide a new one.
- function unrecorded(turns,messages,runStart){const used=new Set();return messages.filter(message=>{const sent=Date.parse(message.sentAt||''),from=Number.isFinite(sent)?sent-60000:runStart-1000;const i=turns.findIndex((turn,j)=>!used.has(j)&&turn.role==='user'&&normalized(turn.text)===normalized(message.text)&&!(Date.parse(turn.ts)<from));if(i<0)return true;used.add(i);return false;});}
+ function unrecorded(turns,messages,runStart){const used=new Set();return messages.filter(message=>{const sent=Date.parse(message.sentAt||''),from=Number.isFinite(sent)?sent-60000:runStart-1000;const i=turns.findIndex((turn,j)=>!used.has(j)&&turn.role==='user'&&(normalized(turn.text)===normalized(message.text)||(message.claudeRunPrompt&&normalized(String(turn.text||'').replace(/^\s*\/compact[^\S\r\n]*\r?\n/,''))===normalized(message.text)))&&!(Date.parse(turn.ts)<from));if(i<0)return true;used.add(i);return false;});}
  // What the run received after its prompt, in order, one entry per message: direct steers, queued
  // messages sent with Steer now (queue event and receipt are one message) and queued messages
  // delivered at a turn end. Same rule as web/sent-echo.js.
@@ -27,7 +27,7 @@
  function historyTurns(state){
   const rs=state.run,events=rs?.events||[],turns=[...(state.chat?.turns||[])],run=rs?.run||{};
   const messages=[];
-  if(run.message)messages.push({text:run.message,sentAt:run.created_at||run.started_at});
+  if(run.message)messages.push({text:run.message,sentAt:run.created_at||run.started_at,claudeRunPrompt:run.provider==='claude'});
   messages.push(...sentFromEvents(events));
   for(const message of unrecorded(turns,messages,Date.parse(run.created_at||run.started_at||'')||0))turns.push({role:'user',text:message.text});
   for(const message of state.steers||[])turns.push({role:'user',text:message.message,label:message.label});

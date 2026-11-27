@@ -17,3 +17,4 @@ accounts.DATA = ROOT
 accounts.ACCOUNTS_FILE = os.path.join(ROOT, 'accounts.json')
 accounts.CONFIG_FILE = os.path.join(ROOT, 'config.json')
 accounts.BACKUPS = os.path.join(ROOT, 'account-backups')
+accounts.PROFILE_ROOTS = {'claude': os.path.join(ROOT, 'claude-profiles'), 'codex': os.path.join(ROOT, 'codex-profiles')}

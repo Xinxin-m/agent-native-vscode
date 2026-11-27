@@ -160,13 +160,17 @@
       },
       {
         "command": "library.copyChat.transcriptPath",
-        "title": "Copy transcript path",
+        "title": "Copy Path",
         "enablement": "libraryChatHasIdentity"
       },
       {
         "command": "library.copyChat.resumeCommand",
         "title": "Copy resume command",
         "enablement": "libraryChatHasIdentity"
+      },
+      {
+        "command": "library.openTabInBrowser",
+        "title": "Open in Default Browser"
       },
       {
         "command": "library.newFile",
@@ -227,6 +231,11 @@
         }
       ],
       "editor/title/context": [
+        {
+          "command": "library.openTabInBrowser",
+          "when": "resourceScheme =~ /^(file|library-file|library-reference)$/ && resourceExtname =~ /\\.(html?|mht(ml)?|pdf|svg|png|jpe?g|gif|webp)$/i",
+          "group": "1_open@4"
+        },
         {
           "command": "library.createTabGroup",
           "group": "9_library_groups"
@@ -382,6 +391,9 @@
           },
           {
             "filenamePattern": "*.markdown"
+          },
+          {
+            "filenamePattern": "*.mdown"
           }
         ],
         "priority": "default"

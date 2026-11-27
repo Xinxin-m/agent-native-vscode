@@ -46,3 +46,9 @@ Run `pnpm run compile-client` in `vscode/` before the extension tests; their nat
 - `python3 integration/qa/test_install_guard.py`
 
 These source tests complement native interaction checks. They do not prove provider authentication, remote write support or the state of a particular user's open app. Official proprietary extensions and Microsoft services have separate compatibility requirements.
+
+## Install after agents stop
+
+Run `python3 integration/idle_install.py enable` once on the Mac. After signing and verifying a release in its own directory, queue it with `python3 integration/idle_install.py queue "/absolute/path/Library Code.app" REVIEWED_BUNDLE_SHA256 REVIEWED_EXTENSION_SOURCE_HASH`. The launch agent checks once a minute. It checks the running service, older run journals and the fresh session inventory, then invokes the same guarded installer. Active or unattributed agents defer installation. Read `output/idle-install/pending.json` for the current reason and `last-install.json` for the installation receipt.
+
+For a release that also changes the running Python backend, add `--refresh-backend` when queueing it. The hook records the backend source hash, waits for the same idle checks, and signals the launchd service once. It verifies the replacement service before proceeding with the desktop install.

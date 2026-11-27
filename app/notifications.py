@@ -32,9 +32,12 @@ BUSY = ('idle', '')
 APPROVALS = (('accept', 'Allow'), ('acceptForSession', 'Allow for this session'), ('decline', 'Deny'))
 NOTICE_TITLES = {'usage_high': 'Usage is high', 'limit_reached': 'Usage limit reached',
                  'rate_limited': 'Rate limited', 'auth_expired': 'Sign-in expired',
-                 'not_logged_in': 'Not signed in', 'login_expiring': 'Sign-in expiring soon'}
+                 'not_logged_in': 'Not signed in', 'login_expiring': 'Sign-in expiring soon',
+                 'account_switch': 'Moving work to another account', 'pool_usage': 'Pool account nearly used up',
+                 'pool_switch': 'Pool moved to another account', 'provider_switch': 'Every account is at its limit'}
+BANNER_KINDS = ('usage_high', 'account_switch', 'pool_usage', 'pool_switch')  # a macOS banner without needing an answer
 WINDOW_TITLES = {'7d': 'Weekly limit reached', '5h': 'Session limit reached', 'credits': 'Credits used up'}
-RECOVERY_KINDS = ('limit_reached', 'rate_limited', 'auth_expired', 'not_logged_in', 'other')
+RECOVERY_KINDS = ('limit_reached', 'rate_limited', 'auth_expired', 'not_logged_in', 'other', 'provider_switch')
 _FILES = {}
 _STORES = {}
 _CACHE = {'at': 0, 'value': None}
@@ -178,7 +181,7 @@ def _live_status(row, now):
 
 def _failed_run(run_id):
     import broker
-    return broker.instance().store.get(run_id)
+    return broker.observed_run(run_id)
 
 
 def _recover(body):
@@ -360,8 +363,8 @@ def _recovery(n, rows, by_id):
         return [], {}
     account = by_id.get(n.get('account_id'))
     aid = str(n.get('account_id') or '')
-    provider = (account or {}).get('tool') or (aid.partition('unattributed-')[2] if aid.startswith('unattributed-')
-                                               else (key or '').split('-', 1)[0])
+    provider = n.get('provider') or (account or {}).get('tool') or (aid.partition('unattributed-')[2] if aid.startswith('unattributed-')
+                                                                   else (key or '').split('-', 1)[0])
     if provider not in ('claude', 'codex'):
         return [], {}
     remote = False
@@ -370,7 +373,7 @@ def _recovery(n, rows, by_id):
             run = _failed_run(run_id)
         except Exception:
             run = None
-        if run and run.get('status') != 'failed':
+        if run and (run.get('status') != 'failed' or (run.get('provider_switch') or {}).get('status') == 'continued'):
             return [], {}
         remote = bool(run) and (run.get('host_id') or 'mac') not in ('mac', 'local')
     options, actions = [], {}
@@ -378,6 +381,10 @@ def _recovery(n, rows, by_id):
     def add(label, **action):
         options.append(label)
         actions[label] = action
+    target = 'claude' if provider == 'codex' else 'codex'
+    if kind == 'provider_switch':
+        add('Continue in ' + target.title(), action='handoff', provider=target)
+        return options, {'ref': {'id': run_id} if run_id else {'key': key}, 'actions': actions}
     auth = kind in ('auth_expired', 'not_logged_in')
     if auth and not (account and account.get('logged_in')):
         add('Sign in again', action='login')
@@ -389,8 +396,7 @@ def _recovery(n, rows, by_id):
                 if other.get('tool') == provider and other['id'] != n.get('account_id') and not other.get('duplicate_of') \
                         and other.get('logged_in') and other.get('email') and not other.get('disabled') and _has_capacity(other):
                     add('Continue on ' + _account_name(other, rows), action='account', account_id=other['id'])
-        target = 'claude' if provider == 'codex' else 'codex'
-        add('Move to ' + target.title(), action='handoff', provider=target)
+        add('Continue in ' + target.title(), action='handoff', provider=target)
     return options, {'ref': {'id': run_id} if run_id else {'key': key}, 'actions': actions}
 
 
@@ -431,7 +437,8 @@ def _app_items(now, rows):
         item = _item('notice:' + n['key'], 'app', n.get('kind') or 'other', _app_title(n), n.get('first_seen') or now,
                      body=n.get('message') or '', chat_key=key, chat_title=_chat_title(key) if key else None,
                      state='archived' if archived else 'open', seen='read_at' in n, shown='shown_at' in n,
-                     account_id=n.get('account_id'), options=options, needs_answer=bool(options))
+                     account_id=n.get('account_id'), options=options, needs_answer=bool(options),
+                     banner=n.get('kind') in BANNER_KINDS)
         if n.get('run_id'):
             item['run_id'] = n['run_id']
         items.append(item)

@@ -1,4 +1,4 @@
-"""On-demand read-only SSH file helper. No remote install, scheduler or project code."""
+"""On-demand scoped SSH file helper. No remote install, scheduler or project code."""
 import base64
 import json
 import re
@@ -7,16 +7,16 @@ import subprocess
 
 import file_service as fs
 
-BOOTSTRAP = "import sys; exec(compile(sys.stdin.read(), '<workbench-read-only>', 'exec'))"
-# The fixed helper contains only stdlib filesystem reads. Request data is passed
+BOOTSTRAP = "import sys; exec(compile(sys.stdin.read(), '<workbench-files>', 'exec'))"
+# The fixed helper uses only stdlib filesystem operations. Request data is passed
 # through stdin, never interpolated into a remote shell command.
 HELPER = r'''
-import base64, hashlib, json, mimetypes, os, stat, time
+import base64, hashlib, json, mimetypes, os, stat, time, uuid
 
 def perform(request):
     operation=request['operation']
-    if operation not in ('root','list','stat','read','search','search2'):
-        return {'ok':False,'code':'read_only','error':'Only root/list/stat/read/search are supported','status':403}
+    if operation not in ('root','list','stat','read','search','search2','save_document'):
+        return {'ok':False,'code':'read_only','error':'Unsupported remote file operation','status':403}
     root=request.get('root')
     if not isinstance(root,str) or not root.startswith('/') or '\x00' in root:
         raise ValueError('An absolute remote root is required')
@@ -45,6 +45,10 @@ def perform(request):
         if operation=='search':
             query=request.get('query')
             if not isinstance(query,str) or not query.strip() or len(query)>200: raise ValueError('Invalid filename query')
+            relocation=request.get('relocation') is True
+            identity=request.get('identity') if relocation else None
+            if identity is not None and (not isinstance(identity,list) or len(identity)!=4 or any(type(n) is not int for n in identity)):
+                raise ValueError('Invalid file identity')
             pending=[[]]; entries=[]; scanned=0; deadline=time.monotonic()+2; truncated=False
             while pending:
                 current=pending.pop()
@@ -62,11 +66,16 @@ def perform(request):
                             if scanned>=20000 or time.monotonic()>deadline:
                                 truncated=True; break
                             if item.is_dir(follow_symlinks=False):
+                                if relocation and (item.name.startswith('.') or item.name in ('node_modules','__pycache__')):
+                                    continue
                                 if len(current)>=32: truncated=True
                                 else: pending.append(current+[item.name])
-                            elif item.is_file(follow_symlinks=False) and query.casefold() in item.name.casefold():
+                            elif (item.name==query if relocation else query.casefold() in item.name.casefold()) or (identity and item.inode()==identity[1]):
+                                if not item.is_file(follow_symlinks=False): continue
                                 info=item.stat(follow_symlinks=False)
-                                entries.append({'name':item.name,'path':'/'.join(components+current+[item.name]),'type':'file','size':info.st_size,'mime':mimetypes.guess_type(item.name)[0] or 'application/octet-stream'})
+                                verified=identity==[info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns]
+                                if relocation and item.name!=query and not verified: continue
+                                entries.append({'name':item.name,'path':'/'.join(components+current+[item.name]),'type':'file','size':info.st_size,'mime':mimetypes.guess_type(item.name)[0] or 'application/octet-stream',**({'identity_match':True} if verified else {})})
                                 if len(entries)>=100: truncated=True; break
                 except OSError:
                     truncated=True
@@ -85,7 +94,7 @@ def perform(request):
         descriptor=os.open(components[-1],os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=directory)
         descriptors.append(descriptor)
         info=os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode): raise ValueError('Only regular files may be read')
+        if not stat.S_ISREG(info.st_mode): raise ValueError('Only regular files may be opened')
         if operation=='read':
             offset=int(request.get('offset',0))
             length=int(request.get('length',64*1024*1024))
@@ -113,8 +122,44 @@ def perform(request):
                 raw.decode(encoding)
         except UnicodeDecodeError: encoding=None
         version=hashlib.sha256(('%s:%s:%s:%s:'%(info.st_dev,info.st_ino,info.st_mtime_ns,info.st_size)).encode()+raw).hexdigest()
+        name=components[-1]
+        document_editable=bool(encoding and name.lower().endswith(('.md','.markdown','.mdown','.html','.htm'))
+                               and os.access(name,os.W_OK,dir_fd=directory,follow_symlinks=False)
+                               and os.access('.',os.W_OK,dir_fd=directory))
+        if operation=='save_document':
+            if not document_editable:
+                return {'ok':False,'code':'read_only','error':'This rendered document is read-only','status':403}
+            if version!=request.get('base_version'):
+                return {'ok':False,'code':'version_conflict','error':'File changed on disk; compare or reload before saving','status':409}
+            prior=raw.decode(encoding)
+            text=request.get('text')
+            if not isinstance(text,str) or '\0' in text: raise ValueError('Invalid text')
+            if '\r\n' in prior and prior.count('\r\n')==prior.count('\n'):
+                text=text.replace('\r\n','\n').replace('\n','\r\n')
+            output=text.encode(encoding)
+            if len(output)>5*1024*1024:
+                return {'ok':False,'code':'too_large','error':'Text exceeds the 5 MiB save limit','status':413}
+            if output==raw:return {'ok':True}
+            tmp='.workbench-'+uuid.uuid4().hex
+            fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL,stat.S_IMODE(info.st_mode),dir_fd=directory)
+            try:
+                with os.fdopen(fd,'wb') as handle:
+                    handle.write(output)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                current=os.stat(name,dir_fd=directory,follow_symlinks=False)
+                if not stat.S_ISREG(current.st_mode) or (current.st_dev,current.st_ino,current.st_mtime_ns,current.st_size)!=(info.st_dev,info.st_ino,info.st_mtime_ns,info.st_size):
+                    return {'ok':False,'code':'version_conflict','error':'File changed while saving; the buffer is retained','status':409}
+                os.replace(tmp,name,src_dir_fd=directory,dst_dir_fd=directory)
+            finally:
+                try:os.unlink(tmp,dir_fd=directory)
+                except FileNotFoundError:pass
+            return {'ok':True}
         canonical=os.path.join(root,*components)
-        return {'ok':True,'resource':{'path':canonical,'name':components[-1],'mime':mimetypes.guess_type(canonical)[0] or 'application/octet-stream','size':info.st_size,'version':version,'editable':False,'encoding':encoding,'newline':'crlf' if b'\r\n' in raw else 'lf','relative_path':'/'.join(components)}}
+        resource={'path':canonical,'name':components[-1],'mime':mimetypes.guess_type(canonical)[0] or 'application/octet-stream','size':info.st_size,'version':version,'editable':False,'document_editable':document_editable,'encoding':encoding,'newline':'crlf' if b'\r\n' in raw else 'lf','relative_path':'/'.join(components)}
+        if request.get('identity') is True:
+            resource['disk_identity']=[info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns]
+        return {'ok':True,'resource':resource}
     finally:
         for descriptor in reversed(descriptors): os.close(descriptor)
 
@@ -328,8 +373,8 @@ def data_alias(host):
 
 
 def request(host_id, operation, value):
-    if operation not in ('root','list','stat','read','search','search2'):
-        raise fs.FileError('read_only','Remote workspaces support read-only file access',403)
+    if operation not in ('root','list','stat','read','search','search2','save_document'):
+        raise fs.FileError('read_only','Unsupported remote file operation',403)
     host = host_config(host_id)
     alias = data_alias(host)
     import host_connector

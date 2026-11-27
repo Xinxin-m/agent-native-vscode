@@ -9,6 +9,7 @@ import { EditorInput } from '../../../common/editor/editorInput.js';
 import { CustomEditorInput } from '../../../contrib/customEditor/browser/customEditorInput.js';
 import { WebviewInput } from '../../../contrib/webviewPanel/browser/webviewEditorInput.js';
 import { IEditorGroupsService, IEditorGroup, GroupsOrder } from '../../../services/editor/common/editorGroupsService.js';
+import { libraryChatIdentity } from './libraryChatIdentity.js';
 import { TabGroupModel } from './libraryTabGroupModel.js';
 import { planPaneArrangement } from './libraryPaneArrangement.js';
 
@@ -23,6 +24,8 @@ export function saveTabGroups(storage: IStorageService): void {
  storage.store(STORAGE_KEY, tabGroups(storage).serialize(), StorageScope.WORKSPACE, StorageTarget.MACHINE); changed.fire();
 }
 export function tabIdentity(editor: EditorInput): string | undefined {
+ const chat = libraryChatIdentity(editor);
+ if (chat.key) return `chat:${chat.key}`;
  if (editor instanceof CustomEditorInput) {
   // An official Codex panel is a chat, keyed like the Library chat of the same thread.
   if (editor.resource.scheme === 'openai-codex') { const thread = /^\/local\/([\w-]+)$/.exec(editor.resource.path)?.[1]; return thread ? `chat:codex-${thread}` : undefined; }
@@ -61,10 +64,20 @@ CommandsRegistry.registerCommand('_library.refreshTabGroups', accessor => {
  }
  if (modified) saveTabGroups(storage); else changed.fire();
 });
-CommandsRegistry.registerCommand('_library.createTabGroup', async accessor => {
- const group = accessor.get(IEditorGroupsService).activeGroup; const quick = accessor.get(IQuickInputService); const storage = accessor.get(IStorageService);
+interface TabContext {groupId:number; editorIndex:number}
+function groupSelection(groups: IEditorGroupsService, context?: TabContext) {
+ const group=context ? groups.getGroup(context.groupId) : groups.activeGroup;
+ if (!group) return;
+ const clicked=context && group.getEditorByIndex(context.editorIndex);
+ if (context && !clicked) return;
+ return {group,editors:clicked && !group.selectedEditors.includes(clicked) ? [clicked] : [...group.selectedEditors]};
+}
+CommandsRegistry.registerCommand('_library.createTabGroup', async (accessor, context?: TabContext) => {
+ const selection=groupSelection(accessor.get(IEditorGroupsService), context);
+ if (!selection) return;
+ const group = selection.group; const quick = accessor.get(IQuickInputService); const storage = accessor.get(IStorageService);
  const editors = group.getEditors(EditorsOrder.SEQUENTIAL).filter(editor => !!tabIdentity(editor));
- const picks = editors.map(editor => ({label:editor.getName(), description:editor.getDescription(), picked:group.selectedEditors.includes(editor), editor}));
+ const picks = editors.map(editor => ({label:editor.getName(), description:editor.getDescription(), picked:selection.editors.includes(editor), editor}));
  const selected = await quick.pick(picks, {canPickMany:true, title:'Select tabs for a new group'});
  if (!selected?.length) return;
  const name = (await quick.input({title:'Name tab group', validateInput:async value => value.trim() ? undefined : 'Enter a name'}))?.trim();
@@ -72,18 +85,32 @@ CommandsRegistry.registerCommand('_library.createTabGroup', async accessor => {
  const chosen = selected.map(item => item.editor); makeContiguous(group, chosen);
  tabGroups(storage).assign(String(group.id), generateUuid(), name, chosen.map(editor => tabIdentity(editor)!).filter(Boolean)); saveTabGroups(storage);
 });
-CommandsRegistry.registerCommand('_library.addTabToGroup', async accessor => {
- const pane = accessor.get(IEditorGroupsService).activeGroup; const quick = accessor.get(IQuickInputService); const storage = accessor.get(IStorageService);
- const model = tabGroups(storage); const options = model.groups(String(pane.id)).map(group => ({label:group.name, group}));
- const selected = await quick.pick(options, {title:'Add selected tabs to a group'}); if (!selected) return;
- const keys = pane.selectedEditors.map(tabIdentity).filter((key): key is string => !!key); if (!keys.length) return;
+CommandsRegistry.registerCommand('_library.addTabToGroup', async (accessor, context?: TabContext) => {
+ const groups = accessor.get(IEditorGroupsService);
+ const quick = accessor.get(IQuickInputService);
+ const storage = accessor.get(IStorageService);
+ const selection = groupSelection(groups, context);
+ if (!selection) return;
+ const model = tabGroups(storage);
+ const options = groups.getGroups(GroupsOrder.GRID_APPEARANCE).flatMap((pane,index) =>
+  model.groups(String(pane.id)).map(group => ({label:group.name,description:`Pane ${index+1}`,group,pane})));
+ const selected = await quick.pick(options, {title:'Add selected tabs to a group'});
+ if (!selected) return;
+ const source = selection.group, target = selected.pane;
+ for (const editor of [...selection.editors]) {
+  if (source !== target && source.contains(editor)) await source.moveEditor(editor,target,{pinned:true,preserveFocus:true});
+ }
+ const keys = selection.editors.filter(editor => target.contains(editor)).map(tabIdentity).filter((key): key is string => !!key);
+ if (!keys.length) return;
  const members = new Set([...selected.group.keys, ...keys]);
- const editors = pane.getEditors(EditorsOrder.SEQUENTIAL).filter(editor => { const key = tabIdentity(editor); return !!key && members.has(key); });
- makeContiguous(pane, editors); model.assign(String(pane.id), selected.group.id, selected.group.name, keys); saveTabGroups(storage);
+ const editors = target.getEditors(EditorsOrder.SEQUENTIAL).filter(editor => { const key = tabIdentity(editor); return !!key && members.has(key); });
+ makeContiguous(target, editors); model.assign(String(target.id), selected.group.id, selected.group.name, keys); saveTabGroups(storage);
 });
-CommandsRegistry.registerCommand('_library.removeTabFromGroup', accessor => {
- const group = accessor.get(IEditorGroupsService).activeGroup; const storage = accessor.get(IStorageService);
- const keys = group.selectedEditors.map(tabIdentity).filter((key): key is string => !!key);
+CommandsRegistry.registerCommand('_library.removeTabFromGroup', (accessor, context?: TabContext) => {
+ const selection=groupSelection(accessor.get(IEditorGroupsService), context);
+ if (!selection) return;
+ const group = selection.group; const storage = accessor.get(IStorageService);
+ const keys = selection.editors.map(tabIdentity).filter((key): key is string => !!key);
  tabGroups(storage).remove(String(group.id), keys); saveTabGroups(storage);
 });
 

@@ -14,17 +14,27 @@
 .agent-map-icon:hover,.agent-map-icon:focus-visible{background:var(--hover,#0001);color:var(--ink)}
 .agent-map-scroll{overflow:auto;min-height:80px;flex:1;padding:4px 8px 10px}
 .agent-map ul{list-style:none;padding:0;margin:0}
-.agent-map-row{position:relative;display:flex;align-items:center;border-radius:5px;padding-left:calc(var(--depth,0) * 16px)}
-.agent-map-row:before{content:'';position:absolute;top:0;bottom:0;left:calc(var(--depth,0) * 16px - 9px);border-left:1px solid var(--line)}
-.agent-map-roots>li>.agent-map-row:before{display:none}
+.agent-map ul.agent-map-roots{padding:0 4px 4px}
+.agent-map-roots li{position:relative;padding-top:6px}
+.agent-map-roots ul{margin-left:clamp(8px,2vw,16px);padding-left:clamp(9px,2vw,15px)}
+.agent-map-roots ul>li::before,.agent-map-roots ul>li::after{content:'';position:absolute;left:calc(-1 * clamp(9px,2vw,15px));width:clamp(9px,2vw,15px);pointer-events:none}
+.agent-map-roots ul>li::before{top:0;height:28px;border-left:1px solid color-mix(in srgb,var(--muted) 45%,var(--line));border-bottom:1px solid color-mix(in srgb,var(--muted) 45%,var(--line));border-bottom-left-radius:4px}
+.agent-map-roots ul>li:not(:last-child)::after{top:27px;bottom:-1px;border-left:1px solid color-mix(in srgb,var(--muted) 45%,var(--line))}
+.agent-map-row,.agent-map-batch>summary{position:relative;display:flex;align-items:center;border:1px solid var(--line);border-radius:7px;background:var(--panel)}
+.agent-map-row[data-state="finished"],.agent-map-row[data-state="stopped"],.agent-map-batch>summary{color:var(--muted);background:var(--rail)}
+.agent-map-row[data-state="running"],.agent-map-row[data-state="starting"]{border-color:color-mix(in srgb,var(--accent) 55%,var(--line))}
+.agent-map-batch>summary{display:list-item;padding:9px 10px;cursor:pointer;font-size:13px}
+.agent-map-batch>summary small{margin-inline-start:8px;font-size:11px}
+.chat-tool-group .activity-collapse{display:flex;align-items:center;margin:4px 0;padding:4px 8px;border:0;border-radius:4px;color:var(--muted);background:transparent;font:inherit;font-size:12px;cursor:pointer}
+.chat-tool-group .activity-collapse:hover{background:var(--rail);color:var(--ink)}
 .agent-map-row:hover{background:var(--hover,#0000000d)}
 .agent-map-row.is-selected{background:var(--accent-soft,#2b6fd622)}
 .agent-map-node{flex:1;min-width:0;display:flex;align-items:flex-start;gap:9px;text-align:left;padding:7px 6px 7px 8px;border:0;border-radius:5px;background:none;color:inherit;cursor:pointer;font:inherit}
 .agent-map-node:focus-visible{outline:2px solid var(--accent,#3b82f6);outline-offset:-2px}
-.agent-map-node:disabled{opacity:.55;cursor:default}
+.agent-map-node:disabled{cursor:default}
 .agent-map-text{min-width:0;flex:1}
 .agent-map-node strong{display:block;font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.agent-map-node small{display:block;color:var(--muted);font-size:11px;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.agent-map-node small{display:block;color:var(--muted);font-size:11px;margin-top:2px;line-height:1.4;overflow-wrap:anywhere}
 .agent-map-more{flex:none;width:26px;height:26px;margin-right:4px;border:0;border-radius:4px;background:none;color:var(--muted);cursor:pointer;opacity:0;display:inline-flex;align-items:center;justify-content:center}
 .agent-map-row:hover .agent-map-more,.agent-map-row:focus-within .agent-map-more,.agent-map-row.is-selected .agent-map-more{opacity:1}
 .agent-map-more:hover{background:var(--hover,#0001);color:var(--ink)}
@@ -60,3 +70,5 @@
 .agent-map-prompts button:hover{background:var(--hover,#0000000d)}
 .agent-map-prompts button>span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .agent-map-prompts small{display:block;color:var(--muted);font-size:11px;margin-top:2px}
+.agent-map-settled{display:block;width:7px;height:7px;margin:5px 7px 0 6px;background:var(--muted);border-radius:50%}
+.agent-map-batch[data-active=true]>summary{color:var(--ink);border-color:color-mix(in srgb,var(--accent) 55%,var(--line))}

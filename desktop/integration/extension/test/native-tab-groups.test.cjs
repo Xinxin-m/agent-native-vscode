@@ -40,3 +40,17 @@ test('automatic regroup never steals a manual member and keeps an automatic cust
  const m=new TabGroupModel();m.assign('1','manual','Keep',['x']);m.assign('1','project:p','My name',['y']);m.toggle('1','project:p');m.replaceAutomatic('1',[{id:'project:p',name:'Catalog name',keys:['x','y']}]);
  assert.equal(m.groupFor('1','x').id,'manual');assert.equal(m.groupFor('1','y').name,'My name');assert.equal(m.groupFor('1','y').collapsed,true);
 });
+test('a renamed colored group survives membership edits, moving panes and restart',()=>{
+ const m=new TabGroupModel();
+ m.assign('left','group','Group',['chat:codex-first']);
+ m.update('left','group',{name:'Research',color:'Purple'});
+ m.assign('left','group','Research',['chat:claude-second']);
+ m.transfer('left','right','chat:claude-second');
+ const restored=new TabGroupModel(m.serialize());
+ for(const [pane,key] of [['left','chat:codex-first'],['right','chat:claude-second']]){
+  const group=restored.groupFor(pane,key);
+  assert.equal(group.name,'Research');assert.equal(group.color,'Purple');
+ }
+ restored.remove('right',['chat:claude-second']);
+ assert.equal(restored.groups('right').length,0);
+});

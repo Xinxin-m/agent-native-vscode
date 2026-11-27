@@ -60,7 +60,7 @@ test('concurrent opens create only one panel after a shared lookup miss', async 
  let release; const barrier = new Promise(resolve => { release = resolve; });
  const panels = new Map(), created = [], revealed = [];
  const vscode = { Uri: { joinPath: () => ({}) }, window: { tabGroups: { all: [{ viewColumn: 1 }], activeTabGroup: { viewColumn: 1 } }, createWebviewPanel: () => { const panel = { reveal: column => revealed.push(column) }; created.push(panel); return panel; } }, commands: { executeCommand: async () => { await barrier; return false; } }, ThemeIcon: class {} };
- const scope = { vscode, panels, preferences: { maxAutoPanes: 3 }, targetColumn: () => 1, resourceKey: r => r.kind + ':', revealExisting: (...args) => vscode.commands.executeCommand('_library.revealExisting', ...args.slice(1)), context: { extensionUri: {} }, connect() {} };
+ const scope = { preferenceWrites:{settled:Promise.resolve()},utilityDestination:require('../panes.cjs').utilityDestination, vscode, panels, preferences: { maxAutoPanes: 3,utilityPopups:false }, targetColumn: () => 1, resourceKey: r => r.kind + ':', revealExisting: (...args) => vscode.commands.executeCommand('_library.revealExisting', ...args.slice(1)), context: { extensionUri: {} }, connect() {} };
  vm.runInNewContext(src.slice(start, end) + '\nthis.open = open;', scope);
  const first = scope.open({ kind: 'settings' }), second = scope.open({ kind: 'settings' });
  release(); await Promise.all([first, second]);
@@ -78,10 +78,10 @@ test('file opening uses the configured destination only when one is not supplied
  const calls = [], group = { viewColumn: 1 };
  const folder={uri:{scheme:'file',fsPath:'/tmp',toString:()=> 'file:///tmp'},name:'tmp'};
  const vscode = { FileType:{Directory:2},workspace:{getWorkspaceFolder:()=>folder,fs:{stat:async()=>({type:1})}},window: { tabGroups: { all: [group], activeTabGroup: group } }, Uri: { file: path => ({ path,fsPath:path,scheme:'file' }) }, commands: { executeCommand: async (...args) => { calls.push(args); } } };
- const scope = { vscode,require:id=>{assert.equal(id,'./file-context.cjs');return require('../file-context.cjs');},filesTab:{rootId:uri=>uri.toString()}, fs: { stat: async () => ({ isFile: () => true }) }, path, preferences: { maxAutoPanes: 3, openDefault: 'right' }, targetColumn: () => 2, panels: new Map() };
+ const scope = { preferenceWrites:{settled:Promise.resolve()},utilityDestination:require('../panes.cjs').utilityDestination, vscode,require:id=>{assert.equal(id,'./file-context.cjs');return require('../file-context.cjs');},filesTab:{rootId:uri=>uri.toString()}, fs: { stat: async () => ({ isFile: () => true }) }, path, preferences: { maxAutoPanes: 3, openDefault: 'right' }, targetColumn: () => 2, besideFileColumn:require('../panes.cjs').besideFileColumn, panels: new Map() };
  vm.runInNewContext(src.slice(start, end) + '\nthis.open = open;', scope);
  await scope.open({ kind: 'file', path: '/tmp/a.md' });
- assert.equal(calls[0][0], 'workbench.action.newGroupRight'); assert.equal(calls[1][0], 'vscode.open');
+ assert.deepEqual(calls.map(c=>c[0]),['_library.besideFileColumn','workbench.action.newGroupRight','vscode.open']);
  calls.length = 0; await scope.open({ kind: 'file', path: '/tmp/a.md' }, 'tab');
  assert.deepEqual(calls.map(call => call[0]), ['vscode.open']);
 });

@@ -15,7 +15,8 @@ if [[ ! -f data/config.json ]]; then
 fi
 
 PORT=$(python3 -c "import json; print(json.load(open('data/config.json')).get('port', 8744))")
-URL="http://127.0.0.1:$PORT"
+ORIGIN="http://127.0.0.1:$PORT"
+URL="$ORIGIN/workbench"
 
 # Read-only project graph shares this installation's local index.
 python3 start_project_map.py
@@ -28,7 +29,7 @@ open_browser() {
 
 # Already serving -- typically the login service installed by ./install.sh
 # --service. Starting a second copy would only fail to bind the port.
-if python3 - "$URL" <<'PY' 2>/dev/null
+if python3 - "$ORIGIN" <<'PY' 2>/dev/null
 import sys, urllib.request
 urllib.request.urlopen(sys.argv[1] + "/api/revision", timeout=3).read()
 PY

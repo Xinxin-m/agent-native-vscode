@@ -132,5 +132,34 @@ class ProvenanceTests(unittest.TestCase):
         self.assertEqual(projects['assignments']['child'], 'stale')
         self.assertEqual(tree['edges'], [{'parent_key': 'root', 'child_key': 'child'}])
 
+    def test_session_tree_joins_indexed_models_and_unindexed_provider_children(self):
+        import broker
+        import session_lineage
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.write(tmp + '/child.jsonl', [
+                {'type': 'turn_context', 'payload': {'model': 'gpt-child'}},
+                {'type': 'event_msg', 'payload': {'type': 'task_started'}},
+            ])
+            index = {
+                'codex-root': {'id': 'root', 'source': 'codex', 'model_main': 'gpt-parent'},
+                'codex-done': {'id': 'done', 'source': 'codex', 'parent_key': 'codex-root', 'src_sig': [[path]]},
+            }
+            observations = [
+                {'id': 'done', 'source': 'codex', 'state': 'finished'},
+                {'id': 'pending', 'parent_id': 'root', 'source': 'codex', 'title': 'Juniper', 'state': 'waiting'},
+            ]
+            with (patch.object(session_lineage, 'DATA', tmp),
+                  patch.object(session_lineage, '_load', side_effect=lambda name, default: index if name == 'index' else default),
+                  patch.object(session_lineage, '_cached_resume', return_value={}),
+                  patch.object(broker, 'observed_subagents', return_value=observations)):
+                tree = session_lineage.session_tree(None, {'key': 'codex-root'}, None)
+                child_tree = session_lineage.session_tree(None, {'key': 'codex-done'}, None)
+        nodes = {node['key']: node for node in tree['nodes']}
+        self.assertEqual(nodes['codex-done']['state'], 'finished')
+        self.assertEqual(nodes['codex-done']['model_actual'], 'gpt-child')
+        self.assertTrue(nodes['codex-pending']['transcript_pending'])
+        self.assertEqual(tree['active_subagents'], [{'id': 'pending', 'title': 'Juniper', 'model': '', 'state': 'waiting'}])
+        self.assertEqual(child_tree['active_subagents'], [])
+
 if __name__ == '__main__':
     unittest.main()

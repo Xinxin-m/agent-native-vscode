@@ -1,3 +1,4 @@
+import {rowStatus} from '../navigation/chats';
 import {describe,it,expect} from "vitest";
 import {chatActivity} from "./activity";
 const resource:any={kind:"chat",key:"codex-a"};
@@ -15,4 +16,14 @@ describe("live activity evidence",()=>{
  it("does not animate unknown, disconnected, stopped or idle runs",()=>{for(const status of ["unknown","disconnected","stopped","remote_idle"])expect(chatActivity(resource,{},[{key:resource.key,status}]).running,status).toBe(false)});
  it("shows a waiting state for an explicit decision even without an attention record",()=>{const a=chatActivity(resource,{},[{key:resource.key,status:"waiting_input"}]);expect(a.awaiting).toBe(true);expect(a.running).toBe(false)});
  it("does not revive a terminal run from an older live observation",()=>{const now=Date.now();const a=chatActivity(resource,{},[{key:resource.key,status:"completed",finished_at:new Date(now).toISOString()}],[],{},[{chat_key:resource.key,alive:true,status:"running",observed_at:(now-5000)/1000}]);expect(a.running).toBe(false)});
+});
+
+it('gives a stalled broker run priority over the live process spinner',()=>{
+ const key='codex-s',resource={kind:'chat',key} as const;
+ const session={chat_key:key,alive:true,status:'running',observed_at:Date.now()/1000,live_status:'working'};
+ const run={key,status:'running',stalled:true};
+ const get=(r:any)=>chatActivity(resource,{chats:[{key,live_status:'working'}]},[r],[],{},[session]);
+ expect(get(run)).toMatchObject({live:'stalled',running:false});
+ expect(rowStatus(get(run).live,true)).toBe('stalled');
+ expect(get({...run,stalled:false})).toMatchObject({live:'working',running:true});
 });

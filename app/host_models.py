@@ -28,13 +28,13 @@ def validate_response(response, request):
     return response
 
 
-def _read_connector(argv):
+def _read_connector(argv, *, timeout=25):
     child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
     selector = selectors.DefaultSelector()
     data = bytearray()
     try:
         selector.register(child.stdout, selectors.EVENT_READ)
-        deadline = time.monotonic() + 25
+        deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0 or not selector.select(remaining):
@@ -122,7 +122,8 @@ def discover(host_id, provider, account_id, cwd):
             if not _REMOTE_SLOTS.acquire(blocking=False):
                 raise ValueError('Remote model discovery is busy; try again shortly')
             try:
-                result = validate_response(_read_connector(host_connector.ssh_command(current, 'models', request)), request)
+                argv = host_connector.ssh_command(current, 'models', request)
+                result = validate_response(_read_connector(argv, timeout=host_connector.ssh_timeout(current, 25)), request)
             finally:
                 _REMOTE_SLOTS.release()
             if _binding(hosts.get_host(host_id), provider, account_id) != binding:

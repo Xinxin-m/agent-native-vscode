@@ -10,17 +10,18 @@ export function sessionIdQuery(query:string){const q=String(query||'').trim().to
 export function matchesSessionId(chat:{key?:string;id?:string},query:string){const q=sessionIdQuery(query);if(!q)return false;const key=String(chat.key||'').toLowerCase().replace(/^(claude|codex)-/,''),id=String(chat.id||'').toLowerCase();return key.startsWith(q)||(!!id&&id.startsWith(q));}
 export function historyChats(chats:any[],provider:string,query:string){const needle=query.trim().toLowerCase(),byId=(c:any)=>matchesSessionId(c,query);return uniqueChats(chats).filter(c=>(byId(c)||isRootChat(c)&&!c.automation&&(!needle||[c.title,c.description,c.first_prompt].join(' ').toLowerCase().includes(needle)))&&(!provider||(c.source||c.key?.split('-')[0])===provider)).sort((a,b)=>Number(byId(b))-Number(byId(a))||String(b.ts_last).localeCompare(String(a.ts_last))).slice(0,80);}
 
-export type RowStatus='waiting'|'working'|'failed'|'new'|null;
+export type RowStatus='waiting'|'working'|'stalled'|'failed'|'new'|null;
 /** One mark per row: running (blue turning circle), waiting for her (blue dot), failed (red dot), a finished result she has not seen (green dot). Live idle has no mark. */
-/** One mark per chat (user request 2026-11-23; server: sidebar.resolve): failed > waiting > working > new. A failed chat is never also running. */
+/** One mark per chat (user request 2026-11-23; server: sidebar.resolve): failed > waiting > stalled > working > new. A failed chat is never also running. */
 export function rowStatus(live:string|null|undefined,unseen:boolean|undefined,local:{awaiting?:boolean;running?:boolean;failed?:boolean}={}):RowStatus{
  if(local.failed)return 'failed';
  if(live==='waiting'||local.awaiting)return 'waiting';
+ if(live==='stalled')return 'stalled';
  if(live==='working'||local.running)return 'working';
  if(unseen)return 'new';
  return null;
 }
-export const statusWords:Record<string,string>={waiting:'Waiting for your decision',working:'Running',failed:'Failed',new:'Finished, not seen yet'};
+export const statusWords:Record<string,string>={waiting:'Waiting for your decision',working:'Running',stalled:'Stalled · no provider updates for five minutes',failed:'Failed',new:'Finished, not seen yet'};
 /** "12 min ago" or "3 h ago" within 24 hours of the last activity, otherwise the date. */
 export function relativeTime(value:any,now=Date.now()){
  const time=typeof value==='number'?value*1000:Date.parse(value);if(!Number.isFinite(time))return '';

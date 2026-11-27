@@ -160,6 +160,10 @@ def recover(obj,body):
         return stream._jload(str(Path(stream.CHATS)/(broker.safe_id(k)+'.json')),{})
     spec=broker.prepare_run(payload,index,load,None,clean_handoff=True)
     if shared_from:spec['shared_session_from']=shared_from
+    if action=='handoff' and failure.get('kind')=='limit_reached':
+        # Continuing after a usage limit keeps the chat; it is not a fork.
+        spec['conversation_key']=payload['conversation_key']
+        spec['provider_switch_from']={'run_id':(run or {}).get('id') or '','provider':provider,'account_id':account or ''}
     spec['recovery_of']=(run or {}).get('id') or key
     new_run=obj.start(spec)
     return {'ok':True,'run':new_run,'events':obj.store.events(new_run['id'])}

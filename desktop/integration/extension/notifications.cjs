@@ -22,9 +22,14 @@ function buttonsFor(item,canAct){
 }
 
 function create({vscode,api,canAct=()=>true,every=EVERY,slow=SLOW,claimant='host-'+randomUUID(),setTimer=setTimeout,clearTimer=clearTimeout}){
- const handled=new Set();let timer,stopped=false,busy=false,old=false,shownCount;
+ const handled=new Set();let timer,stopped=false,busy=false,old=false,shownCount,popupSeconds;
  // The bell above the account icon (core globalCompositeBar.ts) shows this context key as its badge: open items (counts.open), so seen never clears it.
  const badge=n=>{if(n===shownCount)return;shownCount=n;void Promise.resolve(vscode.commands.executeCommand('setContext','library.notificationsOpen',n)).catch(()=>{});};
+ async function syncDuration(value){
+  if(!Number.isInteger(value)||value<0||value>60||value===popupSeconds)return;
+  await vscode.commands.executeCommand('setContext','library.notificationPopupSeconds',value);
+  popupSeconds=value;
+ }
  const act=body=>api('/api/notifications/act',{claimant,...body});
  const report=e=>void vscode.window.showWarningMessage(e.message||String(e));
  const openPage=()=>vscode.commands.executeCommand('library.notifications');
@@ -52,6 +57,7 @@ function create({vscode,api,canAct=()=>true,every=EVERY,slow=SLOW,claimant='host
  async function tick(){
   const value=await api('/api/notifications',undefined,{fresh:true});
   old=false;
+  await syncDuration(value.settings?.duration_seconds);
   const items=value.items||[],open=new Set(items.filter(i=>i.state==='open').map(i=>i.id));
   badge(Number(value.counts?.open??items.filter(i=>i.state==='open'&&(i.needs_answer||i.source==='app'||i.kind==='waiting')).length)||0);
   for(const id of handled)if(!open.has(id))handled.delete(id);
@@ -68,6 +74,6 @@ function create({vscode,api,canAct=()=>true,every=EVERY,slow=SLOW,claimant='host
   try{await tick();}catch(e){if(e&&e.status===404)old=true;}   // an old server has no feed: stay silent
   finally{busy=false;if(!stopped)timer=setTimer(loop,old?slow:every);}
  }
- return {start(){stopped=false;timer=setTimer(loop,0);},stop(){stopped=true;clearTimer(timer);},tick,handled};
+ return {start(){stopped=false;timer=setTimer(loop,0);},stop(){stopped=true;clearTimer(timer);},tick,handled,syncDuration};
 }
 module.exports={create,buttonsFor,message};

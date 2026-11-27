@@ -17,6 +17,16 @@ function activate(context){let panel,refreshed=0,queue=Promise.resolve(),selecte
  const enqueue=fn=>{queue=queue.then(fn).catch(e=>{error=e.message;if(e.data?.active_run_id)error+=' Another client has an active run; your draft is retained.';if(/native|owner|writer|locked/i.test(e.message))error+=' Release this thread in its original provider panel before continuing in Library. No session was stopped.';publish();});return queue;};
  async function loadCommands(){const snapshot=defaults;if(!snapshot)return;const key=[snapshot.provider,snapshot.host_id,snapshot.cwd].join('|');if(key===commandKey)return;commandKey=key;let items=[{name:'compact',insert:'/compact',description:'Free context in this native conversation',operation:'compact'}];try{const value=await api('/api/commands?provider='+encodeURIComponent(snapshot.provider)+'&host_id='+encodeURIComponent(snapshot.host_id||'mac')+'&cwd='+encodeURIComponent(snapshot.cwd||''));items=value.commands||items;}catch{commandKey='';}if(defaults===snapshot){commandList=items;publish();}}
  async function loadQueue(){try{const value=await api('/api/run/queue?key='+encodeURIComponent(selected));if(!value.queue)throw Error('Queue response is missing its state. Your draft is retained.');runQueue=value.queue;queueSupported=true;queueError='';}catch(e){if(e.status!==404){queueError='Queue unavailable: '+e.message;return;}runQueue=null;queueSupported=false;queueError='';}}
+ let treeRead;
+ async function refreshTree(force=false){
+  const key=nativeKey||selected;
+  if(!panel?.visible||!key||(!force&&treeRead?.key===key&&Date.now()-treeRead.at<12000))return;
+  const request={key,at:Date.now()};treeRead=request;
+  try{
+   const value=await api('/api/session_tree?key='+encodeURIComponent(key));
+   if(treeRead===request&&key===(nativeKey||selected)){tree=orderTree(value);publish();}
+  }catch{if(treeRead===request&&key===(nativeKey||selected)&&tree){tree=null;publish();}}
+ }
  async function refresh(loadMetadata=true){
   try{const result=await api('/api/accounts');noticeCenter=result.notice_center;accounts=[...(result.accounts||[]),...(result.pending_accounts||[])];}catch{}
   if(!selected){publish();return;}
@@ -32,6 +42,7 @@ function activate(context){let panel,refreshed=0,queue=Promise.resolve(),selecte
   if(actualKey!==nativeKey){nativeKey=actualKey;defaults=null;chat=null;chatRevision=undefined;}
   if(!defaults&&runState){const r=runState.run;defaults={provider:r.provider,host_id:r.host_id||r.execution_host,account:r.account_id||r.account,model:r.model||'',effort:r.effort||'',cwd:r.cwd,provisional:true};}
 
+  if(panel?.visible)void refreshTree();
   await loadQueue();
   void loadCommands();
   publish(); // Live events/decisions never depend on indexing or defaults availability.
@@ -49,7 +60,7 @@ function activate(context){let panel,refreshed=0,queue=Promise.resolve(),selecte
   void loadCommands();
   publish();
  }
- async function select(key){if(typeof key!=='string'||!key||key.length>512)throw Error('Invalid conversation key');selected=key;nativeKey=key;chat=null;defaults=null;runState=null;chatRevision=undefined;chatRunStamp='';metadataNotice='';error='';tree=null;runQueue=null;queueSupported=false;queueError='';commandKey='';commandList=[];await context.globalState.update('selected',key);publish();await refresh();if(chats.find(c=>c.key===key)?.unseen&&panel?.visible&&vscode.window.state?.focused)api('/api/seen',{key,visible:true,focused:true}).catch(()=>{});}
+ async function select(key){if(typeof key!=='string'||!key||key.length>512)throw Error('Invalid conversation key');selected=key;nativeKey=key;chat=null;defaults=null;runState=null;chatRevision=undefined;chatRunStamp='';metadataNotice='';error='';tree=null;treeRead=null;runQueue=null;queueSupported=false;queueError='';commandKey='';commandList=[];await context.globalState.update('selected',key);publish();await refresh();if(chats.find(c=>c.key===key)?.unseen&&panel?.visible&&vscode.window.state?.focused)api('/api/seen',{key,visible:true,focused:true}).catch(()=>{});}
  async function list(){const data=await api('/api/state');const assignments=data.projects?.assignments||{};catalog=['claude','codex'].flatMap(p=>data.compose_options?.[p]?.models||[]);chats=(data.chats||[]).filter(visibleRoot).map(c=>({key:c.key,title:c.title||'New chat',source:c.source,failure:c.failure,ts_last:c.ts_last,unseen:c.unseen,live_status:c.live_status,failed:c.failed,id:c.id,project:assignments[c.key]||''})).sort((a,b)=>String(b.ts_last).localeCompare(String(a.ts_last)));publish();}
  async function message(m){if(!m||typeof m.type!=='string')return;
  if(m.type==='projectSuggestionsRequest'){
@@ -78,23 +89,54 @@ function activate(context){let panel,refreshed=0,queue=Promise.resolve(),selecte
  }
 if(m.type==='projectMap'){await projectMaps.open();return;}if(m.type==='ready'){await list();if(selected)await select(selected);else await refresh();return;}if(m.type==='select'){await select(m.key);return;}if(m.type==='refresh'){error='';commandKey='';try{await list();await refresh();}finally{refreshed=m.id||0;publish();}return;}if(m.type==='copy'){if(typeof m.text==='string')await vscode.env.clipboard.writeText(m.text);return;}if(m.key!==selected||!selected)return;
  if(m.type==='earlierActivity'){const id=runState?.run.id,before=runState?.truncatedBefore;if(!id||m.runId!==id||!before)return;const value=await api('/api/run?id='+encodeURIComponent(id)+'&before='+before);if(runState?.run.id===id){runState={...replay(runState,value.run,value.events),truncatedBefore:value.events_truncated_before??null};publish();}return;}
- if(m.type==='subagents'){tree=orderTree(await api('/api/session_tree?key='+encodeURIComponent(selected)));publish();return;}
+ if(m.type==='subagents'){await refreshTree(true);return;}
  if(m.type==='draft'){if(typeof m.text!=='string'||m.text.length>2000000)return;draft().text=m.text;await save();return;}
  if(m.type==='openFile'){
   if(typeof m.href==='string'&&/^https?:\/\//i.test(m.href)){await vscode.env.openExternal(vscode.Uri.parse(m.href));return;}
   const cwd=defaults?.cwd||chat?.cwd,target=fileTarget(m.href,cwd,defaults?.host_id||chat?.execution_host||'mac');
   const stat=target?await fs.stat(target.path).catch(()=>null):null;
-  // A link to a file that is not on this Mac opens in the Workbench reader, which resolves the chat's exact link on its host.
+  // The Workbench reader resolves the original chat evidence, including recorded moves.
   const remote=stat?null:clusterWorkbenchTarget(m.href,cwd,nativeKey||selected);
+  const groups=vscode.window.tabGroups,active=groups?.activeTabGroup?.viewColumn;
+  const columns=(groups?.all||[]).map(g=>g.viewColumn).sort((a,b)=>a-b);
+  const viewColumn=columns.find(c=>c>active)||columns.filter(c=>c<active).at(-1)||vscode.ViewColumn.Beside;
+  if(/\.html?$/i.test(remote?.path||target?.path||'')){
+   const resource=await api('/api/files/reference',{chat_key:nativeKey||selected,path:remote?.path||target.path}).then(value=>value.resource,()=>null);
+   if(!stat?.isFile()&&!resource)throw Error('Library could not resolve this HTML file.');
+   const base=endpoint(vscode.workspace.getConfiguration('library').get('endpoint'));
+   async function bytes(route){
+    const response=await fetch(base+route);
+    if(!response.ok)throw Error('Library could not read the preview file.');
+    if(Number(response.headers.get('content-length'))>64*1024*1024)throw Error('This preview exceeds 64 MB.');
+    return Buffer.from(await response.arrayBuffer());
+   }
+   const file=resource?.path||target.path;
+   let scope=resource?.root_id?{root_id:resource.root_id,path:resource.relative_path}:resource?.file_id?{file_id:resource.file_id}:null;
+   if(!scope?.root_id&&stat?.isFile()){
+    const roots=await api('/api/files/roots').then(result=>result.roots||[],()=>[]);
+    const root=roots.filter(r=>(r.host_id||'mac')==='mac'&&file.startsWith(r.path.replace(/\/$/,'')+'/')).sort((a,b)=>b.path.length-a.path.length)[0];
+    if(root)scope={root_id:root.root_id||root.id,path:path.relative(root.path,file)};
+   }
+   const content=scope?await bytes('/api/files/content?'+new URLSearchParams(scope)):await fs.readFile(file);
+   const name=path.basename(file),preview=await require('./artifact-preview.cjs').artifactPreview({name,target:scope,source:()=>content,api,bytes});
+   try{
+    const viewer=vscode.window.createWebviewPanel('library.htmlPreview',name,viewColumn,{enableScripts:true,localResourceRoots:[]});
+    viewer.onDidDispose(()=>preview.close());
+    viewer.webview.html='<!doctype html><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; frame-src '+preview.origin+'; style-src \'unsafe-inline\'"><style>html,body,iframe{margin:0;width:100%;height:100%;border:0;display:block}</style><iframe title="HTML preview" sandbox="allow-scripts allow-same-origin" referrerpolicy="no-referrer" src="'+preview.url.replace(/&/g,'&amp;').replace(/"/g,'&quot;')+'"></iframe>';
+   }catch(error){preview.close();throw error;}
+   return;
+  }
   if(remote){
    const base=endpoint(vscode.workspace.getConfiguration('library').get('endpoint'));
-   await vscode.commands.executeCommand('simpleBrowser.show',base+'/workbench#resource='+encodeURIComponent(JSON.stringify(remote)),{viewColumn:vscode.ViewColumn.Beside});
+   await vscode.commands.executeCommand('simpleBrowser.show',base+'/workbench#resource='+encodeURIComponent(JSON.stringify(remote)),{viewColumn});
    return;
   }
   if(!target)throw Error('Only local file links can open in this editor.');
   if(!stat?.isFile())throw Error('This link is not a regular file');
-  const doc=await vscode.workspace.openTextDocument(vscode.Uri.file(target.path));const line=Math.min(target.line-1,doc.lineCount-1);
-  await vscode.window.showTextDocument(doc,{viewColumn:vscode.ViewColumn.Beside,selection:new vscode.Range(line,0,line,0),preview:true});
+  const exact=await api('/api/files/reference',{chat_key:nativeKey||selected,path:target.path}).catch(()=>null);
+  const resolved=exact?.resource?.host_id==='mac'?exact.resource.path:target.path;
+  const doc=await vscode.workspace.openTextDocument(vscode.Uri.file(resolved));const line=Math.min(target.line-1,doc.lineCount-1);
+  await vscode.window.showTextDocument(doc,{viewColumn,selection:new vscode.Range(line,0,line,0),preview:true});
   return;
  }
  trusted();error='';if(m.type==='queueAction'){if(!['steer','edit','cancel'].includes(m.action))throw Error('Unsupported queue action');const item=runQueue?.items?.find(x=>x.id===m.itemId);if(!item)throw Error('This queued message is no longer available');const body={action:m.action,key:selected,item_id:item.id,version:m.version};if(m.action==='edit'){if(typeof m.text!=='string')throw Error('Message is required');body.message=m.text;}runQueue=(await api('/api/run/queue',body)).queue;await refresh(false);publish();return;}if(m.type==='attach'){if(!['mac','local'].includes(defaults?.host_id))throw Error('Remote attachment staging is unavailable.');const files=await vscode.window.showOpenDialog({canSelectMany:true,canSelectFiles:true,canSelectFolders:false});for(const file of files||[]){if(file.scheme!=='file')throw Error('Select a local file');const stat=await fs.stat(file.fsPath);if(!stat.isFile()||stat.size>20*1024*1024)throw Error('Attachments must be regular files of at most 20 MB');const data=await fs.readFile(file.fsPath);const result=await api('/api/attachments',{name:path.basename(file.fsPath),mime:attachmentMime(data),data_base64:data.toString('base64')});draft().attachments.push(result.attachment);await save();}publish();return;}

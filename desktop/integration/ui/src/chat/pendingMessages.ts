@@ -1,6 +1,7 @@
 // A message sent while a run works (steer, queued delivery) shows until the transcript has it.
 // The broker's `steered` receipt can arrive minutes late; the transcript decides.
 export const normalized=(text:any)=>String(text||'').replace(/\s+/g,' ').trim();
+export const compactFollowup=(text:any)=>String(text||'').replace(/^\s*\/compact[^\S\r\n]*\r?\n/,'');
 const SLACK=60_000; // clock skew between this client and a remote host's transcript
 export const sentLabel=(provider?:string)=>`Sent · ${provider==='codex'?'Codex':'Claude'} reads it when the current tool call finishes`;
 // Same message: by request id when both sides carry one (broker after 2026-11-15), else by text.
@@ -10,11 +11,11 @@ export function sameMessage(a:{requestId?:string;text?:string},b:{requestId?:str
 export const isReceipt=(event:any,s:{requestId?:string;text?:string})=>event.event==='steered'&&sameMessage({requestId:event.data?.request_id,text:event.data?.message},s);
 // Drops each message found in the transcript, one-to-one in order: a user turn with the same
 // text stamped no earlier than the send. Without a send time, the run's start bounds it.
-export function unrecorded<T extends {text:string;sentAt?:string}>(turns:any[],messages:T[],runStart:number):T[]{
+export function unrecorded<T extends {text:string;sentAt?:string;claudeRunPrompt?:boolean}>(turns:any[],messages:T[],runStart:number):T[]{
  const used=new Set<number>();
  return messages.filter(m=>{
   const text=normalized(m.text),sent=Date.parse(m.sentAt||''),from=Number.isFinite(sent)?sent-SLACK:runStart-1000;
-  const i=turns.findIndex((t,j)=>!used.has(j)&&t.role==='user'&&normalized(t.text)===text&&!(Date.parse(t.ts)<from));
+  const i=turns.findIndex((t,j)=>!used.has(j)&&t.role==='user'&&(normalized(t.text)===text||(m.claudeRunPrompt&&normalized(compactFollowup(t.text))===text))&&!(Date.parse(t.ts)<from));
   if(i<0)return true;used.add(i);return false;
  });
 }

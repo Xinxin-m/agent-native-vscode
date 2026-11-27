@@ -36,7 +36,9 @@ from pathlib import Path
 # 10: resume (context size, cache TTL, last model and effort for the resume line).
 import auth_failure
 
-META_V = 10
+# 11: preserve published Codex reasoning summaries when replaying transcript history.
+# 12: retain the first meaningful task for a chat that begins with setup or a greeting.
+META_V = 12
 LINEAGE_FIELDS = ('agent_id', 'parent_agent_id', 'parent_session_id', 'parent_key',
                   'root_key', 'root_session_id', 'is_child', 'agent_label',
                   'agent_path', 'spawned_children', 'lineage_source',
@@ -610,6 +612,12 @@ def parse_codex_file(path):
                 if is_error_answer(msg):
                     turn["error"] = True
                 turns.append(turn)
+        elif t == "response_item" and pt == "reasoning":
+            summary = "\n\n".join(part["text"] for part in p.get("summary") or []
+                                  if isinstance(part, dict) and part.get("type") == "summary_text"
+                                  and isinstance(part.get("text"), str)).strip()
+            if summary:
+                turns.append({"role": "assistant", "text": summary, "ts": tsv or "", "channel": "analysis"})
         elif t == "response_item" and pt == "message":
             role = p.get("role")
             txt = ""
@@ -798,6 +806,9 @@ def content_sig(chat):
 
 
 def meta_of(chat):
+    from enrich import deterministic_title
+    task = next((title for t in chat["turns"] if t["role"] == "user" and
+                 not t.get("internal_handoff_seed") and (title := deterministic_title(t["text"]))), "")
     first_user = next((t["text"] for t in chat["turns"] if t["role"] == "user"), "")
     return {
         "key": chat["key"], "source": chat["source"], "id": chat["id"],
@@ -814,7 +825,7 @@ def meta_of(chat):
         "status": chat.get("status", "complete"),
         "attention_required": bool(chat.get("attention_required", False)),
         "n_files": len(chat["files_changed"]),
-        "first_prompt": first_user[:300],
+        "first_prompt": first_user[:300], "task_title": task,
         "src_sig": src_sig(chat["files_all"]),
         "node": chat.get("node", "mac"),
         "model_main": chat.get("model_main", ""),

@@ -16,7 +16,7 @@ function fixture(items,{trusted=true,claim=true}={}){
   calls.push([path,body]);
   if(box.error)throw box.error;
   if(body?.action==='answer'&&box.answerError)throw box.answerError;
-  if(path==='/api/notifications')return box.counts?{items:box.items,counts:box.counts}:{items:box.items};
+  if(path==='/api/notifications')return {items:box.items,counts:box.counts,settings:box.settings};
   if(body.action==='shown')return {ok:true,claimed:claim?body.ids||[body.id]:[]};
   return {ok:true};
  };
@@ -25,6 +25,15 @@ function fixture(items,{trusted=true,claim=true}={}){
  const settle=()=>new Promise(r=>setImmediate(r));
  return {poller,calls,shown,contexts,box,acts,settle};
 }
+
+test('desktop syncs notification duration even with an empty feed and preserves Keep open', async()=>{
+ const f=fixture([]);
+ f.box.settings={duration_seconds:4};await f.poller.tick();await f.poller.tick();
+ f.box.settings={duration_seconds:0};await f.poller.tick();
+ await f.poller.syncDuration(undefined);await f.poller.syncDuration(61);
+ assert.deepEqual(f.contexts.filter(([key])=>key==='library.notificationPopupSeconds'),
+  [['library.notificationPopupSeconds',4],['library.notificationPopupSeconds',0]]);
+});
 
 test('a pending question raises one toast with its options, Type an answer and Open', async()=>{
  const f=fixture([question]);f.box.picks=[];
@@ -165,12 +174,18 @@ test('a failed-run item offers its recovery options as toast buttons; a refused 
  assert.deepEqual(g.shown.at(-1),{kind:'warn',message:'A newer message exists in this chat.',titles:[]});
 });
 
-test('the bell opens Notifications as a tab in the active group; History is its own tab',()=>{
- const {resourceKey}=require('../panes.cjs'),host=require('node:fs').readFileSync(require('node:path').join(__dirname,'../extension.cjs'),'utf8');
+test('the bell follows the utility window preference and History keeps its own identity',()=>{
+ const {resourceKey,utilityDestination}=require('../panes.cjs'),host=require('node:fs').readFileSync(require('node:path').join(__dirname,'../extension.cjs'),'utf8');
  assert.equal(resourceKey({kind:'notifications',title:'Notifications'}),'notifications:');
  assert.equal(resourceKey({kind:'notifications',title:'History',meta:{view:'history'}}),'notifications:history');
- assert.match(host,/command\('library\.notifications',\(\)=>\{const panel=panels\.get\('notifications:'\);if\(panel\)\{panel\.reveal\(panel\.viewColumn\);return;\}return open\(\{kind:'notifications',title:'Notifications'\},'tab'\);\}\);/);
- assert.doesNotMatch(host,/ViewColumn\.Beside/);
+ assert.ok(host.includes("command('library.notifications',()=>open({kind:'notifications',title:'Notifications'},'tab'))"));
+ for(const kind of ['notifications','settings','accounts','recent','projects']){
+  assert.equal(utilityDestination(kind,'tab',undefined,{}),true);
+  assert.equal(utilityDestination(kind,undefined,undefined,{utilityPopups:false}),false);
+  assert.equal(utilityDestination(kind,'right',undefined,{}),undefined);
+  assert.equal(utilityDestination(kind,'tab',2,{}),undefined);
+ }
+ assert.equal(utilityDestination('chat','tab',undefined,{}),undefined);
 });
 test('Cmd+L opens Notifications in the secondary side bar, or hides the bar when Notifications is showing',()=>{
  const fs=require('node:fs'),path=require('node:path'),pkg=JSON.parse(fs.readFileSync(path.join(__dirname,'../package.json'),'utf8')),c=pkg.contributes;

@@ -9,7 +9,7 @@ export interface Item {
  debuggable?:boolean;debug?:null|{state:'queued'|'running'|'fixed'|'needs_review'|'needs_signin'|'needs_approval'|'failed';text?:string;at?:number;model?:string;agent_key?:string|null;review_key?:string|null};
 }
 export interface Feed{mode:'loading'|'live'|'legacy';items:Item[];counts:{open:number;unseen:number;open_agent:number;open_app:number};settings:{duration_seconds:number};warnings:string[];revision:string;error:string}
-const empty:Feed={mode:'loading',items:[],counts:{open:0,unseen:0,open_agent:0,open_app:0},settings:{duration_seconds:3},warnings:[],revision:'',error:''};
+const empty:Feed={mode:'loading',items:[],counts:{open:0,unseen:0,open_agent:0,open_app:0},settings:{duration_seconds:4},warnings:[],revision:'',error:''};
 let feed=empty,wantArchived=false,timer:ReturnType<typeof setInterval>|undefined,hiddenAt=0,busy=false,users=0;
 const listeners=new Set<()=>void>();
 const set=(next:Feed)=>{feed=next;listeners.forEach(l=>l())};
@@ -19,15 +19,15 @@ export const claimant=(()=>{try{let v=sessionStorage.getItem('library-claimant')
 function fromNotices(value:any):Feed{
  const items:Item[]=(value.notices||[]).map((n:any)=>({id:'notice:'+n.key,source:'app' as const,kind:n.kind||'other',title:n.message||'',body:'',at:n.at||n.first_seen||0,origin:'library',chat_key:n.chat_key,options:[],allow_text:false,needs_answer:false,state:n.archived_at?'archived' as const:'open' as const,answer:null,link:'',seen:Boolean(n.read_at),shown:true,account_id:n.account_id,run_id:n.run_id})).sort((a:Item,b:Item)=>b.at-a.at);
  const open=items.filter(i=>i.state==='open');
- return {mode:'legacy',items,counts:{open:open.length,unseen:open.filter(i=>!i.seen).length,open_agent:0,open_app:open.length},settings:{duration_seconds:value.settings?.duration_seconds??3},warnings:[],revision:'legacy:'+(value.notice_center?.revision||JSON.stringify(items.map(i=>[i.id,i.seen,i.state]))),error:''};
+ return {mode:'legacy',items,counts:{open:open.length,unseen:open.filter(i=>!i.seen).length,open_agent:0,open_app:open.length},settings:{duration_seconds:value.settings?.duration_seconds??4},warnings:[],revision:'legacy:'+(value.notice_center?.revision||JSON.stringify(items.map(i=>[i.id,i.seen,i.state]))),error:''};
 }
 export async function poll(force=false){
  if(busy)return;busy=true;
  try{
-  if(feed.mode==='legacy'&&!available('/api/notifications')){const next=fromNotices(await api('/api/notices'));if(force||next.revision!==feed.revision)set(next);return}
+  if(feed.mode==='legacy'&&!available('/api/notifications')){const next=fromNotices(await api('/api/notices'));if(force||next.revision!==feed.revision||next.settings.duration_seconds!==feed.settings.duration_seconds)set(next);return}
   const value=await api('/api/notifications'+(wantArchived?'?archived=1':''));
-  if(!force&&value.revision===feed.revision&&feed.mode==='live'&&!feed.error)return;
-  set({mode:'live',items:value.items||[],counts:{open:0,unseen:0,open_agent:0,open_app:0,...value.counts},settings:{duration_seconds:value.settings?.duration_seconds??3},warnings:value.warnings||[],revision:value.revision,error:''});
+  if(!force&&value.revision===feed.revision&&(value.settings?.duration_seconds??4)===feed.settings.duration_seconds&&feed.mode==='live'&&!feed.error)return;
+  set({mode:'live',items:value.items||[],counts:{open:0,unseen:0,open_agent:0,open_app:0,...value.counts},settings:{duration_seconds:value.settings?.duration_seconds??4},warnings:value.warnings||[],revision:value.revision,error:''});
  }catch(e:any){
   // An older server has no feed: build it from /api/notices (the route is tried again after a back-off).
   if(e?.status===404&&!available('/api/notifications')){busy=false;if(feed.mode!=='legacy')set({...empty,mode:'legacy'});return poll(true)}

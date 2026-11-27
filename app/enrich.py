@@ -59,7 +59,9 @@ DEFAULT_USER_CONTEXT = (
 FIRST_PROMPT = """Label AI-assistant chats for a personal chat-history dashboard. {context}
 
 Return STRICT JSON only (no prose, no code fences): an array with one object per chat:
-[{{"i": <number>, "title": "specific 4-9 word name of what the chat is for", "description": "one sentence", "tags": ["up to 6 short lowercase keywords"], "project": "<exact name from PROJECTS, or none>"}}]
+[{{"i": <number>, "title": "specific 3-8 word title; put the distinguishing subject first, then the task or outcome", "description": "one sentence", "tags": ["up to 6 short lowercase keywords"], "project": "<exact name from PROJECTS, or none>"}}]
+
+A tab shows only the first few words. Keep the named file, feature, dataset or decision that distinguishes this thread. For example, use “Codex pool sign-out isolation” or “Surge quoting hypothesis review”. Skip greetings and labels such as “Help with project”. Preserve the language of the request.
 
 PROJECTS (choose the one the chat advances; none if no project fits):
 {projects}
@@ -73,7 +75,7 @@ DAILY_PROMPT = """Update labels of AI-assistant chats for a personal dashboard. 
 
 Each chat shows its CURRENT title, tags and project, then only what is NEW since it was labelled (newest first). Change as little as possible.
 Return STRICT JSON only (no prose, no code fences): an array with one object per chat:
-[{{"i": <number>, "title": "keep" or a new 4-9 word title only if the chat's focus clearly moved, "add": ["new tags"], "drop": ["tags that no longer fit"], "project": "keep" or an exact name from PROJECTS that clearly fits better}}]
+[{{"i": <number>, "title": "keep" or a specific 3-8 word title only if the chat's focus clearly moved or its current title is generic, "add": ["new tags"], "drop": ["tags that no longer fit"], "project": "keep" or an exact name from PROJECTS that clearly fits better}}]
 
 PROJECTS:
 {projects}
@@ -152,24 +154,45 @@ _PATH = re.compile(r"(https?://\S+|(?<![\w])(~|\.{0,2})/[\w.~@%+-]*(/[\w.~@%+-]+
 _SLASH_CMD = re.compile(r"^/[\w:-]+\s*")
 
 
+_SETUP = re.compile(r"<(instructions|environment_context|skills_instructions|permissions instructions)\b[^>]*>[\s\S]*?(?:</\1>|\Z)", re.I)
+_GENERIC = re.compile(r"(?:new (?:chat|conversation)|untitled(?: chat)?|chat|continue|go ahead|please continue|yes please|thank you|hi there|hello|help me|project update|general discussion)", re.I)
+_LEAD = re.compile(r"^(?:(?:hi|hello|hey)[!,]\s*|(?:please|first[,]?)\s+|(?:can|could|would) you\s+|(?:i (?:would like|want|need)(?: you)? to|i should be able to|be able to)\s+)+", re.I)
+
+
+def generic_title(value):
+    return not value or bool(_GENERIC.fullmatch(str(value).strip(" .!?")))
+
+
+def user_task_text(text):
+    cleaned = _BLOCKS.sub(" ", _SETUP.sub(" ", str(text or "")))
+    return "\n".join(line for line in cleaned.splitlines()
+                     if not line.strip().lower().startswith("# agents.md instructions")
+                     and not _CALLER.match(line) and not _ROUTING.search(line)).strip()
+
+
 def deterministic_title(text, limit=60):
     """Succinct title from a chat's first user message, no model: caller and routing
     lines, system-reminder blocks, slash commands, code fences, paths and urls removed;
     the first sentence, cut at a word boundary within `limit` characters. '' if nothing
     readable is left."""
-    text = _FENCE.sub(" ", _BLOCKS.sub(" ", str(text or "")))
+    text = _FENCE.sub(" ", user_task_text(text))
     text = _TAGS.sub(" ", text)
     for raw in text.splitlines():
         raw = raw.strip()
-        if not raw or _CALLER.match(raw) or _ROUTING.search(raw):
+        if not raw:
             continue
         for line in re.split(r"(?<=[.!?])\s+", raw):
             if _BOILER.match(line.strip()):
                 continue
-            line = _SLASH_CMD.sub("", line.strip())
+            line = _LEAD.sub("", _SLASH_CMD.sub("", line.strip()))
+            paths = _PATH.finditer(line)
+            subject = next((os.path.basename(m.group().strip("`").rstrip("/")) for m in paths
+                            if re.search(r"\.[\w]{1,8}`?$", m.group())), "")
             line = " ".join(_PATH.sub(" ", line).split()).strip(" -*#>|:;,\"'")
+            if subject and len(line.split()) < 2:
+                line = (line + " " + subject).strip()
             line = re.sub(r"^(goal|task|context)\s*:\s*|^you are (the|a|an)\s+", "", line, flags=re.I)
-            if len(re.findall(r"[A-Za-z]{2,}", line)) < 2:
+            if generic_title(line) or (len(re.findall(r"[^\W\d_]{2,}", line, re.UNICODE)) < 2 and not re.search(r"[\u3400-\u9fff\u3040-\u30ff]{2}", line)):
                 continue
             first = line.rstrip(".!?:;, ")
             if len(first) > limit:
@@ -178,6 +201,15 @@ def deterministic_title(text, limit=60):
             first = first.rstrip(" ,;:-(")
             return first[:1].upper() + first[1:] if first else ""
     return ""
+
+
+def model_title(value):
+    """Keep new automatic labels short enough for the navigation surfaces."""
+    title = " ".join(str(value or "").split()[:9])
+    if len(title) > 60:
+        cut = title[:61].rsplit(" ", 1)
+        title = cut[0][:60]
+    return "" if generic_title(title) else title
 
 
 def _folder_title(meta, noun="Chat"):
@@ -193,8 +225,17 @@ _HANDOFF_HEADER = re.compile(
 
 
 def display_title(key, meta, generated=None, manual=None):
-    return (manual or meta.get("desktop_title") or generated or meta.get("title_seed")
-            or deterministic_title(meta.get("first_prompt")) or key)
+    if manual:
+        return manual
+    for title in (meta.get("desktop_title"), generated):
+        if not generic_title(title):
+            return title
+    seed = str(meta.get("title_seed") or "").strip()
+    prompt = str(meta.get("first_prompt") or "").strip()
+    task = meta.get("task_title") or deterministic_title(prompt)
+    if not generic_title(seed) and not (task and prompt.rstrip(".!?") == seed.rstrip(".!?")):
+        return seed
+    return task or (_folder_title(meta) if meta.get("cwd") else key)
 
 
 def _title_source(meta, index):
@@ -213,7 +254,13 @@ def _title_source(meta, index):
 
 def conversation_title(key, meta, index, labels, titles):
     """Resolve recorded handoff ancestry and keep explicit Library renames."""
-    original = display_title(key, meta, (labels.get(key) or {}).get("title"), titles.get(key))
+    def name(k, entry):
+        label = labels.get(k) or {}
+        generated = label.get("title")
+        if label.get("provisional") or label.get("fallback"):
+            generated = entry.get("task_title") or deterministic_title(entry.get("first_prompt")) or generated
+        return display_title(k, entry, generated, titles.get(k))
+    original = name(key, meta)
     if titles.get(key):
         return original
     ancestor = _title_source(meta, index)
@@ -222,7 +269,7 @@ def conversation_title(key, meta, index, labels, titles):
     while isinstance(ancestor, str) and ancestor in index and ancestor not in visited:
         visited.add(ancestor)
         source = index[ancestor]
-        inherited = display_title(ancestor, source, (labels.get(ancestor) or {}).get("title"), titles.get(ancestor))
+        inherited = name(ancestor, source)
         if titles.get(ancestor):
             break
         ancestor = _title_source(source, index)
@@ -232,8 +279,7 @@ def conversation_title(key, meta, index, labels, titles):
 
 
 def provisional(meta):
-    seed = ((meta.get("title_seed") or "").strip() or deterministic_title(meta.get("first_prompt"))
-            or _folder_title(meta))
+    seed = display_title("", meta) or _folder_title(meta)
     return {"title": _clip(seed, 70), "description": "", "keywords": [], "topic_hint": "",
             "is_ops": False, "model": "deterministic", "provisional": True,
             "content_sig": meta.get("content_sig") or ""}
@@ -302,12 +348,19 @@ def first_excerpt(meta, chat, cap, user_turns):
     """Bounded first user prompts and folder, never assistant output."""
     turns = chat.get("turns", [])
     parts = []
-    if meta.get("title_seed"):
-        parts.append("title seed: " + _clip(meta["title_seed"], 80))
+    seed = meta.get("task_title") or user_task_text(meta.get("title_seed"))
+    if seed:
+        parts.append("title seed: " + _clip(seed, 80))
     parts.append("dir: " + (os.path.basename(chat.get("cwd") or "") or "?"))
-    users = [t for t in turns if t.get("role") == "user"][:max(1, user_turns)]
-    for t in users:
-        parts.append("USER: " + _clip(t.get("text"), 700))
+    for t in turns:
+        if t.get("role") != "user" or t.get("internal_handoff_seed"):
+            continue
+        prompt = user_task_text(t.get("text"))
+        if prompt and not generic_title(prompt):
+            parts.append("USER: " + _clip(prompt, 700))
+            user_turns -= 1
+            if user_turns <= 0:
+                break
     return "\n".join(parts)[:cap]
 
 
@@ -338,10 +391,12 @@ def delta_excerpt(turns, through, cap):
     start = through if through is not None and through <= len(turns) else max(0, len(turns) - 6)
     out, used = [], 0
     for t in reversed(turns[start:]):
-        user = t.get("role") == "user"
-        if not user:
+        if t.get("role") != "user" or t.get("internal_handoff_seed"):
             continue
-        line = ("U: " if user else "A: ") + _clip(t.get("text"), 350 if user else 200)
+        prompt = user_task_text(t.get("text"))
+        if not prompt or generic_title(prompt):
+            continue
+        line = "U: " + _clip(prompt, 350)
         if used + len(line) > cap:
             if out:
                 break
@@ -534,7 +589,7 @@ class Run:
 
     def apply_first(self, key, chat, d, misc):
         project = _match_project(d.get("project"), self.proj)
-        rec = {"title": _clip(d.get("title"), 90), "description": _clip(d.get("description"), 300),
+        rec = {"title": model_title(d.get("title")) or provisional(self.index[key])["title"], "description": _clip(d.get("description"), 300),
                "keywords": [_clip(k, 30).lower() for k in (d.get("tags") or []) if _clip(k, 30)][:6],
                "topic_hint": project["name"] if project else "",
                "is_ops": bool(project and project["name"] == misc),
@@ -608,7 +663,7 @@ class Run:
 
     def apply_daily(self, key, chat, d):
         rec = self.done[key]
-        title = _clip(d.get("title"), 90)
+        title = model_title(d.get("title"))
         if title and title.lower() != "keep" and key not in self.manual_titles:
             rec["title"] = title
         drop = {_clip(k, 30).lower() for k in (d.get("drop") or [])}
