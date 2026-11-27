@@ -50,9 +50,8 @@ def atomic_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
-    with tmp.open('x') as handle:
+    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as handle:
         json.dump(value, handle, ensure_ascii=False)
-    os.chmod(tmp, 0o600)
     os.replace(tmp, path)
 
 
@@ -272,6 +271,8 @@ class FileService:
         self.data = Path(data)
         self.lock = threading.RLock()
         self.document_locks = [threading.RLock() for _ in range(32)]
+        self.observed_documents = {}
+        self.local_watches = {}
         self.refs = {}
         self.moves = {}
         self.default_root = default_root
@@ -398,14 +399,32 @@ class FileService:
             return self._raw(descriptor, info, MAX_READ)
 
     def stat(self, rid=None, path='', file_id=None, *, include_identity=False):
-        root, path = self.remote_target(rid, path, file_id)
+        remote, relative = self.remote_target(rid, path, file_id)
+        if file_id:
+            canonical = self.refs[str(file_id)]['path']
+        else:
+            root = remote or self.get_root(rid)
+            canonical = os.path.join(root['path'], *parts(relative))
+        identity = (remote['host_id'] if remote else 'mac') + ':' + canonical
+        lock = self._document_lock(identity) if is_rendered_document(canonical) else contextlib.nullcontext()
+        with lock:
+            return self._stat(rid, relative, file_id, include_identity, remote, identity)
+
+    def _stat(self, rid, path, file_id, include_identity, root, identity):
         if root and root.get('host_id') != 'mac':
             import remote_files
             parts(path)
             payload = {'root':root['path'], 'path':path}
             if include_identity:
                 payload['identity'] = True
-            resource = remote_files.request(root['host_id'], 'stat', payload)['resource']
+            if is_rendered_document(path):
+                payload['observed_version'] = self.observed_documents.get(identity, (None, False))[0]
+            result = remote_files.request(root['host_id'], 'stat', payload)
+            resource = result['resource']
+            if 'document_base64' in result:
+                raw = base64.b64decode(result['document_base64'], validate=True)
+                self._observe(identity, resource['version'], raw)
+            resource['has_previous'] = bool(resource.get('encoding') and self.observed_documents.get(identity, (None, False))[1])
             return dict(resource, host_id=root['host_id'], resource_id=root['host_id']+':'+resource['path'],root_id=rid if not file_id else None,file_id=file_id,editable=False, evidence_path=self.refs.get(str(file_id), {}).get('evidence_path') if file_id else None)
         with self.opened(rid, path, file_id) as (descriptor, info, root, components, _):
             raw = self._raw(descriptor, info, MAX_TEXT) if info.st_size <= MAX_TEXT else None
@@ -417,9 +436,18 @@ class FileService:
                 except FileError:
                     editable = False
             canonical = os.path.join(root['path'], *components)
+            current = version(info, raw)
+            previous = False
+            if encoding and is_rendered_document(canonical):
+                end = os.fstat(descriptor)
+                if info.st_mtime_ns != end.st_mtime_ns or len(raw) != end.st_size:
+                    raise FileError('version_conflict', 'Document changed while reading; renew to try again', 409)
+                previous = self._observe(identity, current, raw)
+                with self.lock:
+                    self.local_watches[canonical] = ((info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns), rid, path, file_id)
             return {'resource_id': 'mac:' + canonical, 'host_id': 'mac', 'path': canonical,
                     'name': components[-1], 'mime': mime(canonical), 'size': info.st_size,
-                    'version': version(info, raw), 'editable': editable,
+                    'version': current, 'editable': editable, 'has_previous': previous,
                     'document_editable': bool(encoding and is_rendered_document(canonical)
                                               and (root['access'] == 'write' or file_id)
                                               and os.access(canonical, os.W_OK)
@@ -715,15 +743,85 @@ class FileService:
                     atomic_json(location, comments)
             return {'previous':previous, 'previous_at':checkpoint.get('at'), 'comments':comments}
 
-    def _checkpoint(self, identity, get_original):
+    def _document_lock(self, identity):
+        key = hashlib.sha256(identity.encode()).digest()[0]
+        return self.document_locks[key % len(self.document_locks)]
+
+    def _history_path(self, identity):
         key = hashlib.sha256(identity.encode()).hexdigest()
-        location = self.data / 'file-backups' / 'previous' / (key + '.json')
-        now = time.time()
-        if now - read_json(location, {}).get('at', 0) < 3600:
+        return self.data / 'file-backups' / 'previous' / (key + '.json')
+
+    def _observe(self, identity, current_version, raw):
+        cached = self.observed_documents.get(identity)
+        if cached and cached[0] == current_version:
+            return cached[1]
+        location = self._history_path(identity)
+        history = read_json(location, {})
+        encoded = base64.b64encode(raw).decode('ascii')
+        if history.get('current') != encoded:
+            if 'current' in history:
+                history.update(content=history['current'], at=history['current_at'])
+            elif history.get('content') == encoded:
+                history.pop('content')
+                history.pop('at', None)
+            history.update(current=encoded, current_at=time.time())
+            atomic_json(location, history)
+        has_previous = 'content' in history
+        self.observed_documents[identity] = (current_version, has_previous)
+        return has_previous
+
+    def observe_session_document(self, cwd, path):
+        if not isinstance(path, str) or not is_rendered_document(path) or not os.path.isabs(cwd):
             return
-        original = get_original()
-        decode_text(original)
-        atomic_json(location, {'at':now,'content':base64.b64encode(original).decode('ascii')})
+        absolute = os.path.normpath(os.path.join(os.path.realpath(cwd), path))
+        absolute = os.path.join(os.path.realpath(os.path.dirname(absolute)), os.path.basename(absolute))
+        with self.lock:
+            roots = list(self.roots.values())
+        root = max((root for root in roots if root['host_id'] == 'mac' and within(absolute, root['path'])),
+                   key=lambda item:len(item['path']), default=None)
+        if root is not None:
+            self.stat(root['id'], os.path.relpath(absolute, root['path']))
+
+    def observe_local_changes(self):
+        # Keep previously opened local documents current, even after the tab closes.
+        with self.lock:
+            watches = list(self.local_watches.items())
+        for canonical, (fingerprint, rid, path, file_id) in watches:
+            try:
+                info = os.stat(canonical, follow_symlinks=False)
+                if fingerprint != (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns):
+                    self.stat(rid, path, file_id)
+            except (OSError, FileError):
+                continue
+
+    def watch_local_documents(self):
+        while True:
+            time.sleep(1)
+            self.observe_local_changes()
+
+    def rewind_document(self, rid, path, file_id, base_version):
+        file = self.stat(rid, path, file_id)
+        if not file.get('document_editable'):
+            raise FileError('read_only', 'This HTML or Markdown file is read-only', 403)
+        identity = file['resource_id']
+        with self._document_lock(identity):
+            if self.stat(rid, path, file_id)['version'] != base_version:
+                raise FileError('version_conflict', 'File changed on disk; renew before rewinding', 409)
+            history = read_json(self._history_path(identity), {})
+            if 'content' not in history:
+                raise FileError('no_previous', 'No previous version is available', 409)
+            original = base64.b64decode(history['content'], validate=True)
+            decode_text(original)
+            if file['host_id'] == 'mac':
+                return self._save_local(rid, path, base_version, None, file_id=file_id,
+                                        document_identity=identity, exact_bytes=original)
+            root, relative = self.remote_target(rid, path, file_id)
+            import remote_files
+            remote_files.request(root['host_id'], 'save_document', {
+                'root':root['path'], 'path':relative, 'base_version':base_version,
+                'exact_base64':history['content']
+            })
+            return self.stat(rid, path, file_id)
 
     def save_document(self, rid, path, file_id, base_version, text):
         if not isinstance(text, str) or '\x00' in text:
@@ -741,12 +839,6 @@ class FileService:
                 raise FileError('too_large', 'Text exceeds the 5 MiB save limit', 413)
             if file['version'] != base_version:
                 raise FileError('version_conflict', 'File changed on disk; compare or reload before saving', 409)
-            def original():
-                raw = self.read(rid, path, file_id)
-                if self.stat(rid, path, file_id)['version'] != base_version:
-                    raise FileError('version_conflict', 'File changed while saving; the buffer is retained', 409)
-                return raw
-            self._checkpoint(identity, original)
             import remote_files
             remote_files.request(root['host_id'], 'save_document', {
                 'root':root['path'], 'path':relative, 'base_version':base_version, 'text':text
@@ -756,21 +848,21 @@ class FileService:
     def save(self, rid, path, base_version, text):
         if self.get_root(rid).get('host_id') != 'mac':
             raise FileError('read_only', 'Remote files are read-only outside rendered document editing', 403)
+        if is_rendered_document(path):
+            return self.save_document(rid, path, None, base_version, text)
         return self._save_local(rid, path, base_version, text)
 
-    def _save_local(self, rid, path, base_version, text, *, file_id=None, document_identity=None):
+    def _save_local(self, rid, path, base_version, text, *, file_id=None, document_identity=None, exact_bytes=None):
         with self.lock, self.opened(rid, path, file_id) as (descriptor, info, root, components, parent):
             if root['access'] != 'write' and not (document_identity and file_id):
                 raise FileError('read_only', 'This root is read-only', 403)
             raw = self._raw(descriptor, info, MAX_TEXT)
             if version(info, raw) != base_version:
                 raise FileError('version_conflict', 'File changed on disk; compare or reload before saving', 409, current_version=version(info, raw))
-            output = self._encode(raw, text)
+            output = exact_bytes if exact_bytes is not None else self._encode(raw, text)
             if output == raw:
                 return self.stat(rid, path, file_id)
-            if document_identity:
-                self._checkpoint(document_identity, lambda: raw)
-            else:
+            if not document_identity:
                 backup = self.data / 'file-backups' / (str(time.time_ns()) + '-' + uuid.uuid4().hex)
                 backup.parent.mkdir(parents=True, exist_ok=True)
                 with backup.open('xb') as handle:
@@ -1059,6 +1151,7 @@ def instance():
     with _SERVICE_LOCK:
         if _SERVICE is None:
             _SERVICE = FileService(default_root=configured_default_root())
+            threading.Thread(target=_SERVICE.watch_local_documents, name='document-history', daemon=True).start()
         return _SERVICE
 
 
@@ -1142,6 +1235,13 @@ def document_save(req, query, body):
     return {'ok':True,'resource':instance().save_document(body.get('root_id'), body.get('path',''),
                                                           body.get('file_id'), body.get('base_version'),
                                                           body.get('text'))}
+
+
+@guarded
+def document_rewind(req, query, body):
+    resource = instance().rewind_document(body.get('root_id'), body.get('path', ''),
+                                         body.get('file_id'), body.get('base_version'))
+    return {'ok':True, 'resource':resource}
 
 
 @guarded
@@ -1278,7 +1378,7 @@ def remote_content(req, query, root, remote_path):
 ROUTES = {('GET','/api/files/roots'):roots,('POST','/api/files/roots'):roots,
           ('GET','/api/files/list'):listing,('GET','/api/files/search'):search,('GET','/api/files/stat'):metadata,
           ('GET','/api/files/diff'):diff,
-          ('POST','/api/files/document-save'):document_save,
+          ('POST','/api/files/document-save'):document_save,('POST','/api/files/document-rewind'):document_rewind,
           ('GET','/api/files/document-review'):document_review,('POST','/api/files/document-review'):document_review,
           ('GET','/api/files/content'):content,('HEAD','/api/files/content'):content,
           ('POST','/api/files/reference'):reference,('POST','/api/files/save'):save,

@@ -8,6 +8,15 @@ function pending(state){if(!state||terminal(state.run.status)||state.events.some
 function prepare(state,key,defaults,conversationKey=key){if(state.pending)return state.pending;const {provider,host_id,account,model,effort}=defaults;const text=state.text.trim(),goal=text.match(/^\/goal\s+([\s\S]+)$/i),remote=/^\/(?:remote-control|remote\s+control|rc)$/i.test(text);const operation=goal?'goal':remote?'remote_control':text==='/compact'?'compact':'message';state.pendingText=state.text;state.pending={request_id:randomUUID(),key,conversation_key:conversationKey,message:goal?goal[1].trim():remote?'/remote-control':state.text,operation,provider,host_id,account,model,effort,attachments:['compact','remote_control'].includes(operation)?[]:(state.attachments||[]).map(a=>a.id)};return state.pending;}
 function accepted(state){if(state.text===(state.pendingText??state.pending?.message))state.text='';const sent=new Set(state.pending?.attachments||[]);state.attachments=(state.attachments||[]).filter(a=>!sent.has(a.id));state.pending=null;delete state.pendingText;}
 function fileTarget(href,cwd,host){if(!['mac','local'].includes(host)||typeof href!=='string'||href.length>8192||/[\x00-\x1f]/.test(href))return null;try{if(href.startsWith('file:')){const u=new URL(href);if(u.hostname)return null;href=decodeURIComponent(u.pathname)+u.hash;}else if(/^[a-z][a-z0-9+.-]*:/i.test(href))return null;else href=decodeURIComponent(href);const match=href.match(/(?::(\d+)(?::\d+)?|#L(\d+))$/);const line=match?Number(match[1]||match[2]):1;if(match)href=href.slice(0,match.index);if(href.startsWith('//')||!href||(!path.isAbsolute(href)&&!path.isAbsolute(cwd||'')))return null;return{path:path.resolve(cwd||'/',href),line:Math.max(1,line)};}catch{return null;}}
+function workbenchFileLink(href,base){
+ try{
+  const u=new URL(href),origin=new URL(endpoint(base));
+  if(u.protocol!==origin.protocol||!['localhost','127.0.0.1','[::1]'].includes(u.hostname)||u.port!==origin.port||u.username||u.password||u.pathname.replace(/\/$/,'')!=='/workbench')return null;
+  const file=JSON.parse(new URLSearchParams(u.hash.slice(1)).get('resource'));
+  if(file?.kind!=='file'||typeof file.path!=='string'||!path.isAbsolute(file.path)||file.path.includes('\0'))return null;
+  return {kind:'file',path:file.path,host_id:typeof file.host_id==='string'?file.host_id:'mac',line:Math.max(1,Number(file.line)||1),file_id:typeof file.file_id==='string'?file.file_id:undefined,root_id:typeof file.root_id==='string'?file.root_id:undefined};
+ }catch{return null;}
+}
 function visibleRoot(chat){return !chat.is_child&&!chat.parent_key&&(!chat.root_key||chat.root_key===chat.key)&&!chat.automation;}
 function clusterWorkbenchTarget(href,cwd,chatKey){
  if(!chatKey)return null;
@@ -29,4 +38,4 @@ function orderTree(tree){if(!tree||!Array.isArray(tree.nodes))return tree;const 
  for(const key of sort(tree.nodes.filter(n=>!childKeys.has(n.key)).map(n=>n.key)))walk(key);
  for(const n of tree.nodes)if(!seen.has(n.key))out.push({...n,agent_status:agentStatus(n)});
  return {...tree,nodes:out};}
-module.exports={visibleRoot,orderTree,agentStatus,attachmentMime,endpoint,request,terminal,replay,pending,prepare,accepted,fileTarget,clusterWorkbenchTarget};
+module.exports={visibleRoot,orderTree,agentStatus,attachmentMime,endpoint,request,terminal,replay,pending,prepare,accepted,fileTarget,workbenchFileLink,clusterWorkbenchTarget};

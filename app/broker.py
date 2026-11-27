@@ -1693,7 +1693,7 @@ class Broker:
                     if kept:
                         st.usage, st.cost = kept  # the /compact turn reports zero usage
                     if run['provider'] == 'claude':
-                        self._claude_tools(rid, ev)
+                        self._claude_tools(rid, run, ctrl, ev)
                     if st.sid and (not st.started or st.sid != run.get('session_id')):
                         self._bind(rid, run, st.sid, ctrl)
                         st.started = True
@@ -2161,6 +2161,9 @@ class Broker:
                     # Final items are authoritative; preserve commentary and final separately.
                     self._codex_message(st, ctrl, item)
                 elif typ == 'fileChange':
+                    for change in item.get('changes') or []:
+                        if isinstance(change, dict):
+                            self._observe_document(run, change.get('path'))
                     self.store.emit(rid, 'file_change', item)
                 elif typ in ('commandExecution', 'mcpToolCall', 'dynamicToolCall', 'webSearch'):
                     self.store.emit(rid, 'tool' if method == 'item/started' else 'tool_result', dict(item, name=typ))
@@ -2370,10 +2373,30 @@ class Broker:
                 except (AttributeError, OSError, ValueError):
                     pass
 
-    def _claude_tools(self, rid, ev):
+    @staticmethod
+    def _observe_document(run, path):
+        if run.get('host_id') not in ('mac', 'local') or not isinstance(path, str):
+            return
+        import file_service
+        if file_service.is_rendered_document(path):
+            try:
+                file_service.instance().observe_session_document(run.get('cwd') or '', path)
+            except (ValueError, OSError):
+                # Tool events can describe new, removed or concurrently replaced files.
+                pass
+
+    def _claude_tools(self, rid, run, ctrl, ev):
         if ev.get('type') in ('assistant', 'user'):
             for block in (ev.get('message') or {}).get('content') or []:
                 if isinstance(block, dict) and block.get('type') in ('tool_use', 'tool_result'):
+                    paths = ctrl.setdefault('document_edit_paths', {})
+                    if block['type'] == 'tool_use' and block.get('name') in ('Edit', 'Write', 'MultiEdit'):
+                        path = (block.get('input') or {}).get('file_path')
+                        if path and block.get('id'):
+                            paths[block['id']] = path
+                            self._observe_document(run, path)
+                    elif block['type'] == 'tool_result':
+                        self._observe_document(run, paths.pop(block.get('tool_use_id'), None))
                     self.store.emit(rid, 'tool' if block['type'] == 'tool_use' else 'tool_result', block)
 
     def _claude_control(self, rid, run, ctrl, ev):

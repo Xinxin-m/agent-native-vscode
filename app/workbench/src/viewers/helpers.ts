@@ -1,6 +1,6 @@
 import type {Resource} from '../state/types';
 export type ViewerKind='markdown'|'html'|'image'|'pdf'|'source'|'unsupported';
-export interface FileRecord {resource_id?:string;file_id?:string;encoding?:string;newline?:string;host_id:string;path:string;name:string;mime:string;size:number;version:string;editable:boolean;document_editable?:boolean;root_id:string;relative_path?:string}
+export interface FileRecord {resource_id?:string;file_id?:string;encoding?:string;newline?:string;host_id:string;path:string;name:string;mime:string;size:number;version:string;editable:boolean;document_editable?:boolean;has_previous?:boolean;root_id:string;relative_path?:string}
 export function viewerKind(name:string,mime=''):ViewerKind {
  const ext=name.split('.').pop()?.toLowerCase()||'';
  if(ext==='pdf'||mime==='application/pdf')return 'pdf';
@@ -27,3 +27,13 @@ export function contentUrl(file:FileRecord,download=false){const q=new URLSearch
 export function previewAuthorized(registeredRoot:boolean,approvedScope:string,host:string,path:string){return registeredRoot||approvedScope===JSON.stringify([host,previewLocation(path).artifact_directory]);}
 
 export const fileViewIdentity=(r:Resource)=>JSON.stringify([r.host_id||'mac',r.path||r.file_id||'',r.meta?.viewId||'default']);
+
+type FileAddress=Pick<Resource,'path'|'host_id'|'root_id'|'file_id'>&{relative_path?:string};
+export function sameFile(left:FileAddress,right:FileAddress):boolean{
+ if(left.file_id&&left.file_id===right.file_id)return true;
+ const host=(value?:string)=>value==='local'?'mac':value||'mac';
+ if(host(left.host_id)!==host(right.host_id))return false;
+ if(left.path?.startsWith('/')&&left.path===right.path)return true;
+ const relative=(file:FileAddress)=>file.relative_path??(!file.path?.startsWith('/')?file.path:undefined);
+ return Boolean(left.root_id&&left.root_id===right.root_id&&relative(left)&&relative(left)===relative(right));
+}

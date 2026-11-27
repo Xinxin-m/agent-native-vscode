@@ -21,11 +21,11 @@ import {ActivityRail} from './navigation/ActivityRail';
 import {Projects} from './navigation/Projects';
 import {Recent} from './navigation/Recent';
 import {FileViewer} from './viewers/FileViewer';
-import {viewerKind} from './viewers/helpers';
 import {FilesTab} from './navigation/FileTree';
 import {followMove,deletedBy} from './navigation/fileMoves';
 import {reuseSnapshot,peerRoster} from './state/pollingSnapshots';
 import {documentKey,snapshot,resolveFile,acceptTransferredDraft,useFileDocument,moveDocument} from './viewers/documents';
+import {sameFile} from './viewers/helpers';
 import {windowIdentity,viewIdentity,filePreviewGroup,fileTargetPane,createPaneNavigation,createWindowTransfers,createNarrowPaneController,dropWorkspaceResource,findOpenChat,conversationTransferSnapshot,acceptTransferredConversation} from './state/workspace';
 import {conversationIdentity,conversations} from './state/conversations';
 import {utilityWindow,useUtilityWindows} from './open/utilityWindows';
@@ -49,7 +49,19 @@ const groupColors = [
 const ShellContext=createContext<any>(null);
 const defaultPreferences:Preferences={theme:'system',fontSize:14,lineHeight:1.65,readingWidth:780,openDefault:'right',maxAutoPanes:3,filesTabWorkspace:'ask',defaultProvider:'ask',defaultModels:{},thinking:'collapsed',toolOutput:'folded',composerMax:null,foldComposer:true,sendKey:'enter',whileWorking:'queue',openAtLatest:true,tabGroups:'manual',groupFiles:false,confirmMoves:'some',showHidden:false,liveRefresh:15};
 const load=(key:string,fallback:any)=>{try{return JSON.parse(localStorage.getItem(key)||'null')??fallback;}catch{return fallback;}};
-function Panel({params,api:panelApi}:IDockviewPanelProps){const [visible,setVisible]=useState(panelApi.isVisible);useEffect(()=>{setVisible(panelApi.isVisible);const listener=panelApi.onDidVisibilityChange(e=>setVisible(e.isVisible));return()=>listener.dispose();},[panelApi]);const {data,open,refresh,notify}=useContext(WorkbenchContext);const {menu,groupChoices}=useContext(ShellContext);const resource={...params.resource,meta:{...params.resource.meta,viewId:panelApi.id,panelVisible:visible}} as Resource;if(resource.kind==='file')return <ErrorBoundary key={panelApi.id}><FileViewer resource={resource} onNavigate={target=>{
+function findOpenFile(panels:any[],resource:Resource){
+ if(resource.kind!=='file')return;
+ return panels.find(panel=>{
+  const other=panel.params.resource;
+  if(other.kind!=='file')return false;
+  const id=documentKey(other);
+  const known=snapshot(id).file||(panel.params.resolvedFor===id&&panel.params.resolvedFile);
+  return sameFile(other,resource)||Boolean(known&&sameFile(known,resource));
+ });
+}
+function Panel({params,api:panelApi,containerApi}:IDockviewPanelProps){const [visible,setVisible]=useState(panelApi.isVisible);useEffect(()=>{setVisible(panelApi.isVisible);const listener=panelApi.onDidVisibilityChange(e=>setVisible(e.isVisible));return()=>listener.dispose();},[panelApi]);const {data,open,refresh,notify}=useContext(WorkbenchContext);const {menu,groupChoices}=useContext(ShellContext);const resource={...params.resource,meta:{...params.resource.meta,viewId:panelApi.id,panelVisible:visible}} as Resource;if(resource.kind==='file')return <ErrorBoundary key={panelApi.id}><FileViewer resource={resource} onNavigate={target=>{
+ const existing=findOpenFile(containerApi.panels,target);
+ if(existing&&existing.id!==panelApi.id){open(target,'tab');return;}
  panelApi.updateParameters({...params,resource:target});
  panelApi.setTitle(target.title||target.path?.split('/').at(-1)||'File');
  }}/></ErrorBoundary>;return <ErrorBoundary key={resourceId(resource)}>{resource.kind==='chat'?<Conversation resource={resource}/>:resource.kind==='settings'?<Settings initialTab={resource.meta?.settingsTab}/>:resource.kind==='notifications'?(resource.mode==='history'||!resource.mode&&resource.title==='History'?<NotificationsHistory/>:<NotificationsPage visible={visible}/>):resource.kind==='recent'?<Recent data={data} open={open} tabGroups={groupChoices}/>:resource.kind==='projects'?<Projects data={data} open={open} refresh={refresh} notify={notify}/>:resource.kind==='project'?<ProjectMap resource={resource} panelApi={panelApi}/>:resource.kind==='overview'?<AgentOverview/>:resource.kind==='sessions'?<SessionsView/>:resource.kind==='url'?<WebPage resource={resource}/>:resource.kind==='files'?<FilesTab params={params} panelApi={panelApi} onContext={menu}/>:<Welcome/>}</ErrorBoundary>;}
@@ -57,6 +69,15 @@ function WebPage({resource}:{resource:Resource}){return <div className="workspac
 // Reports the chats in front of her (the active tab of each pane) as seen, only while this window is visible and focused.
 function SeenReporter({dock,active,groups}:{dock:any;active:any;groups:number}){useSeenReporter(()=>(dock.current?.groups||[]).map((g:any)=>g.activePanel?.params?.resource).filter((r:any)=>r?.kind==='chat').map((r:any)=>r.key||conversations.peek(conversationIdentity(r))?.nativeKey).filter(Boolean),[active,groups]);return null;}
 function Tab(props:IDockviewPanelHeaderProps){const wb=useContext(WorkbenchContext);const {menu}=useContext(ShellContext);const r=props.params.resource as Resource;const documentState=useFileDocument(r),activity=useChatActivity(r);useEffect(()=>{if(r.kind==='file'&&documentState.dirty&&props.params.preview)props.api.updateParameters({...props.params,preview:false});},[documentState.dirty,props.params.preview]);const [title,setTitle]=useState(props.api.title);useEffect(()=>props.api.onDidTitleChange(e=>setTitle(e.title)).dispose,[props.api]);
+ // Keep the resolved address with the saved tab so lazy restoration can focus an exact-file link.
+ useEffect(()=>{
+  const file=documentState.file;
+  if(r.kind!=='file'||!file)return;
+  const resolvedFor=documentKey(r),{path,root_id,host_id,file_id,relative_path}=file;
+  const resolvedFile={path,root_id,host_id,file_id,relative_path};
+  if(props.params.resolvedFor!==resolvedFor||JSON.stringify(props.params.resolvedFile)!==JSON.stringify(resolvedFile))
+   props.api.updateParameters({...props.params,resolvedFor,resolvedFile});
+ },[documentState.file,r.path,r.file_id,r.host_id,r.root_id]);
  const nativeKey=r.kind==='chat'?r.key||conversations.peek(conversationIdentity(r))?.nativeKey:'',listed=nativeKey?(wb.data?.chats||[]).find((c:any)=>c.key===nativeKey):null,fullTitle=listed?.title||title||(r.kind==='chat'?'New chat':''),shownTitle=r.kind==='chat'?cutTitle(fullTitle):title,status=rowStatus(activity.live,activity.unread,{...activity,failed:activity.failed||activity.recovery});
  // The chat's title from the state (the field the sidebar row shows) is the panel's title too, so pane lists follow a rename.
  useEffect(()=>{if(listed?.title&&listed.title!==props.api.title)props.api.setTitle(listed.title)},[listed?.title]);
@@ -168,11 +189,17 @@ export default function App(){
    if(m.type==='open'&&m.target===windowId.current){try{const opened=openRef.current?.(m.resource,'tab');if(!opened)throw Error('The destination workspace is not ready.');if(m.conversationDraft)acceptTransferredConversation(m.resource,m.conversationDraft);if(m.documentDraft)await acceptTransferredDraft(m.resource,m.documentDraft);if(m.placement){const group=dock.current?.groups.find(g=>g.id===m.placement.groupId);opened.api.moveTo({group,position:m.placement.position,index:m.placement.index});}window.focus();bc.postMessage({type:'ack',id:windowId.current,target:m.id,request_id:m.request_id,ok:true});}catch(e){bc.postMessage({type:'ack',id:windowId.current,target:m.id,request_id:m.request_id,ok:false,error:(e as Error).message});}}
   };announce();const timer=setInterval(announce,5000);return()=>{clearInterval(timer);coordinator.dispose();bc.close();};
  },[notify]);
+ useEffect(()=>{
+  const openHash=()=>{const resource=decodeResource(location.hash);if(resource)openRef.current?.(resource,'tab');};
+  window.addEventListener('hashchange',openHash);
+  return()=>window.removeEventListener('hashchange',openHash);
+ },[]);
  const open=useCallback((resource:Resource,destination?:Destination,groupId?:string)=>{if(matchMedia('(max-width:640px)').matches)setSidebar(false);
    if(matchMedia('(max-width:640px)').matches)setSidebar(false);
    const r={...resource};if(r.kind==='url'&&!/^https?:\/\//i.test(r.url||'')){notify('Only HTTP and HTTPS web pages can be opened.');return;}if(r.kind==='chat'&&!r.key&&!r.draftId)r.draftId=r.runId?'run-'+r.runId:crypto.randomUUID();
    if(r.kind==='files'&&r.root_id===undefined){const current=dock.current?.activePanel?.params?.resource;r.root_id=preferences.filesTabWorkspace==='all'?'all':current?.root_id||localStorage.getItem('library.files.workspace')||'';if(current?.kind==='file')r.meta={...r.meta,filesPath:current.path,filesHost:current.host_id||'mac'};}
-   const target=destination||(['file','url'].includes(r.kind)?preferences.openDefault:'tab');
+   const existingFile=findOpenFile(dock.current?.panels||[],r);
+   const target=(!destination&&existingFile?'tab':destination)||(['file','url'].includes(r.kind)?preferences.openDefault:'tab');
    const requestedWindow=crypto.randomUUID();const url=r.kind==='url'?r.url:location.origin+location.pathname+'?window='+requestedWindow+encodeResource(r);
    if(['browser-tab','browser-window','browser-current'].includes(target)){
      if(target==='browser-current'){location.href=url;return;}
@@ -199,7 +226,6 @@ export default function App(){
    const apiDock=dock.current;if(!apiDock)return;
    const id=viewIdentity(r),group=apiDock.groups.find(g=>g.id===groupId)||apiDock.activeGroup;
    const unused=target==='tab'&&isPlainNewChat(r)&&group?unusedNewChat(group.panels,p=>conversations.get(conversationIdentity(p))):undefined;if(unused){unused.api.setActive();return unused;}
-   const isPdf=r.kind==='file'&&viewerKind(r.path||r.title||'')==='pdf';
    const defaultPreview=!destination&&r.kind==='file'&&['right','below','preview'].includes(target);
    let destinationGroup=group,position:any=group?{referenceGroup:group.id,direction:'within'}:undefined;
    if(defaultPreview&&target==='right'&&group){
@@ -214,8 +240,20 @@ export default function App(){
     position=destinationGroup?{referenceGroup:destinationGroup.id,direction:'within'}:{referenceGroup:group.id,direction:target};
    }else if(target==='right'||target==='below'){destinationGroup=undefined;position=group?{referenceGroup:group.id,direction:target}:undefined;}
    const preview=target==='preview'||defaultPreview;
-   const found=findOpenChat(apiDock.panels,r)||(isPdf||['project','settings','sessions','files','notifications'].includes(r.kind)?apiDock.panels.find(p=>viewIdentity(p.params.resource)===id):null)||destinationGroup?.panels.find(p=>viewIdentity(p.params.resource)===id);
-   if(found){if(r.kind==='chat'&&(groupId||target==='right'||target==='below')){found.api.moveTo({group:destinationGroup||group,position:target==='right'?'right':target==='below'?'bottom':'center'});}found.api.setActive();if(r.kind==='settings'&&r.title)found.api.setTitle(r.title);if(r.line||r.page||r.anchor||r.meta?.searchQuery!==undefined||r.meta?.focusComposer!==undefined||r.meta?.settingsTab!==undefined||r.meta?.filesPath!==undefined||r.meta?.fileSequence!==undefined)found.api.updateParameters({...found.params,resource:{...found.params.resource,...r,meta:{...found.params.resource.meta,...r.meta}}});if(!preview)found.api.updateParameters({...found.params,preview:false});return found;}
+   const found=existingFile||findOpenChat(apiDock.panels,r)||(['project','settings','sessions','files','notifications'].includes(r.kind)?apiDock.panels.find(p=>viewIdentity(p.params.resource)===id):null)||(r.kind!=='file'&&destinationGroup?.panels.find(p=>viewIdentity(p.params.resource)===id));
+   if(found){
+    if(r.kind==='chat'&&(groupId||target==='right'||target==='below'))found.api.moveTo({group:destinationGroup||group,position:target==='right'?'right':target==='below'?'bottom':'center'});
+    found.api.setActive();
+    if(r.kind==='settings'&&r.title)found.api.setTitle(r.title);
+    const state=found.params;
+    const hasNavigation=r.line||r.page||r.anchor||r.meta?.searchQuery!==undefined||r.meta?.focusComposer!==undefined||r.meta?.settingsTab!==undefined||r.meta?.filesPath!==undefined||r.meta?.fileSequence!==undefined;
+    if(hasNavigation||!preview&&state.preview){
+     const navigation=r.kind==='file'?{line:r.line,page:r.page,anchor:r.anchor}:r;
+     const next=hasNavigation?{...state.resource,...navigation,meta:{...state.resource.meta,...r.meta}}:state.resource;
+     found.api.updateParameters({...state,resource:next,preview:preview&&state.preview});
+    }
+    return found;
+   }
    const replaced:any[]=[];
    if(preview&&destinationGroup){for(const previous of [...destinationGroup.panels].filter(p=>p.params.preview&&p.params.resource.kind==='file')){if(snapshot(documentKey(previous.params.resource)).dirty)previous.api.updateParameters({...previous.params,preview:false});else replaced.push(previous);}}
    const title=r.title||r.url||r.path?.split('/').at(-1)||latestData.current?.chats?.find(c=>c.key===r.key)?.title||(r.kind==='chat'?'New chat':r.kind==='settings'?'Settings':r.kind==='notifications'?(r.mode==='history'?'History':'Notifications'):r.kind==='overview'?'Agent overview':r.kind==='files'?'Files':'Workspace');

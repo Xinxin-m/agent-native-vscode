@@ -31,10 +31,10 @@ class RouteTests(unittest.TestCase):
         self.addCleanup(self.http.server_close)
         self.addCleanup(self.http.shutdown)
 
-    def request(self,path,method='GET',headers=None):
+    def request(self,path,method='GET',headers=None,body=None):
         conn=http.client.HTTPConnection('127.0.0.1',self.http.server_port)
         self.addCleanup(conn.close)
-        conn.request(method,path,headers=headers or {})
+        conn.request(method,path,headers=headers or {},body=body)
         response=conn.getresponse()
         return response.status,dict(response.getheaders()),response.read()
 
@@ -49,6 +49,20 @@ class RouteTests(unittest.TestCase):
         status,headers,body=self.request('/api/files/content?root_id='+self.rid+'&path=page.html')
         self.assertTrue(headers['Content-Type'].startswith('text/plain'))
         self.assertIn('sandbox',headers['Content-Security-Policy'])
+
+    def test_observe_external_edit_and_rewind_over_http(self):
+        target = {'root_id':self.rid, 'path':'page.html'}
+        url = '/api/files/stat?root_id='+self.rid+'&path=page.html'
+        before = json.loads(self.request(url)[2])['resource']
+        (self.root / 'page.html').write_text('<h1>Next</h1>')
+        after = json.loads(self.request(url)[2])['resource']
+        self.assertTrue(after['has_previous'])
+        for version, expected in [(before['version'], 409), (after['version'], 200)]:
+            status, _, _ = self.request('/api/files/document-rewind', 'POST',
+                                        {'Content-Type':'application/json'},
+                                        json.dumps({**target, 'base_version':version}))
+            self.assertEqual(status, expected)
+        self.assertEqual((self.root / 'page.html').read_text(), '<script>alert(1)</script>')
 
     def test_module_mime_and_cross_origin_guard(self):
         status,headers,body=self.request('/static/worker.mjs')

@@ -55,6 +55,7 @@ The interface is yours to change. Ask an agent to move search into the sidebar h
 - **Reveal navigation on hover.** In Settings → Appearance, set **Activity icon bar** to **Auto-hide**. Move the pointer to the left edge to reveal the icons. The open sidebar keeps its place.
 - **Choose where utility pages open.** In Settings → Appearance → Panes and tabs, **Open utility pages in a pop-up window** controls Settings, Accounts, Notifications, Recent chats and Projects. It starts enabled. Turn it off to open those pages in your current pane.
 - **Open a file beside a conversation.** The default file action reuses a pane on the right or left. With one pane, it splits to the right. Under **When I click a file**, choose **New Tab in This Pane** to keep files in the current pane. HTML previews run chart scripts in an isolated frame. For a report that loads a plotting library from the web, enable **Allow web assets** in its preview.
+- **Renew an open file.** Open previews pick up changes from disk, including edits made by a chat. Choose **Renew** to check immediately. Following a file link again brings its open tab forward in the same window. For editable HTML and Markdown, Library keeps the current contents and one previous observed version. In the browser, open the file’s **···** menu and choose **Rewind to previous version**. In Library Code, open **Diff** to compare and rewind.
 
 ## Choose your interface
 
@@ -90,6 +91,19 @@ You can also hand the setup to your agent. Open Claude Code or Codex in the clon
 > Read README.md and docs/AGENT-ONBOARDING.md, then install Library for me. Import my chats without model calls, help me connect my accounts, and tell me what still needs my input.
 
 To use Library chats inside VS Code, build the extension with `cd app/vscode-library && python3 package.py`, then run **Extensions: Install from VSIX** on the file it prints. It needs VS Code 1.85 or newer and the Library server running.
+
+## Connect Claude and Codex accounts
+
+Open **Accounts** to see the native profiles Library discovered on this computer. For another account, choose **Add account**, select Claude or Codex, then **Continue in browser** and complete the provider’s sign-in. To import conversations already stored on this machine, run `python3 app/pipeline.py --parse-only` from the checkout. This reads local transcripts across configured profiles. Signing in alone does not download web chat history.
+
+If you want several subscriptions to share requests, set up the optional pool for each provider and authorize each account there.
+
+| Provider | Pool setup |
+| --- | --- |
+| Claude Code | Install CCS, add each Claude account with its OAuth flow, and enable the Claude pool. [CCS on GitHub](https://github.com/kaitranntt/ccs) |
+| Codex | Start codex-lb locally, open its dashboard, and add each ChatGPT account or workspace through its sign-in flow. [codex-lb on GitHub](https://github.com/Soju06/codex-lb) |
+
+Fresh installations use your connected accounts directly. After configuring the pools for the providers you use, set `auto_switch.pools` to `true` in your local `app/data/config.json`. Pool routing then applies to both providers.
 
 ## What is in the repository
 

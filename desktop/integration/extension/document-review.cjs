@@ -27,14 +27,22 @@ function localReviewStore(folder, uri) {
   const {DatabaseSync}=require('node:sqlite');
   const db=new DatabaseSync(location);
   try {
-   db.exec('PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS checkpoints(doc TEXT PRIMARY KEY, previous TEXT, at INTEGER); CREATE TABLE IF NOT EXISTS comments(doc TEXT, id TEXT, text TEXT, quote TEXT, created INTEGER, PRIMARY KEY(doc,id)); CREATE TABLE IF NOT EXISTS drafts(doc TEXT, writer TEXT, text TEXT, PRIMARY KEY(doc,writer))');
+   db.exec('PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS observed(doc TEXT PRIMARY KEY, contents TEXT); CREATE TABLE IF NOT EXISTS checkpoints(doc TEXT PRIMARY KEY, previous TEXT, at INTEGER); CREATE TABLE IF NOT EXISTS comments(doc TEXT, id TEXT, text TEXT, quote TEXT, created INTEGER, PRIMARY KEY(doc,id)); CREATE TABLE IF NOT EXISTS drafts(doc TEXT, writer TEXT, text TEXT, PRIMARY KEY(doc,writer))');
    return fn(db);
   } finally {db.close();}
  }
  return {
   read(){return run(db=>({previous:db.prepare('SELECT previous FROM checkpoints WHERE doc=?').get(key)?.previous??null,comments:db.prepare('SELECT id,text,quote,created FROM comments WHERE doc=? ORDER BY created,rowid').all(key)}));},
   comment(c){run(db=>db.prepare('INSERT OR IGNORE INTO comments VALUES(?,?,?,?,unixepoch())').run(key,c.id,c.text,c.quote));},
-  checkpoint(text){run(db=>db.prepare('INSERT INTO checkpoints VALUES(?,?,unixepoch()) ON CONFLICT(doc) DO UPDATE SET previous=excluded.previous,at=excluded.at WHERE excluded.at-checkpoints.at>=3600').run(key,text));},
+  observe(text){run(db=>{
+   db.exec('BEGIN IMMEDIATE');
+   const last=db.prepare('SELECT contents FROM observed WHERE doc=?').get(key);
+   if(last?.contents!==text){
+    if(last)db.prepare('INSERT OR REPLACE INTO checkpoints VALUES(?,?,unixepoch())').run(key,last.contents);
+    db.prepare('INSERT OR REPLACE INTO observed VALUES(?,?)').run(key,text);
+   }
+   db.exec('COMMIT');
+  });},
   saveDraft(writer,text){run(db=>db.prepare('INSERT OR REPLACE INTO drafts VALUES(?,?,?)').run(key,writer,text));},
   clearDraft(writer,text){run(db=>db.prepare('DELETE FROM drafts WHERE doc=? AND writer=? AND text=?').run(key,writer,text));},
   drafts(){return run(db=>db.prepare('SELECT writer,text FROM drafts WHERE doc=? ORDER BY rowid').all(key));}
@@ -69,6 +77,7 @@ async function resolveReviewEditor(vscode,context,document,panel,services) {
   if (check.version !== version) throw Error('The document changed while opening. Reopen the viewer.');
   if(document.isDirty) throw Error('Save the source editor’s pending changes before opening rendered editing.');
  }
+ if (!shared&&!document.isDirty)local.observe(text);
  if (!html) for (const src of markdownImageSources(text)) {
   const value=await loader.image(src);
   if (value) assets[src]=value;
@@ -88,6 +97,18 @@ async function resolveReviewEditor(vscode,context,document,panel,services) {
  async function handle(m) {
   switch(m.action) {
    case 'review':return review();
+   case 'renew':return refresh(true);
+   case 'rewind':{
+    if(readOnly||pending||document.isDirty||version!==m.version)throw Error('Renew the file before rewinding. Your draft is retained.');
+    if(shared){
+     await services.api('/api/files/document-rewind',{...target,base_version:m.version});
+    }else{
+     const {previous}=local.read();
+     if(previous==null)throw Error('There is no previous version.');
+     await handle({action:'save',version,text:previous});
+    }
+    return refresh(true);
+   }
    case 'preview-network':preview?.network(m.enabled===true);return true;
    case 'asset':{
     if(typeof m.value!=='string'||m.value.length>2*1024*1024) throw Error('Invalid document asset');
@@ -111,12 +132,11 @@ async function resolveReviewEditor(vscode,context,document,panel,services) {
       const result=await services.api('/api/files/document-save',{...target,base_version:version,text:m.text});
       version=result.resource.version;
      } else {
-      local.checkpoint(text);
-      if(document.version!==version)throw Error('The document changed elsewhere. Your draft is retained.');
+      if(document.version!==version||new TextDecoder().decode(await vscode.workspace.fs.readFile(uri))!==text)throw Error('The document changed elsewhere. Your draft is retained.');
       const edit=new vscode.WorkspaceEdit();
       edit.replace(uri,new vscode.Range(document.positionAt(0),document.positionAt(document.getText().length)),m.text);
       if(!await vscode.workspace.applyEdit(edit)||!await document.save())throw Error('Could not save the document. Your draft is retained.');
-      version=document.version;
+      version=document.version;local.observe(m.text);
      }
      text=m.text;
      return {version};
@@ -158,22 +178,44 @@ async function resolveReviewEditor(vscode,context,document,panel,services) {
   return queue;
  }
  activeFlushes.add(flush);
+ async function refresh(force=false){
+  if(disposed)return;
+  if(document.isDirty){
+   if(force)throw Error('Save the pending source changes before renewing.');
+   return;
+  }
+  let fresh=text,nextVersion=version;
+  if(shared){
+   const stat=async()=>(await services.api('/api/files/stat?'+new URLSearchParams(target))).resource;
+   nextVersion=(await stat()).version;
+   if(nextVersion===version&&!force)return;
+   fresh=await readDisk();
+   if((await stat()).version!==nextVersion)throw Error('The file changed during renewal. Try again.');
+  }else{
+   fresh=document.getText();nextVersion=document.version;
+   if(fresh===text&&nextVersion===version&&!force)return;
+   local.observe(fresh);
+  }
+  if(disposed)return;
+  if(nextVersion!==version||fresh!==text){
+   ownVersions=new Set([nextVersion]);editEpoch++;
+  }
+  version=nextVersion;text=fresh;
+  const assets=Object.create(null);
+  if(!html)for(const src of markdownImageSources(text)){const image=await loader.image(src);if(image)assets[src]=image;}
+  await panel.webview.postMessage({type:'review-update',version,text,assets,force});
+ }
+ let checking=false;
+ function scheduleRefresh(){
+  if(checking||disposed)return;checking=true;
+  queue=queue.then(()=>refresh()).catch(()=>{}).finally(()=>{checking=false;});
+ }
+ const poll=setInterval(scheduleRefresh,3000);poll.unref();
+ const visible=panel.onDidChangeViewState?.(e=>{if(e.webviewPanel.visible)scheduleRefresh();});
  const changed=vscode.workspace.onDidChangeTextDocument(e=>{
   if(disposed||applying||e.document!==document||!e.contentChanges.length)return;
-  queue=queue.then(async()=>{
-   if(!shared){
-    version=document.version;text=document.getText();
-   } else {
-    const next=(await services.api('/api/files/stat?'+new URLSearchParams(target))).resource;
-    if(next.version===version&&!document.isDirty)return;
-    if(document.isDirty){await panel.webview.postMessage({type:'review-conflict'});return;}
-    const fresh=await readDisk();
-    if((await services.api('/api/files/stat?'+new URLSearchParams(target))).resource.version!==next.version)return;
-    version=next.version;text=fresh;
-   }
-   ownVersions=new Set([version]);editEpoch++;
-   await panel.webview.postMessage({type:'review-update',version,text});
-  }).catch(()=>{});
+  if(document.isDirty)void panel.webview.postMessage({type:'review-conflict'});
+  else scheduleRefresh();
  });
  const receive=panel.webview.onDidReceiveMessage(m=>{
   if(m?.type!=='document-review'||typeof m.id!=='string')return;
@@ -192,7 +234,7 @@ async function resolveReviewEditor(vscode,context,document,panel,services) {
    catch(e){if(!disposed)await panel.webview.postMessage({type:'review-reply',id:m.id,error:e.message});}
   });
  });
- panel.onDidDispose(()=>{disposed=true;receive.dispose();changed.dispose();void flush().finally(()=>activeFlushes.delete(flush));});
+ panel.onDidDispose(()=>{disposed=true;clearInterval(poll);visible?.dispose();receive.dispose();changed.dispose();void flush().finally(()=>activeFlushes.delete(flush));});
  return true;
 }
 module.exports={resolveReviewEditor,targetFor,localReviewStore,flushEditors};

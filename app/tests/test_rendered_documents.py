@@ -19,7 +19,7 @@ class RenderedDocuments(unittest.TestCase):
         self.service = FileService(base / 'state', str(self.root))
         self.rid = next(iter(self.service.roots))
 
-    def test_hourly_checkpoint_and_idempotent_quoted_comments(self):
+    def test_each_save_rotates_checkpoint_and_preserves_idempotent_comments(self):
         def save(text, at):
             current = self.service.stat(self.rid, self.file.name)
             with patch('file_service.time.time', return_value=at):
@@ -27,7 +27,7 @@ class RenderedDocuments(unittest.TestCase):
 
         save('First edit\n', 7200)
         save('Second edit\n', 7300)
-        self.assertEqual(self.service.document_review(self.rid, self.file.name, None)['previous'], 'Initial draft\n')
+        self.assertEqual(self.service.document_review(self.rid, self.file.name, None)['previous'], 'First edit\n')
         save('Third edit\n', 10900)
         self.assertEqual(self.file.read_text(), 'Third edit\n')
         note = {'id':'946ead78-89f9-4949-9f2b-35ca6a342bab','text':'Tighten this','quote':'Third edit'}
@@ -44,6 +44,56 @@ class RenderedDocuments(unittest.TestCase):
             self.service.save_document(self.rid, self.file.name, None, version, 'stale edit')
         self.assertEqual(failure.exception.code, 'version_conflict')
         self.assertEqual(self.file.read_text(), 'Change from another editor\n')
+
+    def test_observed_external_edits_and_restart_preserve_two_byte_exact_versions(self):
+        self.assertFalse(self.service.stat(self.rid, self.file.name)['has_previous'])
+        before = b'\xef\xbb\xbfsecond\r\nmixed\n'
+        after = b'third\n'
+        self.file.write_bytes(before)
+        self.service.observe_local_changes()
+        self.file.write_bytes(after)
+        self.service.observe_local_changes()
+        self.service = FileService(self.service.data, str(self.root))
+        current = self.service.stat(self.rid, self.file.name)
+        self.assertTrue(current['has_previous'])
+        rewound = self.service.rewind_document(self.rid, self.file.name, None, current['version'])
+        self.assertEqual(self.file.read_bytes(), before)
+        self.service.rewind_document(self.rid, self.file.name, None, rewound['version'])
+        self.assertEqual(self.file.read_bytes(), after)
+
+    def test_broker_tool_events_observe_a_document_before_it_is_opened(self):
+        import broker
+        from unittest.mock import Mock
+        run = {'host_id':'mac', 'cwd':str(self.root)}
+        ctrl, store = {}, Mock()
+        with patch('file_service.instance', return_value=self.service):
+            runner = broker.Broker.__new__(broker.Broker)
+            runner.store = store
+            runner._claude_tools('run', run, ctrl, {'type':'assistant', 'message':{'content':[
+                {'type':'tool_use', 'name':'Edit', 'id':'edit-1', 'input':{'file_path':self.file.name}}
+            ]}})
+            self.file.write_text('Session edit')
+            runner._claude_tools('run', run, ctrl, {'type':'user', 'message':{'content':[
+                {'type':'tool_result', 'tool_use_id':'edit-1'}
+            ]}})
+        self.assertFalse(ctrl['document_edit_paths'])
+        self.assertEqual(self.service.document_review(self.rid, self.file.name, None)['previous'], 'Initial draft\n')
+
+    def test_rewind_requires_write_access_and_current_disk_version(self):
+        initial = self.service.stat(self.rid, self.file.name)
+        with self.assertRaises(FileError) as missing:
+            self.service.rewind_document(self.rid, self.file.name, None, initial['version'])
+        self.assertEqual(missing.exception.code, 'no_previous')
+        self.file.write_text('Unseen external edit')
+        with self.assertRaises(FileError) as stale:
+            self.service.rewind_document(self.rid, self.file.name, None, initial['version'])
+        self.assertEqual(stale.exception.code, 'version_conflict')
+        read = self.service.register('mac', str(self.root), 'read')['id']
+        current = self.service.stat(read, self.file.name)
+        with self.assertRaises(FileError) as readonly:
+            self.service.rewind_document(read, self.file.name, None, current['version'])
+        self.assertEqual(readonly.exception.status, 403)
+        self.assertEqual(self.file.read_text(), 'Unseen external edit')
 
     def test_remote_helper_updates_only_the_existing_document(self):
         helper = {}
@@ -87,3 +137,10 @@ class RenderedDocuments(unittest.TestCase):
             self.assertEqual(len(writes), 1)
             self.assertEqual(writes[0].args[2]['root'], str(self.root.resolve()))
             self.assertEqual(writes[0].args[2]['path'], self.file.name)
+            changed = b'\xef\xbb\xbfChanged outside the app\r\n'
+            self.file.write_bytes(changed)
+            updated = self.service.stat(rid, self.file.name)
+            restored = self.service.rewind_document(rid, self.file.name, None, updated['version'])
+            self.assertEqual(self.file.read_bytes(), b'Cluster update\n')
+            self.service.rewind_document(rid, self.file.name, None, restored['version'])
+            self.assertEqual(self.file.read_bytes(), changed)

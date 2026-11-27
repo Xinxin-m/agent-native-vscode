@@ -1,8 +1,9 @@
 'use strict';
 const vscode=require('vscode'),fs=require('node:fs/promises'),path=require('node:path'),{randomBytes,randomUUID}=require('node:crypto');
-const {visibleRoot,orderTree,attachmentMime,endpoint,request,terminal,replay,pending,prepare,accepted,fileTarget,clusterWorkbenchTarget}=require('./core');
+const {visibleRoot,orderTree,attachmentMime,endpoint,request,terminal,replay,pending,prepare,accepted,fileTarget,workbenchFileLink,clusterWorkbenchTarget}=require('./core');
 function activate(context){let panel,refreshed=0,queue=Promise.resolve(),selected='',nativeKey='',chat=null,defaults=null,runState=null,drafts=context.globalState.get('drafts',{}),chats=[],catalog=[],disposed=false,polling=false,error='',chatRevision,chatRunStamp='',metadataNotice='',commandList=[],commandKey='',runQueue=null,queueSupported=false,queueError='',tree=null,accounts=[],capabilities={};
  const api=(route,body)=>request(endpoint(vscode.workspace.getConfiguration('library').get('endpoint')),route,body);
+ const filePanels=new Map();
  let transcriptCache;
  async function readTranscript(){const base=endpoint(vscode.workspace.getConfiguration('library').get('endpoint')),route='/api/chat?key='+encodeURIComponent(nativeKey),key=base+route,old=transcriptCache?.key===key?transcriptCache:null;let etag;const value=await request(base,route,undefined,{etag:old?.etag,cached:old?.value,onEtag:value=>{etag=value}});transcriptCache={key,value,etag:etag??old?.etag};return value;}
  const draft=()=>drafts[selected]||(drafts[selected]={text:'',attachments:[],pending:null});
@@ -92,18 +93,33 @@ if(m.type==='projectMap'){await projectMaps.open();return;}if(m.type==='ready'){
  if(m.type==='subagents'){await refreshTree(true);return;}
  if(m.type==='draft'){if(typeof m.text!=='string'||m.text.length>2000000)return;draft().text=m.text;await save();return;}
  if(m.type==='openFile'){
-  if(typeof m.href==='string'&&/^https?:\/\//i.test(m.href)){await vscode.env.openExternal(vscode.Uri.parse(m.href));return;}
-  const cwd=defaults?.cwd||chat?.cwd,target=fileTarget(m.href,cwd,defaults?.host_id||chat?.execution_host||'mac');
+  const base=endpoint(vscode.workspace.getConfiguration('library').get('endpoint'));
+  const linked=workbenchFileLink(m.href,base);
+  if(!linked&&typeof m.href==='string'&&/^https?:\/\//i.test(m.href)){await vscode.env.openExternal(vscode.Uri.parse(m.href));return;}
+  const cwd=defaults?.cwd||chat?.cwd,target=linked?(['mac','local'].includes(linked.host_id)?linked:null):fileTarget(m.href,cwd,defaults?.host_id||chat?.execution_host||'mac');
   const stat=target?await fs.stat(target.path).catch(()=>null):null;
-  // The Workbench reader resolves the original chat evidence, including recorded moves.
-  const remote=stat?null:clusterWorkbenchTarget(m.href,cwd,nativeKey||selected);
+  const remote=stat?null:(linked||clusterWorkbenchTarget(m.href,cwd,nativeKey||selected));
   const groups=vscode.window.tabGroups,active=groups?.activeTabGroup?.viewColumn;
   const columns=(groups?.all||[]).map(g=>g.viewColumn).sort((a,b)=>a-b);
   const viewColumn=columns.find(c=>c>active)||columns.filter(c=>c<active).at(-1)||vscode.ViewColumn.Beside;
-  if(/\.html?$/i.test(remote?.path||target?.path||'')){
-   const resource=await api('/api/files/reference',{chat_key:nativeKey||selected,path:remote?.path||target.path}).then(value=>value.resource,()=>null);
-   if(!stat?.isFile()&&!resource)throw Error('Library could not resolve this HTML file.');
-   const base=endpoint(vscode.workspace.getConfiguration('library').get('endpoint'));
+  const shown=stat?.isFile()&&groups?.all.flatMap(group=>group.tabs.map(tab=>({tab,group}))).find(({tab})=>tab.input?.uri?.scheme==='file'&&tab.input.uri.fsPath===target.path);
+  if(shown){
+   await vscode.commands.executeCommand('vscode.openWith',shown.tab.input.uri,shown.tab.input.viewType||'default',{viewColumn:shown.group.viewColumn,preserveFocus:false,...(target.line>1?{selection:new vscode.Range(target.line-1,0,target.line-1,0)}:{})});
+   return;
+  }
+  if(/\.(?:html?|markdown|md)$/i.test(remote?.path||target?.path||'')){
+   let resource;
+   if(linked){
+    if(linked.file_id)resource=(await api('/api/files/stat?'+new URLSearchParams({file_id:linked.file_id}))).resource;
+    else {
+     const {roots=[]}=await api('/api/files/roots');
+     const root=roots.filter(r=>r.host_id===linked.host_id&&(!linked.root_id||(r.id||r.root_id)===linked.root_id)&&linked.path.startsWith(r.path.replace(/\/$/,'')+'/')).sort((a,b)=>b.path.length-a.path.length)[0];
+     if(root){const scope={root_id:root.id||root.root_id,path:path.relative(root.path,linked.path)};resource=(await api('/api/files/stat?'+new URLSearchParams(scope))).resource;}
+    }
+   }
+   if(!resource)resource=await api('/api/files/reference',{chat_key:nativeKey||selected,path:remote?.path||target.path}).then(value=>value.resource,()=>null);
+   if(linked&&resource&&(resource.host_id!==linked.host_id||resource.path!==linked.path&&resource.evidence_path!==linked.path))throw Error('The link does not match the resolved file.');
+   if(!stat?.isFile()&&!resource)throw Error('Library could not resolve this document.');
    async function bytes(route){
     const response=await fetch(base+route);
     if(!response.ok)throw Error('Library could not read the preview file.');
@@ -117,13 +133,14 @@ if(m.type==='projectMap'){await projectMaps.open();return;}if(m.type==='ready'){
     const root=roots.filter(r=>(r.host_id||'mac')==='mac'&&file.startsWith(r.path.replace(/\/$/,'')+'/')).sort((a,b)=>b.path.length-a.path.length)[0];
     if(root)scope={root_id:root.root_id||root.id,path:path.relative(root.path,file)};
    }
-   const content=scope?await bytes('/api/files/content?'+new URLSearchParams(scope)):await fs.readFile(file);
-   const name=path.basename(file),preview=await require('./artifact-preview.cjs').artifactPreview({name,target:scope,source:()=>content,api,bytes});
-   try{
-    const viewer=vscode.window.createWebviewPanel('library.htmlPreview',name,viewColumn,{enableScripts:true,localResourceRoots:[]});
-    viewer.onDidDispose(()=>preview.close());
-    viewer.webview.html='<!doctype html><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; frame-src '+preview.origin+'; style-src \'unsafe-inline\'"><style>html,body,iframe{margin:0;width:100%;height:100%;border:0;display:block}</style><iframe title="HTML preview" sandbox="allow-scripts allow-same-origin" referrerpolicy="no-referrer" src="'+preview.url.replace(/&/g,'&amp;').replace(/"/g,'&quot;')+'"></iframe>';
-   }catch(error){preview.close();throw error;}
+   const id=JSON.stringify([resource?.host_id||'mac',file]),openPanel=filePanels.get(id);
+   if(openPanel){openPanel.reveal(openPanel.viewColumn);return;}
+   const name=path.basename(file);
+   const viewer=vscode.window.createWebviewPanel('library.htmlPreview',name,viewColumn,{enableScripts:true,retainContextWhenHidden:true,localResourceRoots:[]});
+   filePanels.set(id,viewer);viewer.onDidDispose(()=>filePanels.delete(id));
+   const {liveDocument,localVersions}=require('./live-document.cjs');
+   try{await liveDocument({vscode,viewer,name,scope,file,api,bytes,local:scope?null:localVersions(context.globalStorageUri.fsPath,file),writableWorkspace:trusted,hostId:resource?.host_id||'mac'});}
+   catch(error){viewer.dispose();throw error;}
    return;
   }
   if(remote){

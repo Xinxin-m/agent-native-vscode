@@ -18,7 +18,7 @@ if(typeof window!=='undefined'&&new URLSearchParams(location.search).has('docume
 const fallbackWriter=globalThis.crypto?.randomUUID?.()||'writer-'+Date.now();
 function drafts(){let writer=fallbackWriter;try{writer=history.state?.libraryWindow||new URLSearchParams(location.search).get('window')||writer;}catch{}return createDraftRepository(localStorage,writer);}
 function availableRecoveries(id:string){const repo=drafts();return repo.list(id).filter(d=>d.writer!==repo.writer);}
-export function documentKey(r:Resource){return r.path?fileIdentity(r.host_id||'mac',r.path):r.file_id?JSON.stringify([r.host_id||'mac',{file_id:r.file_id}]):fileIdentity(r.host_id||'mac','');}
+export function documentKey(r:Resource){return r.root_id&&r.path&&!r.path.startsWith('/')?JSON.stringify([r.host_id||'mac',{root_id:r.root_id,path:r.path}]):r.path?fileIdentity(r.host_id||'mac',r.path):r.file_id?JSON.stringify([r.host_id||'mac',{file_id:r.file_id}]):fileIdentity(r.host_id||'mac','');}
 export function unassignedDrafts(r:Resource,repo:{list:(id:string)=>FileDraft[]}){return !r.path&&r.file_id?repo.list(fileIdentity(r.host_id||'mac','')):[];}
 export function snapshot(id:string){return records.get(id)||EMPTY;}
 function update(id:string,patch:Partial<DocumentState>){records.set(id,{...snapshot(id),...patch});listeners.get(id)?.forEach(fn=>fn());if(releasedDocuments.has(id))releaseDocumentId(id);}
@@ -40,6 +40,10 @@ export async function resolveFile(resource:Resource):Promise<FileRecord>{
    if(!found?.file_id||((found.host_id||'mac')!==host&&!verifiedMove))throw new Error('The refreshed file reference belongs to a different host.');
    return found;
   }
+ }
+ if(root&&resource.path&&!resource.path.startsWith('/')){
+  const result=await api(query('/api/files/stat',{root_id:root,path:resource.path}));
+  return result.resource;
  }
  const canUseReference=Boolean(chatKey&&!root&&resource.path);
  const preferRoot=host!=='mac'&&host!=='local'&&resource.meta?.workbench_link===true;
@@ -133,23 +137,33 @@ export async function acceptTransferredDraft(resource:Resource,incoming:DraftCon
 const refreshing=new Set<string>();
 const watched=new Map<string,{resource:Resource;views:Set<()=>boolean>}>();
 let watchTimer:ReturnType<typeof setInterval>|undefined;
-const liveText=(file?:FileRecord)=>file&&file.host_id==='mac'&&file.size<=8*1024*1024&&['source','markdown','html'].includes(viewerKind(file.name,file.mime));
+const isTextFile=(file:FileRecord)=>['source','markdown','html'].includes(viewerKind(file.name,file.mime));
 async function statKnownFile(file:FileRecord):Promise<FileRecord>{const result=await api(query('/api/files/stat',file.file_id&&!file.root_id?{file_id:file.file_id}:{root_id:file.root_id,path:file.relative_path||'.'}));return result.resource;}
 export async function refreshLocalDocument(resource:Resource):Promise<void>{
- const id=documentKey(resource),before=snapshot(id);if(resource.host_id&&resource.host_id!=='mac'||!liveText(before.file)||before.loading||before.saving||pendingLoads.has(id)||refreshing.has(id))return;
+ const id=documentKey(resource),before=snapshot(id);if(!before.file||before.loading||before.saving||pendingLoads.has(id)||refreshing.has(id))return;
  refreshing.add(id);
  try{const file=await statKnownFile(before.file);if(file.version===before.file.version){if(snapshot(id).refreshError)update(id,{refreshError:undefined});return;}
-  if(!liveText(file)){update(id,{refreshError:'The file changed beyond live text viewing limits. Use Refresh or open it in your editor.'});return;}
-  const text=await textFor(file),verified=await statKnownFile(file);if(verified.version!==file.version)return;
+  const text=isTextFile(file)&&file.size<=8*1024*1024?await textFor(file):'';
+  if(isTextFile(file)&&(await statKnownFile(file)).version!==file.version)return;
   const current=snapshot(id);if(current.loading||current.saving||pendingLoads.has(id)||current.file?.version!==before.file.version||current.baseVersion!==before.baseVersion)return;
   if(current.dirty||current.text!==before.text||current.baseText!==before.baseText){update(id,{file,conflict:{text,version:file.version},refreshError:undefined});}
-  else{update(id,{file,text,baseText:text,baseVersion:file.version,dirty:false,conflict:undefined,refreshError:undefined});persist(id);}
+  else{update(id,{file,text,baseText:text,baseVersion:file.version,dirty:false,conflict:undefined,error:isTextFile(file)&&file.size>8*1024*1024?'This text file exceeds the 8 MB editor limit.':undefined,refreshError:undefined});persist(id);}
  }catch(error){update(id,{refreshError:'Could not refresh file: '+(error as Error).message});}finally{refreshing.delete(id);if(releasedDocuments.has(id))releaseDocumentId(id);}
 }
 export async function pollWatchedDocuments():Promise<void>{if(typeof document!=='undefined'&&document.visibilityState==='hidden')return;await Promise.all([...watched.values()].filter(entry=>[...entry.views].some(visible=>{try{return visible();}catch{return false;}})).map(entry=>refreshLocalDocument(entry.resource)));}
 export function watchDocument(resource:Resource,visible:()=>boolean):()=>void{
- if(resource.kind!=='file'||resource.host_id&&resource.host_id!=='mac')return()=>{};
+ if(resource.kind!=='file')return()=>{};
  const id=documentKey(resource);releasedDocuments.delete(id);let entry=watched.get(id);if(!entry){entry={resource,views:new Set()};watched.set(id,entry);}entry.views.add(visible);
- if(!watchTimer)watchTimer=setInterval(()=>{void pollWatchedDocuments();},8000);
+ if(!watchTimer)watchTimer=setInterval(()=>{void pollWatchedDocuments();},5000);
  let released=false;return()=>{if(released)return;released=true;entry.views.delete(visible);if(!entry.views.size){watched.delete(id);releaseDocumentId(id);}if(!watched.size&&watchTimer){clearInterval(watchTimer);watchTimer=undefined;}};
+}
+
+export async function rewindDocument(resource:Resource){
+ const current=snapshot(documentKey(resource));
+ if(!current.file?.has_previous||!current.file.document_editable||current.dirty||current.saving||current.conflict)return;
+ try{
+  await api('/api/files/document-rewind',{...documentTarget(current.file),base_version:current.file.version});
+ }finally{
+  await refreshLocalDocument(resource);
+ }
 }

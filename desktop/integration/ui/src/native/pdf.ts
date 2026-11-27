@@ -8,7 +8,10 @@ const content=document.getElementById('document')!,status=document.getElementByI
 const pdf=await getDocument({data:Uint8Array.from(atob(boot.data),c=>c.charCodeAt(0))}).promise;
 const pages:PDFPageProxy[]=await Promise.all(Array.from({length:pdf.numPages},(_,i)=>pdf.getPage(i+1)));
 let mode:ViewMode=(()=>{try{const v=localStorage.getItem('pdf-view-mode');if(v==='single'||v==='spread'||v==='continuous')return v;}catch{}return 'continuous';})();
-let current=1,zoom=0,scale=1,quietUntil=0;// zoom 0 = fit the pane width
+declare function acquireVsCodeApi():{getState():any;setState(state:any):void;postMessage(message:any):void};
+const host=acquireVsCodeApi(),saved=host.getState();
+document.getElementById('renew')!.onclick=()=>host.postMessage({type:'renew'});
+let current=Math.max(1,Math.min(pages.length,Number(saved?.current)||1)),zoom=Number(saved?.zoom)||0,scale=1,quietUntil=0;// zoom 0 = fit the pane width
 const step=()=>mode==='spread'?2:1,start=(n:number)=>mode==='spread'?n-((n-1)%2):n;
 const select=document.createElement('select');select.id='mode';select.setAttribute('aria-label','PDF view mode');
 for(const [value,label] of [['continuous','Continuous scroll'],['single','Single page'],['spread','Two pages']])select.add(new Option(label,value));
@@ -25,7 +28,7 @@ function layout(){io.disconnect();slots.clear();const shown=mode==='continuous'?
  const wrap=document.createElement('div');wrap.className='pdf-pages '+mode;wrap.append(...shown.map(slot));content.replaceChildren(wrap);
  if(mode==='continuous'){slots.forEach(el=>io.observe(el));scrollToCurrent();}else{content.scrollTop=0;slots.forEach(el=>void draw(el));}showStatus();}
 function scrollToCurrent(){const el=slots.get(current);if(el){quietUntil=performance.now()+250;content.scrollTop=el.offsetTop-content.offsetTop-12;}}
-function showStatus(){const s=start(current),last=mode==='spread'?Math.min(s+1,pages.length):s;status.textContent=last>s?`Pages ${s}-${last} of ${pages.length}`:`Page ${s} of ${pages.length}`;}
+function showStatus(){host.setState({current,zoom});const s=start(current),last=mode==='spread'?Math.min(s+1,pages.length):s;status.textContent=last>s?`Pages ${s}-${last} of ${pages.length}`:`Page ${s} of ${pages.length}`;}
 function goTo(n:number){n=start(Math.max(1,Math.min(pages.length,n)));current=n;if(mode==='continuous'){scrollToCurrent();showStatus();}else layout();}
 content.addEventListener('scroll',()=>{if(mode!=='continuous'||performance.now()<quietUntil)return;const line=content.scrollTop+content.clientHeight*.3+content.offsetTop;let n=1;
  for(const [k,el] of slots){if(el.offsetTop<=line)n=k;else break;}if(content.scrollTop>0&&content.scrollTop+content.clientHeight>=content.scrollHeight-2)n=pages.length;if(n!==current){current=n;showStatus();}});

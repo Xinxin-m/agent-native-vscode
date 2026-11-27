@@ -8,7 +8,7 @@ test('bridge allows exact routes on loopback origins only',()=>{
  for(const name of ['resources','resource','tool-analytics']){const route='/api/settings/'+name+'?host=mac';assert.equal(bridge.route(route),route);assert.throws(()=>bridge.route(route,'POST'));}
  assert.throws(()=>bridge.route('/api/settings/other'));
  assert.throws(()=>bridge.route('/api/state','POST'));
- for(const route of ['/api/projects','/api/assign']){assert.equal(bridge.route(route,'POST'),route);assert.throws(()=>bridge.route(route));assert.throws(()=>bridge.route(route+'/unexpected','POST'));}
+ for(const route of ['/api/projects','/api/assign','/api/files/document-rewind']){assert.equal(bridge.route(route,'POST'),route);assert.throws(()=>bridge.route(route));assert.throws(()=>bridge.route(route+'/unexpected','POST'));}
 });
 test('bridge preserves conflict status and stable retry payload',async()=>{
  assert.ok(bridge,'bridge implementation exists');

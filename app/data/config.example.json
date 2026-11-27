@@ -1,4 +1,5 @@
 {
+  "auto_switch": {"pools": false},
   "claude_projects_root": "~/.claude/projects",
   "codex_sessions_root": "~/.codex/sessions",
   "codex_index": "~/.codex/session_index.jsonl",

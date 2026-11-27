@@ -23,7 +23,8 @@ async function fixture(){
  const panel={webview:{cspSource:'https://viewer.invalid',asWebviewUri:x=>x,onDidReceiveMessage:fn=>{receive=fn;return{dispose(){}}},postMessage:m=>{events.push(m);return Promise.resolve(true);}},onDidDispose:fn=>close=fn};
  await resolveReviewEditor(vscode,{extensionUri:'ext',globalStorageUri:{fsPath:dir}},{uri,getText:()=>value.text},panel,{api,bytes:async()=>Buffer.from(value.text)});
  const stage=(text,n)=>receive({type:'document-review',action:'stage',id:String(n),revision:n,version:'one',text});
- return {dir,uri,value,calls,close,stage,events};
+ const request=async(action,extra={})=>{const id=String(Math.random());receive({type:'document-review',action,id,...extra});await flushEditors();return events.find(e=>e.id===id);};
+ return {dir,uri,value,calls,close,stage,events,request};
 }
 test('closing during debounce flushes the final document to its original host',async()=>{
  const f=await fixture();f.stage('First change',1);f.stage('Final change',2);
@@ -38,10 +39,21 @@ test('window shutdown flushes before disposal and a disk conflict retains the st
  assert.equal(localReviewStore(f.dir,f.uri).drafts()[0].text,'My document');
  assert.equal(f.events.at(-1).type,'review-failed');
 });
-test('overlapping stores share one hourly checkpoint and preserve each comment',async()=>{
+test('overlapping stores keep the immediately preceding version and preserve each comment',async()=>{
  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'lc-review-notes-')),a=localReviewStore(dir,'x'),b=localReviewStore(dir,'x');
- a.checkpoint('Starting document');a.comment({id:'a',text:'Note A',quote:'A'});
- b.checkpoint('Later version');b.comment({id:'b',text:'Note B',quote:'B'});
+ a.observe('Starting document');a.comment({id:'a',text:'Note A',quote:'A'});
+ b.observe('Later version');b.observe('Newest version');a.observe('Newest version');b.comment({id:'b',text:'Note B',quote:'B'});
  a.comment({id:'a',text:'Note A',quote:'A'});
- assert.equal(a.read().previous,'Starting document');assert.deepEqual(b.read().comments.map(c=>c.id),['a','b']);
+ assert.equal(a.read().previous,'Later version');assert.deepEqual(b.read().comments.map(c=>c.id),['a','b']);
+});
+
+test('renew reads a changed remote document before updating the visible editor',async()=>{
+ const f=await fixture();
+ try{
+  f.value.version='two';f.value.text='Second paragraph';
+  const reply=await f.request('renew');
+  assert.equal(reply.error,undefined);
+  const update=f.events.find(e=>e.type==='review-update');
+  assert.equal(update.version,'two');assert.equal(update.text,'Second paragraph');
+ }finally{f.close();await flushEditors();}
 });

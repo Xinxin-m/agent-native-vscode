@@ -7,10 +7,10 @@ function fixture({layout,active,tabs=[]}){
  const vscode={Uri:{file:p=>({path:p,toString:()=>'file://'+p})},Range:class{},window:{tabGroups},commands:{executeCommand:async(...args)=>{calls.push(args);
   if(args[0]==='vscode.getEditorLayout')return layout;
   if(args[0]==='workbench.action.newGroupRight'){const g={viewColumn:groups.length+1,tabs:[]};groups.push(g);tabGroups.activeTabGroup=g;}}}};
- const scope={preferenceWrites:{settled:Promise.resolve()},vscode,path,preferences:{maxAutoPanes:3,openDefault:'right'},...panes,fs:{stat:async()=>({isFile:()=>true})},filesTab:{},require:()=>({workspaceFor:async()=>{}})};
+ const scope={api:async()=>({roots:[]}),fileOpens:require('../file-tab.cjs').serializeFileOpens(),revealFileTab:require('../file-tab.cjs').revealFileTab,preferenceWrites:{settled:Promise.resolve()},vscode,path,preferences:{maxAutoPanes:3,openDefault:'right'},...panes,fs:{stat:async()=>({isFile:()=>true})},filesTab:{},require:()=>({workspaceFor:async()=>{}})};
  const source=fs.readFileSync(path.join(__dirname,'../extension.cjs'),'utf8'),start=source.indexOf(' async function open(resource,destination,explicitColumn){'),end=source.indexOf('\n function connect(',start);
  vm.runInNewContext(source.slice(start,end)+'\nthis.open=open;',scope);
- return {open:scope.open,calls,column:()=>calls.find(c=>c[0]==='vscode.open')[2].viewColumn,split:()=>calls.some(c=>c[0]==='workbench.action.newGroupRight')};
+ return {open:scope.open,calls,column:()=>calls.find(c=>['vscode.open','vscode.openWith'].includes(c[0])).at(-1).viewColumn,split:()=>calls.some(c=>c[0]==='workbench.action.newGroupRight')};
 }
 const pdf={kind:'file',host_id:'mac',path:'/w/paper.pdf'};
 const sideBySide=n=>({orientation:0,groups:Array.from({length:n},()=>({size:1}))});

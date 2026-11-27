@@ -131,12 +131,17 @@ def perform(request):
                 return {'ok':False,'code':'read_only','error':'This rendered document is read-only','status':403}
             if version!=request.get('base_version'):
                 return {'ok':False,'code':'version_conflict','error':'File changed on disk; compare or reload before saving','status':409}
-            prior=raw.decode(encoding)
-            text=request.get('text')
-            if not isinstance(text,str) or '\0' in text: raise ValueError('Invalid text')
-            if '\r\n' in prior and prior.count('\r\n')==prior.count('\n'):
-                text=text.replace('\r\n','\n').replace('\n','\r\n')
-            output=text.encode(encoding)
+            if 'exact_base64' in request:
+                output=base64.b64decode(request['exact_base64'],validate=True)
+                if b'\0' in output:raise ValueError('Invalid text')
+                output.decode('utf-8-sig')
+            else:
+                prior=raw.decode(encoding)
+                text=request.get('text')
+                if not isinstance(text,str) or '\0' in text: raise ValueError('Invalid text')
+                if '\r\n' in prior and prior.count('\r\n')==prior.count('\n'):
+                    text=text.replace('\r\n','\n').replace('\n','\r\n')
+                output=text.encode(encoding)
             if len(output)>5*1024*1024:
                 return {'ok':False,'code':'too_large','error':'Text exceeds the 5 MiB save limit','status':413}
             if output==raw:return {'ok':True}
@@ -159,7 +164,13 @@ def perform(request):
         resource={'path':canonical,'name':components[-1],'mime':mimetypes.guess_type(canonical)[0] or 'application/octet-stream','size':info.st_size,'version':version,'editable':False,'document_editable':document_editable,'encoding':encoding,'newline':'crlf' if b'\r\n' in raw else 'lf','relative_path':'/'.join(components)}
         if request.get('identity') is True:
             resource['disk_identity']=[info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns]
-        return {'ok':True,'resource':resource}
+        result={'ok':True,'resource':resource}
+        if 'observed_version' in request and request['observed_version']!=version and encoding and name.lower().endswith(('.md','.markdown','.mdown','.html','.htm')):
+            end=os.fstat(descriptor)
+            if info.st_mtime_ns!=end.st_mtime_ns or len(raw)!=end.st_size:
+                return {'ok':False,'code':'version_conflict','error':'Document changed while reading; renew to try again','status':409}
+            result['document_base64']=base64.b64encode(raw).decode('ascii')
+        return result
     finally:
         for descriptor in reversed(descriptors): os.close(descriptor)
 

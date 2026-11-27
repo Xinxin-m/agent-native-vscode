@@ -6,11 +6,29 @@ function register(context,services){
  context.subscriptions.push(vscode.window.registerCustomEditorProvider('library.pdf',{
   async openCustomDocument(uri){return {uri,dispose(){}};},
   async resolveCustomEditor(document,panel){
-   const stat=await vscode.workspace.fs.stat(document.uri);if(stat.size>100*1024*1024)throw Error('This PDF exceeds the 100 MB reader limit.');
-   const data=Buffer.from(await vscode.workspace.fs.readFile(document.uri)).toString('base64');
    panel.webview.options={enableScripts:true,localResourceRoots:[vscode.Uri.joinPath(context.extensionUri,'media')]};
-   const nonce=randomBytes(24).toString('base64'),uri=n=>panel.webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri,'media',n)).with({query:'v='+encodeURIComponent(nonce)});
-   panel.webview.html=`<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}' ${panel.webview.cspSource}; worker-src blob: ${panel.webview.cspSource}; connect-src ${panel.webview.cspSource}; style-src ${panel.webview.cspSource} 'unsafe-inline';"><link rel="stylesheet" href="${uri('document.css')}"></head><body><div id="toolbar"><button id="previous">Previous page</button><button id="next">Next page</button><button id="zoomOut">Zoom out</button><button id="zoomIn">Zoom in</button><span id="status" role="status">Loading PDF…</span></div><div id="document"></div><script nonce="${nonce}">window.__PDF_BOOT__={data:'${data}'};</script><script nonce="${nonce}" type="module" src="${uri('pdf.js')}"></script></body></html>`;
+   const target=document.uri.scheme==='file'?null:await require('./document-review.cjs').targetFor(document.uri,assets.api);
+   let version,busy=false,disposed=false;
+   async function refresh(force=false){
+    if(busy||disposed)return;
+    busy=true;
+    try{
+     const stat=target?(await assets.api('/api/files/stat?'+new URLSearchParams(target))).resource:await vscode.workspace.fs.stat(document.uri);
+     const next=stat.version||[stat.size,stat.mtime].join('/');
+     if(!force&&next===version)return;
+     if(stat.size>100*1024*1024)throw Error('This PDF exceeds the 100 MB reader limit.');
+     const data=Buffer.from(await vscode.workspace.fs.readFile(document.uri)).toString('base64');
+     if(disposed)return;
+     version=next;
+     const nonce=randomBytes(24).toString('base64'),uri=n=>panel.webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri,'media',n)).with({query:'v='+encodeURIComponent(nonce)});
+     panel.webview.html=`<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}' ${panel.webview.cspSource}; worker-src blob: ${panel.webview.cspSource}; connect-src ${panel.webview.cspSource}; style-src ${panel.webview.cspSource} 'unsafe-inline';"><link rel="stylesheet" href="${uri('document.css')}"></head><body><div id="toolbar"><button id="renew">Renew</button><button id="previous">Previous page</button><button id="next">Next page</button><button id="zoomOut">Zoom out</button><button id="zoomIn">Zoom in</button><span id="status" role="status">Loading PDF…</span></div><div id="document"></div><script nonce="${nonce}">window.__PDF_BOOT__={data:'${data}'};</script><script nonce="${nonce}" type="module" src="${uri('pdf.js')}"></script></body></html>`;
+    }finally{busy=false;}
+   }
+   await refresh();
+   const timer=setInterval(()=>{if(panel.visible)void refresh().catch(()=>{});},3000);
+   timer.unref();
+   const receive=panel.webview.onDidReceiveMessage(m=>{if(m?.type==='renew')void refresh(true).catch(e=>vscode.window.showErrorMessage(e.message));});
+   panel.onDidDispose(()=>{disposed=true;clearInterval(timer);receive.dispose();});
   }
  },{webviewOptions:{retainContextWhenHidden:true}}));
  async function resolveCustomTextEditor(document,panel){

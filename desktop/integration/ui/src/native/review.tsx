@@ -42,6 +42,7 @@ function Editor(){
  const hideTimer=useRef<ReturnType<typeof setTimeout>>(undefined);
  const last=useRef<Paragraph|null>(null),selection=useRef(''),commentId=useRef(''),composer=useRef<HTMLTextAreaElement>(null);
  const html=boot.format==='html';
+ const [assets,setAssets]=useState(boot.assets),[renewal,setRenewal]=useState(0),[busy,setBusy]=useState(false);
  const [interactive,setInteractive]=useState<boolean|null>(null),[webAssets,setWebAssets]=useState(false);
  const livePreview=html&&boot.previewUrl&&!editing&&(interactive??/<script[\s>]/i.test(text));
  const fail=(e:Error)=>{setError(e.message);};
@@ -67,16 +68,18 @@ function Editor(){
    }
    if(m?.type==='review-failed'){conflict.current=true;setEditing(false);setRecover(latest.current);setStatus('Draft retained');setError(m.error);return;}
    if(!['review-update','review-conflict'].includes(m?.type))return;
-   if(m.type==='review-conflict'||latest.current!==base.current){
-    conflict.current=true;setEditing(false);setError('The source changed elsewhere. Reopen the file to load the saved version.');if(latest.current!==base.current)setRecover(latest.current);return;
+   if(m.type==='review-conflict'||(!m.force&&latest.current!==base.current)){
+    conflict.current=true;setEditing(false);setError('The source changed elsewhere. Renew to load the saved version.');if(latest.current!==base.current)setRecover(latest.current);return;
    }
+   if(latest.current!==base.current)setRecover(latest.current);
+   conflict.current=false;setError('');setAssets(m.assets);setRenewal(n=>n+1);setStatus('Renewed');
    base.current=latest.current=m.text;version.current=m.version;setText(m.text);
   };
   const shortcut=(e:KeyboardEvent)=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){e.preventDefault();void save();}};
   window.addEventListener('message',sync);window.addEventListener('keydown',shortcut);
   return()=>{window.removeEventListener('message',sync);window.removeEventListener('keydown',shortcut);};
  },[]);
- useEffect(()=>{if(comments||mode==='Diff')reviewNow();},[comments,mode,status]);
+ useEffect(()=>{if(comments||mode==='Diff')reviewNow();},[comments,mode,status,renewal]);
  useEffect(()=>{last.current=null;selection.current='';setParagraph(null);},[mode]);
  function hide(){clearTimeout(hideTimer.current);hideTimer.current=setTimeout(()=>setParagraph(null),400);}
  function point(p:Paragraph|null){if(!p){hide();return;}clearTimeout(hideTimer.current);last.current=p;setParagraph(p);}
@@ -97,6 +100,11 @@ function Editor(){
   else {const before=latest.current,after=htmlEditor.current?.deleteParagraph(p.target,before);if(after!=null)setUndo({before,after});}
   setParagraph(null);last.current=null;
  }
+ async function fileAction(action:'renew'|'rewind'){
+  setBusy(true);setError('');
+  try{await request(action,{version:version.current});setEditing(false);}
+  catch(e){fail(e as Error);}finally{setBusy(false);}
+ }
  function toggle(){
   if(editing)void save();else setMode('Preview');
   setEditing(!editing);
@@ -105,6 +113,8 @@ function Editor(){
  return <>
   <header className="review-bar">
    <nav aria-label="Document views">{['Preview','Source','Diff'].map(tab=><button key={tab} aria-pressed={mode===tab} disabled={blocked} onClick={()=>{if(editing)void save();setEditing(false);setMode(tab);}}>{tab}</button>)}</nav>
+   <button disabled={busy||(!conflict.current&&latest.current!==base.current)} onClick={()=>void fileAction('renew')}>Renew</button>
+   {mode==='Diff'&&review?.previous!=null&&<button disabled={busy||boot.readOnly||conflict.current||latest.current!==base.current} onClick={()=>void fileAction('rewind')}>Rewind to previous version</button>}
    <button aria-pressed={editing} disabled={boot.readOnly||blocked||conflict.current} title={boot.readOnly?'Read-only file':editing?'Finish editing':'Edit rendered text'} onClick={toggle}>{editing?'Edit':'Read Only'}</button>
    {html&&mode==='Preview'&&boot.previewUrl&&<button aria-pressed={!!livePreview} onClick={()=>{if(editing)void save();setEditing(false);setInteractive(!livePreview);setFind(false);}}>Interactive preview</button>}
    {livePreview&&mode==='Preview'&&<label><input type="checkbox" checked={webAssets} onChange={e=>{const enabled=e.target.checked;void request('preview-network',{enabled}).then(()=>setWebAssets(enabled)).catch(fail);}}/>Allow web assets</label>}
@@ -123,9 +133,9 @@ function Editor(){
    if(!el){hide();return;}
    const rect=el.getBoundingClientRect();point({target:el,quote:el.innerText,right:rect.right,top:rect.top});
   }} onPointerLeave={hide}>
-   {mode==='Source'?<pre tabIndex={0} aria-label="Document source">{text}</pre>:mode==='Diff'?review?review.previous===null?<p className="empty">The previous version will be kept when you make your first edit.</p>:<RenderedDocumentDiff previous={review.previous} current={text} markdown={!html}/>:<p className="empty">Loading previous version…</p>:livePreview?<iframe className="review-live-preview" title="Interactive HTML preview" src={boot.previewUrl+'?version='+encodeURIComponent(version.current)+'&network='+Number(webAssets)} sandbox="allow-scripts allow-same-origin" referrerPolicy="no-referrer"/>:html?
+   {mode==='Source'?<pre tabIndex={0} aria-label="Document source">{text}</pre>:mode==='Diff'?review?review.previous===null?<p className="empty">The previous version will be kept after the file changes.</p>:<RenderedDocumentDiff previous={review.previous} current={text} markdown={!html}/>:<p className="empty">Loading previous version…</p>:livePreview?<iframe className="review-live-preview" title="Interactive HTML preview" src={boot.previewUrl+'?version='+encodeURIComponent(version.current)+'&renewal='+renewal+'&network='+Number(webAssets)} sandbox="allow-scripts allow-same-origin" referrerPolicy="no-referrer"/>:html?
     <RenderedHtmlEditor {...props} ref={htmlEditor} renderPreview={renderPreview} readOnly={!editing} onSelection={s=>selection.current=s} onParagraph={p=>point(p?{...p,target:p}:null)} findVisible={find} findQuery={search} findNextToken={next} onFindToggle={()=>setFind(v=>!v)} onFindClose={()=>setFind(false)}/>:
-    <RenderedMarkdownEditor {...props} ref={mdEditor} readOnly={!editing} assets={boot.assets}/>}
+    <RenderedMarkdownEditor {...props} ref={mdEditor} readOnly={!editing} assets={assets}/>}
   </section>
   {comments&&<aside className="review-comments"><header><strong>Comments</strong><button aria-label="Close comments" onClick={()=>setComments(false)}>×</button></header>
    {review?.comments.map(c=><article key={c.id}>{c.quote&&<blockquote>{c.quote}</blockquote>}<p>{c.text}</p></article>)}
