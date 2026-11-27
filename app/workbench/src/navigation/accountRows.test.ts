@@ -1,5 +1,5 @@
 import {describe,it,expect} from 'vitest';
-import {accountRows,displayName,secondaryEmail,barHot} from './accountRows';
+import {accountRows,displayName,secondaryEmail,barHot,needsAccountSignIn} from './accountRows';
 describe('account rows',()=>{
  const value={accounts:[{id:'c1',tool:'claude',label:'personal',email:'a@x.test'},{id:'c1d',tool:'claude',label:'dup',email:'a@x.test',duplicate_of:'c1'}],pending_accounts:[{id:'c2',tool:'claude',label:'Easy Labs',previously_used:true,logged_in:false},{id:'x2',tool:'codex',label:'Account 2',previously_used:false}]};
  it('puts a signed-out used account in its group and an unfinished setup apart',()=>{
@@ -10,6 +10,11 @@ describe('account rows',()=>{
  it('shows the email beside a name, never twice',()=>{
   expect(displayName({label:'personal',email:'a@x.test'})).toBe('personal');expect(secondaryEmail({label:'personal',email:'a@x.test'})).toBe('a@x.test');
   expect(secondaryEmail({label:'a@x.test',email:'a@x.test'})).toBe('');expect(displayName({email:'a@x.test'})).toBe('a@x.test');
+ });
+ it('offers sign-in for a signed-in account with unreadable credentials',()=>{
+  expect(needsAccountSignIn({logged_in:true,error:'usage unavailable: credential lookup failed'})).toBe(true);
+  expect(needsAccountSignIn({logged_in:true,error:'usage endpoint HTTP 429'})).toBe(false);
+  expect(needsAccountSignIn({logged_in:true,error:''})).toBe(false);
  });
  it('turns a bar red at 90 percent',()=>{expect(barHot(89.9)).toBe(false);expect(barHot(90)).toBe(true);});
 });

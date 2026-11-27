@@ -44,7 +44,7 @@ function Editor(){
  const html=boot.format==='html';
  const [assets,setAssets]=useState(boot.assets),[renewal,setRenewal]=useState(0),[busy,setBusy]=useState(false);
  const [interactive,setInteractive]=useState<boolean|null>(null),[webAssets,setWebAssets]=useState(false);
- const livePreview=html&&boot.previewUrl&&!editing&&(interactive??/<script[\s>]/i.test(text));
+ const livePreview=html&&boot.previewUrl&&!editing&&(interactive??/<script[\s>]|\son(?:click|load)\s*=|\btarget\s*=\s*["']?_blank\b|\\[[(]|\$\$|\$[^\s$<][^$<\n]*\$/i.test(text));
  const fail=(e:Error)=>{setError(e.message);};
  function reviewNow(){request('review').then(setReview).catch(fail);}
  function persist(){

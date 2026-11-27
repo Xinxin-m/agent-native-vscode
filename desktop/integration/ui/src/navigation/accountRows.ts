@@ -12,3 +12,8 @@ export const secondaryEmail=(a:any)=>a.label&&a.email&&a.label!==a.email?a.email
 /** A usage bar turns red at 90 percent and above. */
 export const barHot=(percent:number)=>percent>=90;
 export const cleanPercent=(percent:number)=>Math.max(0,Math.min(100,percent));
+
+/** A native session can still exist while Library cannot read its credentials. */
+export function needsAccountSignIn(account:{logged_in?:boolean;error?:string}){
+ return account.logged_in===true&&account.error==='usage unavailable: credential lookup failed';
+}

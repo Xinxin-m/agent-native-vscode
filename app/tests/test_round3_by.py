@@ -12,7 +12,7 @@ import notifications as n
 import search_api
 import sidebar
 
-SID = 'ab03d939-4f7c-4f0f-903f-0eaad80cc845'
+SID = 'abcdef12-3456-4abc-8def-012345678901'
 
 
 class SearchBySessionIdTests(unittest.TestCase):
@@ -26,23 +26,23 @@ class SearchBySessionIdTests(unittest.TestCase):
                  'codex-other': {'id': 'ffff0000-0000-4000-8000-000000000001', 'source': 'codex', 'ts_last': '2026-11-22T09:00:00Z'}}
         (d / 'index.json').write_text(json.dumps(index))
         (d / 'chats').mkdir()
-        (d / 'chats' / 'codex-other.json').write_text(json.dumps({'turns': [{'role': 'user', 'text': 'mentions ab03d9 in text'}]}))
+        (d / 'chats' / 'codex-other.json').write_text(json.dumps({'turns': [{'role': 'user', 'text': 'mentions abcdef in text'}]}))
         self.d = d
 
     def keys(self, q):
         return [(r['key'], r.get('match')) for r in search_api.search(self.d, {'q': q})['results']]
 
     def test_full_id_prefix_and_key_prefix_find_the_chat_first(self):
-        for q in (SID, SID.upper(), 'ab03d9', 'claude-ab03d939-4f7c', 'claude-' + SID):
+        for q in (SID, SID.upper(), 'abcdef', 'claude-abcdef12-3456', 'claude-' + SID):
             self.assertEqual(self.keys(q)[0], ('claude-' + SID, 'session_id'), q)
 
     def test_subagents_are_not_prefix_hits_and_text_hits_follow(self):
-        found = self.keys('ab03d9')
+        found = self.keys('abcdef')
         self.assertEqual([k for k, _ in found], ['claude-' + SID, 'codex-other'])
         self.assertEqual(found[1][1], None)
 
     def test_short_or_non_hex_query_is_plain_text(self):
-        self.assertEqual(self.keys('ab03d'), [('codex-other', None)])  # text hit only, no id hit
+        self.assertEqual(self.keys('abcde'), [('codex-other', None)])  # text hit only, no id hit
         self.assertEqual(search_api.session_id_query('hello world'), None)
 
 

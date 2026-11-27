@@ -4,6 +4,7 @@ import posixpath
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
 
 import file_service as fs
@@ -42,6 +43,8 @@ addEventListener('gesturechange',function(e){e.preventDefault();zoomAt(g*e.scale
 addEventListener('gestureend',function(e){e.preventDefault();},{passive:false,capture:true});
 })();"""
 HTML_MIMES = ('text/html', 'application/xhtml+xml')
+RUNTIME_DIR = Path(__file__).resolve().parent / 'vscode-library' / 'media' / 'preview'
+RUNTIME_FILES = ('katex.min.js', 'auto-render.min.js', 'runtime.js')
 PINCH_HTML = ('<script>' + PINCH_JS + '</script>').encode()
 PINCH_XHTML = ('<script xmlns="http://www.w3.org/1999/xhtml"><![CDATA[' + PINCH_JS + ']]></script>').encode()
 
@@ -91,6 +94,26 @@ class PreviewServer:
                     self.send_error(410, 'Preview expired; refresh from the workbench')
                     return
                 path = urlsplit(self.path).path
+                runtime_prefix = f'/preview-runtime/{token}/'
+                if path.startswith(runtime_prefix):
+                    asset = path[len(runtime_prefix):]
+                    if asset not in RUNTIME_FILES:
+                        self.send_error(404)
+                        return
+                    try:
+                        body = (RUNTIME_DIR / asset).read_bytes()
+                    except OSError:
+                        self.send_error(404)
+                        return
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/javascript')
+                    self.send_header('Content-Length', str(len(body)))
+                    self.send_header('X-Content-Type-Options', 'nosniff')
+                    self.send_header('Cross-Origin-Resource-Policy', 'same-origin')
+                    self.end_headers()
+                    if self.command != 'HEAD':
+                        self.wfile.write(body)
+                    return
                 token_path = path.startswith('/p/')
                 if token_path:
                     fields = path.split('/', 3)
@@ -125,6 +148,14 @@ class PreviewServer:
                     return
                 if raw is not None:
                     raw = with_pinch(resource['mime'], raw)
+                    if resource['mime'] in HTML_MIMES:
+                        scripts = ''.join(f'<script src="{runtime_prefix}{asset}"></script>' for asset in RUNTIME_FILES).encode()
+                        if resource['mime'] == 'text/html':
+                            raw += scripts
+                        else:
+                            end = raw.rfind(b'</html>')
+                            if end >= 0:
+                                raw = raw[:end] + scripts + raw[end:]
                 self.send_response(200)
                 self.send_header('Content-Type', resource['mime'])
                 self.send_header('Content-Length', str(len(raw) if raw is not None else resource['size']))
@@ -137,7 +168,7 @@ class PreviewServer:
                     "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' blob:" + network + "; "
                     "style-src 'self' 'unsafe-inline'" + network + "; img-src 'self' data: blob:" + network + "; "
                     "font-src 'self' data:" + network + "; connect-src 'self'" + network + "; object-src 'none'; base-uri 'none'; form-action 'none'; "
-                    "frame-ancestors " + scope['app_origin'] + "; sandbox allow-scripts allow-same-origin")
+                    "frame-src 'self' about: data: blob:; frame-ancestors 'self' " + scope['app_origin'] + "; sandbox allow-scripts allow-same-origin")
                 self.end_headers()
                 if self.command != 'HEAD':
                     self.wfile.write(raw)

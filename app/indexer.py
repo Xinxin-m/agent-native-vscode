@@ -805,7 +805,7 @@ def content_sig(chat):
     return "%d:%d:%s" % (chat["n_user"], chat["n_answer"], chat["ts_last"])
 
 
-def meta_of(chat):
+def meta_of(chat, source_signature=None):
     from enrich import deterministic_title
     task = next((title for t in chat["turns"] if t["role"] == "user" and
                  not t.get("internal_handoff_seed") and (title := deterministic_title(t["text"]))), "")
@@ -826,7 +826,7 @@ def meta_of(chat):
         "attention_required": bool(chat.get("attention_required", False)),
         "n_files": len(chat["files_changed"]),
         "first_prompt": first_user[:300], "task_title": task,
-        "src_sig": src_sig(chat["files_all"]),
+        "src_sig": src_sig(chat["files_all"]) if source_signature is None else source_signature,
         "node": chat.get("node", "mac"),
         "model_main": chat.get("model_main", ""),
         "models": chat.get("models", {}),
@@ -1134,9 +1134,10 @@ def main():
     min_answers = int(cfg.get("min_answer_msgs", 1))
     seen_keys, n_new, n_skip, n_drop, n_noanswer = set(), 0, 0, 0, 0
     for key, (source, by_node) in units.items():
-        paths = [p for ps in by_node.values() for p in ps]
+        paths = {p for ps in by_node.values() for p in ps}
+        signature = src_sig(paths)
         prev = index.get(key)
-        if (prev and prev.get("src_sig") == src_sig(paths)
+        if (prev and prev.get("src_sig") == signature
                 and prev.get("meta_v") == META_V):
             # unchanged since the last run, but still honour the current filter
             if prev.get("n_answer", 1) < min_answers and not prev.get('is_child') and not prev.get('failure'):
@@ -1167,7 +1168,8 @@ def main():
         chat['source_locations'] = source_locations(by_node, cfg)
         chat['account_attribution'] = 'verified' if chat.get('account_id') else 'unknown'
         atomic_json_dump(chat, cpath)
-        record = meta_of(chat)
+        # The file can grow during or after parsing. A later scan must see that change.
+        record = meta_of(chat, signature)
         preserve_execution_metadata(record, chat)
         index[chat["key"]] = record
         seen_keys.add(chat["key"])

@@ -12,9 +12,9 @@ from pathlib import Path
 
 import sessions_cli as sc
 
-CLAUDE_ID = "f743a19d-11a0-41c3-adb7-aee6194838c3"
+CLAUDE_ID = "c1a0de00-1111-4111-8111-000000000001"
 CLAUDE_KEY = "claude-" + CLAUDE_ID
-CODEX_ID = "01a1e338-cb16-7010-8b30-ca50a551df66"
+CODEX_ID = "c0de0000-2222-4222-8222-000000000002"
 CODEX_KEY = "codex-" + CODEX_ID
 AUTH_TEXT = ("Failed to authenticate: this login reached its time limit and cannot be renewed. "
              "Run `claude auth login` to sign in again")
@@ -240,31 +240,31 @@ class CommandTests(Fixture):
             claude_line("assistant", "answer", self.t - 100)])
         sub = self.claude / "-work" / CLAUDE_ID / "subagents"
         write_lines(sub / "agent-a1.jsonl", [claude_line("assistant", "sub", self.t - 50)])
-        write_lines(self.claude / "-work" / "f743ffff-0000-0000-0000-000000000000.jsonl", [claude_line("user", "other", self.t - 40)])
+        write_lines(self.claude / "-work" / "c1a0ffff-0000-0000-0000-000000000000.jsonl", [claude_line("user", "other", self.t - 40)])
         (self.data / "index.json").write_text(json.dumps({
             CLAUDE_KEY: {"key": CLAUDE_KEY, "source": "claude", "id": CLAUDE_ID, "file": str(self.claude / "-work" / (CLAUDE_ID + ".jsonl")),
                          "cwd": "/work", "title_seed": "Seed title", "ts_first": iso(self.t - 300), "ts_last": iso(self.t - 100),
                          "node": "mac", "model_main": "claude-test-1", "account_id": "claude-default"},
-            "claude-f743ffff-0000-0000-0000-000000000000": {"key": "claude-f743ffff-0000-0000-0000-000000000000", "source": "claude", "id": "f743ffff-0000-0000-0000-000000000000"},
+            "claude-c1a0ffff-0000-0000-0000-000000000000": {"key": "claude-c1a0ffff-0000-0000-0000-000000000000", "source": "claude", "id": "c1a0ffff-0000-0000-0000-000000000000"},
             CLAUDE_KEY + "-agent-a1": {"key": CLAUDE_KEY + "-agent-a1", "source": "claude", "id": CLAUDE_ID + "-agent-a1"}}))
         (self.data / "enrich.json").write_text(json.dumps({CLAUDE_KEY: {"title": "Enriched title"}}))
 
     def test_resolve_accepts_key_uuid_and_prefixes(self):
         ctx = sc.Context()
-        for q in (CLAUDE_KEY, CLAUDE_ID, "claude-f743a19d", "f743a19d", "F743A19D-11A0"):
+        for q in (CLAUDE_KEY, CLAUDE_ID, "claude-c1a0de00", "c1a0de00", "C1A0DE00-1111"):
             self.assertEqual(sc.resolve(ctx, q), CLAUDE_KEY)
 
     def test_resolve_reports_ambiguity_and_misses(self):
         ctx = sc.Context()
         with self.assertRaises(SystemExit) as e:
-            sc.resolve(ctx, "f743")
+            sc.resolve(ctx, "c1a0")
         self.assertIn("ambiguous", str(e.exception))
         with self.assertRaises(SystemExit) as e:
             sc.resolve(ctx, "nothing-here")
         self.assertIn("no session matches", str(e.exception))
 
     def test_show_json(self):
-        d = json.loads(self.cli("show", "f743a19d-11", "--json"))
+        d = json.loads(self.cli("show", "c1a0de00-11", "--json"))
         self.assertEqual((d["provider"], d["session_id"], d["title"], d["model"], d["account"]),
                          ("claude", CLAUDE_ID, "Enriched title", "claude-test-1", "claude-default"))
         self.assertEqual(d["subagent_transcripts"], 1)
@@ -288,7 +288,7 @@ class CommandTests(Fixture):
         self.assertEqual(parts[2], "cwd /work")
         self.assertTrue(parts[3].startswith("transcript ") and parts[3].endswith(CLAUDE_ID + ".jsonl"))
         self.assertEqual(parts[4], "account claude-default")
-        self.assertEqual(parts[5], "status: sessions show claude-f743a19d")
+        self.assertEqual(parts[5], "status: sessions show claude-c1a0de00")
 
     def test_recent_lists_chat_once_with_subagent_activity(self):
         d = json.loads(self.cli("recent", "--hours", "1", "--json"))

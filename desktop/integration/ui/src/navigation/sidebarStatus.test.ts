@@ -18,18 +18,18 @@ describe('row status priority',()=>{
  it('local broker state counts as waiting or working',()=>{expect(rowStatus(null,false,{awaiting:true})).toBe('waiting');expect(rowStatus('idle',true,{running:true})).toBe('working');});
 });
 describe('search by session ID',()=>{
- const chat={key:'claude-ab03d939-4f7c-4f0f-903f-0eaad80cc845',id:'ab03d939-4f7c-4f0f-903f-0eaad80cc845',title:'Weekly summary'};
+ const chat={key:'claude-abcdef12-3456-4abc-8def-012345678901',id:'abcdef12-3456-4abc-8def-012345678901',title:'Weekly summary'};
  it('full ID, prefix, key prefix, any case; short or non-hex queries do not',()=>{
-  expect(matchesSessionId(chat,'ab03d939-4f7c-4f0f-903f-0eaad80cc845')).toBe(true);
-  expect(matchesSessionId(chat,'AB03D9')).toBe(true);
-  expect(matchesSessionId(chat,'claude-ab03d939')).toBe(true);
-  expect(matchesSessionId(chat,'ab03d')).toBe(false);
+  expect(matchesSessionId(chat,'abcdef12-3456-4abc-8def-012345678901')).toBe(true);
+  expect(matchesSessionId(chat,'ABCDEF')).toBe(true);
+  expect(matchesSessionId(chat,'claude-abcdef12')).toBe(true);
+  expect(matchesSessionId(chat,'abcde')).toBe(false);
   expect(matchesSessionId(chat,'weekly')).toBe(false);
-  expect(matchesSessionId(chat,'ab03d939-4f7c-4f0f-903f-0eaad80cc846')).toBe(false);
+  expect(matchesSessionId(chat,'abcdef12-3456-4abc-8def-012345678902')).toBe(false);
  });
  it('history search finds a sub-agent by its ID, first',()=>{
-  const rows=[{key:'claude-root',title:'ab03d939 notes',ts_last:'2026-11-23'},{...chat,parent_key:'claude-root',ts_last:'2026-11-01'}];
-  expect(historyChats(rows,'','ab03d939').map(c=>c.key)).toEqual([chat.key,'claude-root']);
+  const rows=[{key:'claude-root',title:'abcdef12 notes',ts_last:'2026-11-23'},{...chat,parent_key:'claude-root',ts_last:'2026-11-01'}];
+  expect(historyChats(rows,'','abcdef12').map(c=>c.key)).toEqual([chat.key,'claude-root']);
  });
 });
 describe('relative time',()=>{

@@ -79,7 +79,7 @@ function FileViewerContent({resource,blocked}:{resource:Resource;blocked:React.R
  function resizeSplit(event:React.PointerEvent){event.preventDefault();const parent=content.current;if(!parent)return;const rect=parent.getBoundingClientRect(),vertical=matchMedia('(max-width:650px)').matches;const move=(e:PointerEvent)=>setSplitRatio(Math.max(15,Math.min(85,((vertical?e.clientY-rect.top:e.clientX-rect.left)/(vertical?rect.height:rect.width))*100)));const up=()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);};window.addEventListener('pointermove',move);window.addEventListener('pointerup',up);}
  const file=doc.file,kind=file?viewerKind(file.name,file.mime):'unsupported',rich=kind==='markdown'||kind==='html';
  const activeMode=mode==='diff'?'diff':rich?mode:'source';
- const interactiveHtml=interactiveChoice??(kind==='html'&&!doc.dirty&&(/<script[\s>]/i.test(doc.text)||Boolean(doc.error&&!doc.text)));
+ const interactiveHtml=interactiveChoice??(kind==='html'&&!doc.dirty&&(/<script[\s>]|\son(?:click|load)\s*=|\btarget\s*=\s*["']?_blank\b|\\[[(]|\$\$|\$[^\s$<][^$<\n]*\$/i.test(doc.text)||Boolean(doc.error&&!doc.text)));
  const showInteractiveHtml=kind==='html'&&interactiveHtml&&(activeMode==='render'||activeMode==='split');
  const editorUnavailable=Boolean(doc.error&&!doc.text);
  const useInteractiveFallback=editorUnavailable&&showInteractiveHtml&&!doc.dirty;

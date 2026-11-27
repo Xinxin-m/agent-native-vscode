@@ -40,9 +40,15 @@ class LiveLibrary:
     def merge(self, saved):
         with self.lock:
             result = dict(saved)
-            for key, chat in self.records.items():
-                meta = indexer.meta_of(chat)
-                indexer.preserve_execution_metadata(meta, saved.get(key, {}))
+            for key, (chat, signature) in self.records.items():
+                previous = saved.get(key, {})
+                saved_signature = previous.get('src_sig')
+                if saved_signature and saved_signature != signature:
+                    paths = set(previous.get('files_all', ())) | set(chat['files_all'])
+                    if saved_signature == indexer.src_sig(paths):
+                        continue  # The archive already published the newer rollout while we waited for its lock.
+                meta = indexer.meta_of(chat, signature)
+                indexer.preserve_execution_metadata(meta, previous)
                 result[key] = meta
             indexer.resolve_lineage(result)
             return result
@@ -108,10 +114,12 @@ class LiveLibrary:
             indexer.preserve_execution_metadata(chat, previous)
             chat['source_locations'] = indexer.source_locations(by_node, cfg)
             chat['account_attribution'] = 'verified' if chat.get('account_id') else 'unknown'
-            self.records[key] = chat
+            # Keep the signature from before the read, even if the file grew while parsing.
+            self.records[key] = (chat, signature)
             self.signatures[key] = signature
             self.revision += 1
 
     def chat(self, key):
         with self.lock:
-            return self.records.get(key)
+            record = self.records.get(key)
+            return record[0] if record else None

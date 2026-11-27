@@ -63,7 +63,7 @@ def publish(library, live_keys=None):
         if saved is None:
             raise RuntimeError('Archive index unreadable; preserving existing data')
         merged = library.merge(saved)
-        changed = {key:chat for key,chat in library.records.items()
+        changed = {key:chat for key,(chat, _) in library.records.items()
                    if saved.get(key, {}).get('src_sig') != merged[key].get('src_sig')}
         if changed:
             for key, chat in changed.items():

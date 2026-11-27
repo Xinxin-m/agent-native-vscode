@@ -3,7 +3,7 @@ import {resetCountdown,usageSnapshot} from './quotaReset';
 import {useEffect,useRef,useState} from 'react';
 import {api,available} from '../api/client';
 import {useWorkbench} from '../state/context';
-import {accountRows,displayName,secondaryEmail,barHot,cleanPercent} from './accountRows';
+import {accountRows,displayName,secondaryEmail,barHot,cleanPercent,needsAccountSignIn} from './accountRows';
 import {Plus,RefreshCw,Trash2,Copy} from 'lucide-react';
 import {IconButton} from './Sidebar';
 import './accounts.css';
@@ -38,8 +38,9 @@ export function AccountsPanel({onGitHubAccounts}:{onGitHubAccounts?:(connect?:bo
    if(!Array.isArray(response?.accounts))throw Error('The account service returned an invalid account list. Try refreshing.');
    setValue(response);
    const rows=[...response.accounts,...(response.pending_accounts||[])],cur=loginRef.current,row=cur&&rows.find(a=>a.id===cur.id);
-   if(cur?.login_id&&row?.logged_in&&row.email&&!row.login){setLogin(null);notify('Connected '+row.email);void refresh();}
-   else if(cur?.login_id&&row&&!row.login&&row.login_error&&!cur.failed)setLogin({...cur,failed:true,message:row.login_error});
+   if(cur?.login_id&&row&&!row.login&&row.login_error&&!cur.failed)setLogin({...cur,failed:true,message:row.login_error});
+   else if(cur?.login_id&&!cur.failed&&row?.logged_in&&row.email&&!row.login&&!needsAccountSignIn(row)){setLogin(null);notify('Connected '+row.email);void refresh();}
+   else if(cur?.login_id&&!cur.failed&&row&&!row.login&&needsAccountSignIn(row))setLogin({...cur,failed:true,message:'Library still cannot access this account’s credentials. Try signing in again.'});
    else setLogin(current=>{
     if(!current){
      const active=rows.find(a=>a.login?.login_id||a.renewal_pending||a.login_starting);
@@ -53,7 +54,17 @@ export function AccountsPanel({onGitHubAccounts}:{onGitHubAccounts?:(connect?:bo
   }catch(e){setError(e.message)}
   finally{setLoaded(true)}
  }
- useEffect(()=>{void load();void loadGithub();const refreshGithub=()=>void loadGithub();window.addEventListener('library-refresh',refreshGithub);return()=>window.removeEventListener('library-refresh',refreshGithub);},[]);
+ useEffect(()=>{
+  const reloadAccounts=()=>void load();
+  const reload=()=>{reloadAccounts();void loadGithub();};
+  reload();
+  window.addEventListener('library-refresh',reload);
+  window.addEventListener('focus',reloadAccounts);
+  return()=>{
+   window.removeEventListener('library-refresh',reload);
+   window.removeEventListener('focus',reloadAccounts);
+  };
+ },[]);
  const codeRequired=login?.code_required??login?.needs_code??false;
  const waitingId=login&&!login.failed&&(login.renewal_pending||login.login_pending||(login.login_id&&!codeRequired))?login.id:'';
  useEffect(()=>{
@@ -94,9 +105,9 @@ export function AccountsPanel({onGitHubAccounts}:{onGitHubAccounts?:(connect?:bo
  async function submitCode(e:any){e.preventDefault();if(!login||!code.trim())return;setBusy(login.id);setNote(null);try{
   await api('/api/accounts/login/code',{id:login.id,login_id:login.login_id,code:code.trim()});setCode('');
   const result=await api('/api/accounts/verify',{id:login.id});if(result.accounts)setValue(result);else await load();
-  const verified=result.accounts?.find((a:any)=>a.id===login.id);if(verified?.logged_in===true){setLogin(null);notify('Connected '+verified.email);}else setNote({id:login.id,text:result.pending_accounts?.find(a=>a.id===login.id)?.error||'Sign-in is not verified yet. Finish the provider login, then check again.'});await refresh();
+  const verified=result.accounts?.find((a:any)=>a.id===login.id);if(verified?.logged_in===true&&!needsAccountSignIn(verified)){setLogin(null);notify('Connected '+verified.email);}else setNote({id:login.id,text:result.pending_accounts?.find(a=>a.id===login.id)?.error||'Sign-in is not verified yet. Finish the provider login, then check again.'});await refresh();
  }catch(e:any){setNote({id:login.id,text:e.message||'Could not finish sign-in.'});}finally{setBusy('')}}
- async function action(id:string,kind:string,hint?:string){setBusy(id||kind);setError('');setNote(null);try{if(kind==='login'||kind==='login-idle'){await beginLogin(id,kind==='login-idle',hint);}else{const result=await api('/api/accounts/'+kind,id?{id}:{});if(result.accounts)setValue(result);else await load();if(kind==='verify'){const verified=result.accounts?.find(a=>a.id===id);if(verified?.logged_in===true){setLogin(null);notify('Connected '+verified.email);}else setNote({id,text:result.pending_accounts?.find(a=>a.id===id)?.error||'Sign-in is not verified yet. Finish the provider login, then check again.'});}await refresh();}}catch(e:any){if(id&&kind!=='refresh')setNote({id,text:e.message});else setError(e.message)}finally{setBusy('')}}
+ async function action(id:string,kind:string,hint?:string){setBusy(id||kind);setError('');setNote(null);try{if(kind==='login'||kind==='login-idle'){await beginLogin(id,kind==='login-idle',hint);}else{const result=await api('/api/accounts/'+kind,id?{id}:{});if(result.accounts)setValue(result);else await load();if(kind==='verify'){const verified=result.accounts?.find(a=>a.id===id);if(verified?.logged_in===true&&!needsAccountSignIn(verified)){setLogin(null);notify('Connected '+verified.email);}else setNote({id,text:result.pending_accounts?.find(a=>a.id===id)?.error||'Sign-in is not verified yet. Finish the provider login, then check again.'});}await refresh();}}catch(e:any){if(id&&kind!=='refresh')setNote({id,text:e.message});else setError(e.message)}finally{setBusy('')}}
  async function signOut(a:any,force=false){setBusy(a.id);setNote(null);try{const result=await api('/api/accounts/logout',{id:a.id,...(force?{force:true}:{})});if(result.accounts)setValue(result);else await load();await refresh();}catch(e:any){if(e.status===404)setNoLogout(true);else if(e.code==='logout_busy')setNote({id:a.id,force:true,text:'Chats may be running on this account.'});else setNote({id:a.id,text:e.message});}finally{setBusy('')}}
  async function saveName(a:any,text:string,fromBlur:boolean){
   const next=text.trim();
@@ -137,12 +148,12 @@ export function AccountsPanel({onGitHubAccounts}:{onGitHubAccounts?:(connect?:bo
  const noteBox=(id:string)=>note?.id===id&&<p role="alert" className="inline-error account-note">{note.text}{note.force&&<> <button disabled={!!busy} onClick={()=>{const a=[...rows.claude,...rows.codex].find(x=>x.id===id);if(a)void signOut(a,true);}}>Sign out anyway</button><button onClick={()=>setNote(null)}>Cancel</button></>}</p>;
  return <section className="accounts-panel"><div className="settings-section-heading accounts-heading"><h2 className="sr-only">Connected accounts</h2><div className="account-tools"><IconButton label="Refresh account usage" disabled={!!busy} onClick={()=>action('','refresh')}><RefreshCw size={16}/></IconButton><button className="account-add" aria-expanded={adding} onClick={()=>setAdding(v=>!v)}><Plus size={15}/>Add account</button></div></div>{error&&<p role="alert" className="inline-error">{error}</p>}
  {adding&&<form className="add-account" onSubmit={add}><select aria-label="New account provider" value={tool} onChange={e=>setTool(e.target.value)}><option value="claude">Claude</option><option value="codex">Codex</option></select><input aria-label="Account name (optional)" placeholder="Name (optional)" maxLength={60} value={name} onChange={e=>setName(e.target.value)}/><button disabled={!!busy}>Continue in browser</button><button type="button" onClick={()=>{setAdding(false);setAddError('')}}>Cancel</button>{addError&&<p role="alert" className="inline-error">{addError}</p>}</form>}
- {!loaded&&!error&&<p role="status">Loading accounts…</p>}{loaded&&(['claude','codex'] as const).map(provider=><section className="account-provider" key={provider} aria-label={provider==='claude'?'Claude':'Codex'}><h3>{provider==='claude'?'Claude':'Codex'}</h3>{rows[provider].map(a=>{const signedIn=a.logged_in&&!!a.email;return <div className="account-row" key={a.id} data-account={a.id}><div className="account-heading"><div className="account-identity">
+ {!loaded&&!error&&<p role="status">Loading accounts…</p>}{loaded&&(['claude','codex'] as const).map(provider=><section className="account-provider" key={provider} aria-label={provider==='claude'?'Claude':'Codex'}><h3>{provider==='claude'?'Claude':'Codex'}</h3>{rows[provider].map(a=>{const signedIn=a.logged_in&&!!a.email,needsSignIn=needsAccountSignIn(a);return <div className="account-row" key={a.id} data-account={a.id}><div className="account-heading"><div className="account-identity">
    {editing?.id===a.id?<input className="nm-in" aria-label="Display name" autoFocus maxLength={60} value={editing.value} onFocus={e=>e.currentTarget.select()} onChange={e=>setEditing({id:a.id,value:e.target.value})} onKeyDown={e=>{if(e.key==='Enter'){e.preventDefault();void saveName(a,editing.value,false);}else if(e.key==='Escape'){skipBlur.current=true;setEditing(null);}}} onBlur={()=>{if(skipBlur.current){skipBlur.current=false;return;}void saveName(a,editing.value,true);}}/>:<span className="nm" role="button" tabIndex={0} title={noRename?undefined:'Click to rename'} onClick={()=>startEdit(a)} onKeyDown={e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();startEdit(a);}}}>{displayName(a)}</span>}
    {a.plan&&<span className="plan">{a.plan}</span>}{secondaryEmail(a)&&<div className="em">{secondaryEmail(a)}</div>}
    {editing?.id===a.id&&editing.error&&<div className="inline-error" role="alert">{editing.error}</div>}
    {signedIn?<div className="snap">{[a.org?.toLowerCase()===a.email?.toLowerCase()+"'s organization"?'':a.org,usageSnapshot(a,now).label].filter(Boolean).join(' · ')}</div>:<div className="snap">Signed out</div>}
-  </div><div className="account-actions">{!a.is_default&&!a.global&&<IconButton label={'Remove '+(a.email||a.label)} disabled={!!busy} onClick={()=>remove(a)}><Trash2 size={15}/></IconButton>}{signedIn?!noLogout&&<button disabled={!!busy} onClick={()=>signOut(a)}>Sign out</button>:<button disabled={!!busy} onClick={()=>action(a.id,'login')}>Sign in again</button>}</div></div>
+  </div><div className="account-actions">{!a.is_default&&!a.global&&<IconButton label={'Remove '+(a.email||a.label)} disabled={!!busy} onClick={()=>remove(a)}><Trash2 size={15}/></IconButton>}{signedIn&&!needsSignIn?!noLogout&&<button disabled={!!busy} onClick={()=>signOut(a)}>Sign out</button>:<button disabled={!!busy} onClick={()=>action(a.id,'login')}>{needsSignIn?'Sign in':'Sign in again'}</button>}</div></div>
   {noteBox(a.id)}{signedIn&&<AccountWarning account={a} accounts={connected} onAccounts={()=>{void load();void refresh()}}/>}{signedIn&&((a.windows||[]).length?<div className="account-quotas">{(a.windows||[]).map((w,i)=><div className="quota" key={w.kind+i}><span>{w.label||w.kind}</span>{w.percent==null?<span/>:<span className="quota-bar" role="img" aria-label={Math.round(w.percent)+'% used'}><i className={barHot(w.percent)?'hot':undefined} style={{width:cleanPercent(w.percent)+'%'}}/></span>}<span className="quota-percent">{w.percent==null?'Unknown':Math.round(w.percent)+'%'}</span><QuotaReset value={w.resets_at} now={now}/></div>)}</div>:<small className="quota-reset">Reset schedule unavailable</small>)}{signedIn&&a.credits?.balance!=null&&<small className="quota-reset">Workspace credits: {a.credits.balance}</small>}{signedIn&&a.error&&<small className="inline-error">{a.error}</small>}{loginBox(a.id)}</div>})}{!rows[provider].length&&<p className="empty-note">No {provider==='claude'?'Claude':'Codex'} accounts yet.</p>}</section>)}
  {onGitHubAccounts&&<section className="account-provider"><h3>GitHub</h3>{githubError?<p role="alert" className="inline-error">{githubError}</p>:github===null?<p>Loading GitHub accounts…</p>:github.length?github.map(a=><div className="account-row" key={a.id}><strong>{a.label}</strong></div>):<p className="empty-note">No connected GitHub accounts.</p>}{github!==null&&!github.length&&<button disabled={githubBusy} onClick={()=>void loadGithub(true)}>Connect GitHub</button>}</section>}
  {login&&![...rows.incomplete,...rows.claude,...rows.codex].some(a=>a.id===login.id)&&loginBox(login.id)}

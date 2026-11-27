@@ -118,3 +118,39 @@ class LiveLibraryTests(unittest.TestCase):
             self.append('event_msg', {'type':'agent_message','message':'new reply'})
             self.assertEqual(live_refresh.publish(self.live), 1)
             self.assertEqual(json.loads((chats/(self.key+'.json')).read_text())['turns'][-1]['text'], 'new reply')
+
+    def test_publish_retries_when_codex_finishes_after_the_rollout_was_read(self):
+        import live_refresh
+        self.start()
+        chats = self.root / 'cleaned'
+        chats.mkdir()
+        archive = self.root / 'index.json'
+        archive.write_text('{}')
+        config = self.root / 'config.json'
+        config.write_text(json.dumps(self.cfg))
+        parse_unit = indexer.parse_unit
+
+        def finish_after_read(*args):
+            chat = parse_unit(*args)
+            self.append('response_item', {'type': 'message', 'role': 'assistant',
+                                          'phase': 'final_answer', 'content': [{'type': 'output_text', 'text': 'Final answer'}]})
+            self.append('event_msg', {'type': 'task_complete', 'last_agent_message': 'Final answer'})
+            return chat
+
+        with patch.object(indexer, 'DATA', str(self.root)), patch.object(indexer, 'INDEX', str(archive)), \
+             patch.object(indexer, 'CHATS', str(chats)), patch.object(indexer, 'CONFIG', str(config)):
+            with patch.object(indexer, 'parse_unit', side_effect=finish_after_read):
+                live_refresh.publish(self.live)
+            self.assertEqual(live_refresh.publish(self.live), 1)
+            transcript = json.loads((chats / (self.key + '.json')).read_text())
+            self.assertEqual([(turn['role'], turn['text']) for turn in transcript['turns']],
+                             [('user', 'Brand new chat'), ('assistant', 'Final answer')])
+            self.assertEqual(live_refresh.publish(self.live), 0)
+
+    def test_older_live_snapshot_does_not_replace_a_newer_archive_snapshot(self):
+        self.start()
+        self.live.refresh({}, self.cfg)
+        self.append('event_msg', {'type': 'agent_message', 'message': 'Final answer'})
+        saved = LiveLibrary(interval=0).snapshot({}, self.cfg)
+        self.assertEqual(self.live.merge(saved), saved)
+        self.assertEqual(saved[self.key]['n_asst'], 1)
